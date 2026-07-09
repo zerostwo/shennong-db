@@ -43,5 +43,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ${DOCKERHUB_IMAGE}:latest
+            ${{ env.DOCKERHUB_IMAGE }}:latest
           platforms: linux/amd64

@@ -5,16 +5,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY pyproject.toml README.md /app/
 COPY shennong_db /app/shennong_db
 COPY sql /app/sql
 
-RUN chmod -R a+rX /app \
-    && pip install --no-cache-dir .
+RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 
