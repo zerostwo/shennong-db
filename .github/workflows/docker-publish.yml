@@ -22,15 +22,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Verify Docker Hub token exists
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "::error::Missing DOCKERHUB_TOKEN secret. Please set it in repo Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
       - name: Login to Docker Hub
         uses: docker/login-action@v4
         with:
           username: zerostwo
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # Keep Node 20-compatible actions happy while your token migration finishes.
-      - name: Pin legacy Node runtime allowance
-        run: echo "ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true" >> "${GITHUB_ENV}"
 
       - name: Build and push
         uses: docker/build-push-action@v6
