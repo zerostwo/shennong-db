@@ -101,7 +101,8 @@ continue lazy pagination without loading a full matrix.
 
 ## R Client
 
-The R client lives in `clients/r/ShennongData` and is loaded as
+The R client is now published as a standalone package in this workspace at
+`/home/duansq/dev/packages/shennong-data`, and is loaded as
 `library(ShennongData)`. It is lazy by default: `sn_load_data()` creates a
 remote dataset handle only, while `filter()` and `select()` record query
 constraints. Data is fetched from `/v1/query` only when `sn_collect()`,
@@ -110,7 +111,7 @@ constraints. Data is fetched from `/v1/query` only when `sn_collect()`,
 Install from the local source tree:
 
 ```bash
-R CMD INSTALL clients/r/ShennongData
+R CMD INSTALL /home/duansq/dev/packages/shennong-data
 ```
 
 Example:
