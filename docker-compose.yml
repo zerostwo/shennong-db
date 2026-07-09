@@ -1,0 +1,82 @@
+services:
+  api:
+    build: .
+    user: "${SHENNONG_UID:-1000}:${SHENNONG_GID:-1000}"
+    environment:
+      SHENNONG_ENVIRONMENT: production
+      SHENNONG_DOCS_ENABLED: ${SHENNONG_DOCS_ENABLED:-false}
+      SHENNONG_ADMIN_API_KEY: ${SHENNONG_ADMIN_API_KEY:?set SHENNONG_ADMIN_API_KEY in .env}
+      SHENNONG_REGISTRY_BACKEND: postgres
+      SHENNONG_METADATA_URL: postgresql+asyncpg://${POSTGRES_USER:-shennong}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-shennong_metadata}
+      SHENNONG_CLICKHOUSE_HOST: clickhouse
+      SHENNONG_CLICKHOUSE_PORT: 8123
+      SHENNONG_CLICKHOUSE_USERNAME: ${CLICKHOUSE_USER:-shennong}
+      SHENNONG_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      SHENNONG_CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-shennong}
+      SHENNONG_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
+      SHENNONG_LOCAL_DATA_ROOT: /data/shennong
+      SHENNONG_MAX_UPLOAD_BYTES: ${SHENNONG_MAX_UPLOAD_BYTES:-536870912}
+    ports:
+      - "127.0.0.1:${SHENNONG_API_PORT:-18000}:8000"
+    volumes:
+      - ./data:/data/shennong
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-shennong}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-shennong_metadata}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-15434}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./sql/postgres.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-shennong}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-shennong}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .env}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "127.0.0.1:${CLICKHOUSE_HTTP_PORT:-18123}:8123"
+      - "127.0.0.1:${CLICKHOUSE_NATIVE_PORT:-19000}:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./sql/clickhouse.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user $${CLICKHOUSE_USER} --password $${CLICKHOUSE_PASSWORD} --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:8.2
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres-data:
+  clickhouse-data:
