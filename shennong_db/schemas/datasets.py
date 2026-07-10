@@ -34,7 +34,3 @@ class DatasetVersionCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid")
-
-
-class DatasetListResponse(BaseModel):
-    datasets: list[DatasetVersion]

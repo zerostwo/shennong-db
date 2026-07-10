@@ -4,6 +4,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### Removed
+- Removed legacy compatibility routes for typed queries, dataset registry, and tool calls; use `/v1/query`, `/v1/ingest`, and `/v1/agent/*`.
+
 ### Added
 - 待记录：新功能和接口变更会在此预先登记，待发布时移入新版本。
 

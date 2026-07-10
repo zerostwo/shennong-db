@@ -9,7 +9,7 @@ from fastapi.responses import ORJSONResponse
 
 from shennong_db.access.repository import build_access_repository
 from shennong_db.access.service import AccessService
-from shennong_db.api.routes import admin, agent, catalog, datasets, ingest, queries, semantic, tools
+from shennong_db.api.routes import admin, agent, catalog, ingest, semantic
 from shennong_db.backends.router import BackendRouter
 from shennong_db.cache import AsyncQueryCache, InMemoryTTLCache, RedisQueryCache
 from shennong_db.config import Settings
@@ -110,10 +110,7 @@ def create_app(
             status="ok", service=runtime_settings.app_name, version=runtime_settings.app_version
         )
 
-    app.include_router(datasets.router, prefix=runtime_settings.api_prefix)
     app.include_router(ingest.router, prefix=runtime_settings.api_prefix)
-    app.include_router(queries.router, prefix=runtime_settings.api_prefix)
-    app.include_router(tools.router, prefix=runtime_settings.api_prefix)
     app.include_router(catalog.router, prefix=runtime_settings.api_prefix)
     app.include_router(semantic.router, prefix=runtime_settings.api_prefix)
     app.include_router(agent.router, prefix=runtime_settings.api_prefix)

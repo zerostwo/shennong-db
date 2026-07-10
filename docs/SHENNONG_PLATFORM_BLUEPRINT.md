@@ -251,11 +251,9 @@ schema changes must create a new version.
 - `GET /v1/catalog/datasets/{dataset_id}/fields`
 - `GET /v1/catalog/datasets/{dataset_id}/values/{field}`
 - `POST /v1/query`
-- Legacy compatibility query endpoints during migration
 
 ### Admin APIs
 
-- `POST /v1/datasets`
 - `POST /v1/ingest/validate`
 - `POST /v1/ingest/upload/validate`
 - `POST /v1/ingest`

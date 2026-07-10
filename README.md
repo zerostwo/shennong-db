@@ -39,20 +39,9 @@ SPEC v2 uses one semantic public API over multiple storage backends:
 - `GET /v1/artifacts/{artifact_id}`
 - `GET /v1/agent/tools`
 - `POST /v1/agent/call`
+- `POST /v1/ingest` for admin-side dataset registration
 - `POST /v1/ingest/validate` for admin-side release validation reports
 - `POST /v1/ingest/upload/validate` to preview and validate uploaded files without registering
-
-Legacy compatibility endpoints remain available while clients migrate:
-
-- `POST /v1/expression/query`
-- `POST /v1/survival/query`
-- `POST /v1/singlecell/query`
-- `POST /v1/spatial/query`
-- `POST /v1/eqtl/query`
-- `GET /v1/datasets`
-- `POST /v1/datasets`
-- `GET /v1/tools`
-- `POST /v1/tools/call`
 
 All query endpoints return bounded pages with `next_cursor`, so R clients can lazily request batches without loading full matrices.
 
@@ -61,11 +50,12 @@ All query endpoints return bounded pages with `next_cursor`, so R clients can la
 Register a dataset version:
 
 ```bash
-curl -X POST http://localhost:8000/v1/datasets \
+curl -X POST http://localhost:8000/v1/ingest \
+  -H 'X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY' \
   -H 'content-type: application/json' \
   -d '{
-    "dataset_id": "tcga_bulk",
-    "type": "bulk_expression",
+    "dataset": "tcga_bulk",
+    "data_model": "bulk",
     "backend": "clickhouse",
     "version": "2026.07",
     "citation": "TCGA via curated pipeline",

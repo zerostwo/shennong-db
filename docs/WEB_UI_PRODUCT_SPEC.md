@@ -203,9 +203,8 @@ The Web app should read:
 - `GET /v1/agent/tools`
 - `POST /v1/agent/call`
 
-Admin/publishing will later use:
+Admin/publishing uses:
 
-- `POST /v1/datasets`
 - `POST /v1/ingest`
 - `POST /v1/ingest/validate`
 - `POST /v1/ingest/upload/validate`

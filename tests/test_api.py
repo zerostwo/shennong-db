@@ -25,12 +25,19 @@ def make_client(local_data_root: str | None = None) -> TestClient:
 
 
 def register_dataset(client: TestClient, dataset_id: str, dataset_type: str) -> None:
+    data_model = {
+        "bulk_expression": "bulk",
+        "survival": "clinical",
+        "eqtl": "qtl",
+        "single_cell": "single_cell",
+        "spatial": "spatial",
+    }[dataset_type]
     response = client.post(
-        "/v1/datasets",
+        "/v1/ingest",
         headers=ADMIN_HEADERS,
         json={
-            "dataset_id": dataset_id,
-            "type": dataset_type,
+            "dataset": dataset_id,
+            "data_model": data_model,
             "backend": "memory",
             "version": "v1",
             "is_default": True,
@@ -42,16 +49,16 @@ def register_dataset(client: TestClient, dataset_id: str, dataset_type: str) -> 
             },
         },
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 200, response.text
 
 
 def test_admin_routes_require_api_key() -> None:
     with make_client() as client:
         response = client.post(
-            "/v1/datasets",
+            "/v1/ingest",
             json={
-                "dataset_id": "blocked",
-                "type": "bulk_expression",
+                "dataset": "blocked",
+                "data_model": "bulk",
                 "backend": "memory",
                 "version": "v1",
             },
@@ -135,9 +142,9 @@ def test_health_and_dataset_registry() -> None:
         assert response.json()["status"] == "ok"
 
         register_dataset(client, "tcga_test", "bulk_expression")
-        response = client.get("/v1/datasets")
+        response = client.get("/v1/catalog/datasets")
         assert response.status_code == 200
-        assert response.json()["datasets"][0]["dataset_id"] == "tcga_test"
+        assert response.json()["data"][0]["dataset"] == "tcga_test"
 
 
 def test_ingest_registers_dataset_version(tmp_path: Path) -> None:
@@ -378,112 +385,11 @@ def test_upload_ingest_saves_file_and_registers_dataset(tmp_path: Path) -> None:
         uploaded = tmp_path / "uploads" / "uploaded_matrix" / "v1" / "matrix.tsv"
         assert uploaded.read_text(encoding="utf-8") == "gene\tS1\nYTHDF2\t1.2\n"
 
-        response = client.get("/v1/datasets/uploaded_matrix")
+        response = client.get("/v1/catalog/datasets/uploaded_matrix")
         assert response.status_code == 200, response.text
-        dataset = response.json()
-        assert dataset["storage_uri"] == str(uploaded)
-        assert dataset["metadata"]["source"]["expression"] == str(uploaded)
-        assert dataset["metadata"]["upload"]["size_bytes"] == 19
-        assert dataset["metadata"]["upload"]["preview"]["columns"] == ["gene", "S1"]
-
-
-def test_expression_query_is_lazy_paginated_and_cached() -> None:
-    with make_client() as client:
-        register_dataset(client, "tcga_test", "bulk_expression")
-        memory_backend = client.app.state.backend_router.memory_backend
-        memory_backend.seed(
-            table="expression",
-            rows=[
-                {
-                    "dataset": "tcga_test",
-                    "version": "v1",
-                    "sample_id": "S1",
-                    "gene_symbol": "IDH1",
-                    "cancer": "LGG",
-                    "group_name": "tumor",
-                    "value": 1.0,
-                },
-                {
-                    "dataset": "tcga_test",
-                    "version": "v1",
-                    "sample_id": "S2",
-                    "gene_symbol": "IDH1",
-                    "cancer": "LGG",
-                    "group_name": "tumor",
-                    "value": 2.0,
-                },
-                {
-                    "dataset": "tcga_test",
-                    "version": "v1",
-                    "sample_id": "S3",
-                    "gene_symbol": "IDH1",
-                    "cancer": "LGG",
-                    "group_name": "normal",
-                    "value": 3.0,
-                },
-            ],
-        )
-
-        payload = {"dataset": "tcga_test", "genes": ["IDH1"], "limit": 2}
-        response = client.post("/v1/expression/query", json=payload)
-        assert response.status_code == 200, response.text
-        first_page = response.json()
-        assert first_page["row_count"] == 2
-        assert first_page["truncated"] is True
-        assert first_page["next_cursor"]
-        assert first_page["cached"] is False
-
-        response = client.post("/v1/expression/query", json=payload)
-        assert response.status_code == 200, response.text
-        assert response.json()["cached"] is True
-
-        response = client.post(
-            "/v1/expression/query",
-            json={**payload, "cursor": first_page["next_cursor"]},
-        )
-        assert response.status_code == 200, response.text
-        second_page = response.json()
-        assert second_page["row_count"] == 1
-        assert second_page["truncated"] is False
-
-
-def test_tool_list_and_tool_call() -> None:
-    with make_client() as client:
-        register_dataset(client, "eqtl_test", "eqtl")
-        client.app.state.backend_router.memory_backend.seed(
-            table="eqtl",
-            rows=[
-                {
-                    "dataset": "eqtl_test",
-                    "version": "v1",
-                    "gene_symbol": "IDH1",
-                    "variant_id": "rs1",
-                    "tissue": "brain",
-                    "phenotype": "expression",
-                    "beta": 0.2,
-                    "se": 0.01,
-                    "pvalue": 0.001,
-                    "qvalue": 0.01,
-                }
-            ],
-        )
-
-        response = client.get("/v1/tools")
-        assert response.status_code == 200
-        names = {tool["function"]["name"] for tool in response.json()}
-        assert {"query_expression", "query_eqtl", "list_datasets"} <= names
-
-        response = client.post(
-            "/v1/tools/call",
-            json={
-                "name": "query_eqtl",
-                "arguments": {"dataset": "eqtl_test", "genes": ["IDH1"], "limit": 10},
-            },
-        )
-        assert response.status_code == 200, response.text
-        body = response.json()
-        assert body["row_count"] == 1
-        assert body["rows"][0]["variant_id"] == "rs1"
+        dataset = response.json()["data"]
+        assert dataset["dataset"] == "uploaded_matrix"
+        assert dataset["source_roles"] == ["expression"]
 
 
 def test_v2_catalog_query_and_agent_call() -> None:
@@ -617,7 +523,7 @@ def test_v2_compute_and_jobs() -> None:
 def test_v2_xena_backend_queries_wide_matrix_lazily(tmp_path) -> None:
     matrix = tmp_path / "toil.tsv"
     matrix.write_text(
-        "\t".join(["sample", "S1", "S2", "S3"]) + "\n"
+        "\t".join(["gene", "S1", "S2", "S3"]) + "\n"
         "ENSG1\t1.0\t2.0\t3.0\n"
         "ENSG2\t4.0\t5.0\t6.0\n",
         encoding="utf-8",
@@ -677,14 +583,14 @@ def test_v2_xena_backend_queries_wide_matrix_lazily(tmp_path) -> None:
 
     with make_client(local_data_root=str(tmp_path)) as client:
         response = client.post(
-            "/v1/datasets",
+            "/v1/ingest",
             headers=ADMIN_HEADERS,
             json={
-                "dataset_id": "toil",
-                "type": "bulk_expression",
+                "dataset": "toil",
+                "data_model": "bulk",
                 "backend": "xena",
                 "version": "2026.07",
-                "storage_uri": str(matrix),
+                "source": {"matrix": str(matrix)},
                 "is_default": True,
                 "metadata": {
                     "title": "Toil Xena",
@@ -695,7 +601,7 @@ def test_v2_xena_backend_queries_wide_matrix_lazily(tmp_path) -> None:
                 },
             },
         )
-        assert response.status_code == 201, response.text
+        assert response.status_code == 200, response.text
 
         response = client.get("/v1/catalog/datasets/toil/values/cancer")
         assert response.status_code == 200, response.text
@@ -726,3 +632,21 @@ def test_v2_xena_backend_queries_wide_matrix_lazily(tmp_path) -> None:
         assert [row["sample_id"] for row in body["data"]] == ["S1", "S2"]
         assert [row["value"] for row in body["data"]] == [1.0, 2.0]
         assert body["data"][0]["feature_symbol"] == "YTHDF2"
+
+
+def test_legacy_routes_are_not_exposed() -> None:
+    with make_client() as client:
+        routes = [
+            (client.get, "/v1/datasets"),
+            (client.post, "/v1/datasets"),
+            (client.post, "/v1/expression/query"),
+            (client.post, "/v1/survival/query"),
+            (client.post, "/v1/singlecell/query"),
+            (client.post, "/v1/spatial/query"),
+            (client.post, "/v1/eqtl/query"),
+            (client.get, "/v1/tools"),
+            (client.post, "/v1/tools/call"),
+        ]
+        for request, path in routes:
+            response = request(path)
+            assert response.status_code == 404
