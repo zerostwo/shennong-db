@@ -1,1 +1,1 @@
-"""User, organization, project, token, and audit services."""
+"""Users, API tokens, dataset grants, and audit events."""

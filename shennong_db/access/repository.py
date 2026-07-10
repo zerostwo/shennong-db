@@ -1,43 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import hmac
+import json
 import secrets
+import sqlite3
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
-
 from shennong_db.config import Settings
-from shennong_db.db.metadata import (
-    api_tokens,
-    audit_events,
-    memberships,
-    metadata,
-    organizations,
-    projects,
-    users,
-)
-from shennong_db.errors import NotFoundError
+from shennong_db.errors import NotFoundError, ValidationError
 from shennong_db.schemas.access import (
     ApiToken,
     ApiTokenCreate,
     ApiTokenCreated,
     AuditEvent,
-    Membership,
-    MembershipCreate,
-    MembershipRole,
-    MembershipStatus,
-    Organization,
-    OrganizationCreate,
-    Project,
-    ProjectCreate,
+    DatasetGrant,
+    Principal,
     UserCreate,
     UserPublic,
+    UserRole,
     UserStatus,
+    UserUpdate,
 )
 
 
@@ -45,127 +32,108 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
 
 
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _datetime(value: str | datetime | None) -> datetime | None:
+    return datetime.fromisoformat(value) if isinstance(value, str) else value
+
+
 def _token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _record_to_user(row: dict[str, Any]) -> UserPublic:
+def _password_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+def _password_matches(password: str, encoded: str) -> bool:
+    algorithm, salt, expected = encoded.split("$", 2)
+    if algorithm != "scrypt":
+        return False
+    actual = _password_hash(password, bytes.fromhex(salt)).rsplit("$", 1)[1]
+    return hmac.compare_digest(actual, expected)
+
+
+def _user(row: dict[str, Any]) -> UserPublic:
     return UserPublic(
         user_id=row["user_id"],
         email=row["email"],
         display_name=row["display_name"],
+        role=UserRole(row["role"]),
         status=UserStatus(row["status"]),
-        is_superuser=bool(row["is_superuser"]),
-        created_at=row.get("created_at"),
-        updated_at=row.get("updated_at"),
+        created_at=_datetime(row.get("created_at")),
+        updated_at=_datetime(row.get("updated_at")),
     )
 
 
-def _record_to_org(row: dict[str, Any]) -> Organization:
-    return Organization(
-        org_id=row["org_id"],
-        slug=row["slug"],
-        name=row["name"],
-        created_by=row.get("created_by"),
-        created_at=row.get("created_at"),
-        updated_at=row.get("updated_at"),
-    )
-
-
-def _record_to_project(row: dict[str, Any]) -> Project:
-    return Project(
-        project_id=row["project_id"],
-        org_id=row["org_id"],
-        slug=row["slug"],
-        name=row["name"],
-        description=row.get("description"),
-        visibility=row["visibility"],
-        created_at=row.get("created_at"),
-        updated_at=row.get("updated_at"),
-    )
-
-
-def _record_to_membership(row: dict[str, Any]) -> Membership:
-    return Membership(
-        membership_id=row["membership_id"],
-        org_id=row["org_id"],
-        user_id=row["user_id"],
-        role=MembershipRole(row["role"]),
-        status=MembershipStatus(row["status"]),
-        created_at=row.get("created_at"),
-        updated_at=row.get("updated_at"),
-    )
-
-
-def _record_to_token(row: dict[str, Any]) -> ApiToken:
+def _token(row: dict[str, Any]) -> ApiToken:
+    scopes = row.get("scopes_json") or "[]"
     return ApiToken(
         token_id=row["token_id"],
         user_id=row["user_id"],
         name=row["name"],
-        scopes=row.get("scopes") or [],
-        expires_at=row.get("expires_at"),
-        revoked_at=row.get("revoked_at"),
-        last_used_at=row.get("last_used_at"),
-        created_at=row.get("created_at"),
-    )
-
-
-def _record_to_audit(row: dict[str, Any]) -> AuditEvent:
-    return AuditEvent(
-        event_id=row["event_id"],
-        actor_user_id=row.get("actor_user_id"),
-        action=row["action"],
-        resource_type=row["resource_type"],
-        resource_id=row["resource_id"],
-        metadata=row.get("metadata_json") or {},
-        created_at=row.get("created_at"),
+        scopes=json.loads(scopes) if isinstance(scopes, str) else scopes,
+        expires_at=_datetime(row.get("expires_at")),
+        revoked_at=_datetime(row.get("revoked_at")),
+        last_used_at=_datetime(row.get("last_used_at")),
+        created_at=_datetime(row.get("created_at")),
     )
 
 
 class AccessRepository(ABC):
     @abstractmethod
-    async def init(self) -> None:
-        raise NotImplementedError
+    async def init(self) -> None: ...
 
     @abstractmethod
-    async def close(self) -> None:
-        raise NotImplementedError
+    async def close(self) -> None: ...
 
     @abstractmethod
-    async def create_user(self, payload: UserCreate) -> UserPublic:
-        raise NotImplementedError
+    async def user_count(self) -> int: ...
 
     @abstractmethod
-    async def list_users(self) -> list[UserPublic]:
-        raise NotImplementedError
+    async def create_user(self, payload: UserCreate) -> UserPublic: ...
 
     @abstractmethod
-    async def get_user(self, user_id: str) -> UserPublic:
-        raise NotImplementedError
+    async def list_users(self) -> list[UserPublic]: ...
 
     @abstractmethod
-    async def create_organization(self, payload: OrganizationCreate) -> Organization:
-        raise NotImplementedError
+    async def get_user(self, user_id: str) -> UserPublic: ...
 
     @abstractmethod
-    async def list_organizations(self) -> list[Organization]:
-        raise NotImplementedError
+    async def update_user(self, user_id: str, payload: UserUpdate) -> UserPublic: ...
 
     @abstractmethod
-    async def create_project(self, payload: ProjectCreate) -> Project:
-        raise NotImplementedError
+    async def authenticate_password(self, email: str, password: str) -> UserPublic | None: ...
 
     @abstractmethod
-    async def list_projects(self, org_id: str | None = None) -> list[Project]:
-        raise NotImplementedError
+    async def create_api_token(self, payload: ApiTokenCreate) -> ApiTokenCreated: ...
 
     @abstractmethod
-    async def create_membership(self, payload: MembershipCreate) -> Membership:
-        raise NotImplementedError
+    async def list_api_tokens(self, user_id: str | None = None) -> list[ApiToken]: ...
 
     @abstractmethod
-    async def create_api_token(self, payload: ApiTokenCreate) -> ApiTokenCreated:
-        raise NotImplementedError
+    async def revoke_api_token(self, token_id: str) -> None: ...
+
+    @abstractmethod
+    async def authenticate_token(self, token: str) -> Principal | None: ...
+
+    @abstractmethod
+    async def grant_dataset(
+        self, dataset_id: str, user_id: str, granted_by: str | None
+    ) -> DatasetGrant: ...
+
+    @abstractmethod
+    async def revoke_dataset(self, dataset_id: str, user_id: str) -> None: ...
+
+    @abstractmethod
+    async def list_dataset_grants(self, dataset_id: str) -> list[DatasetGrant]: ...
+
+    @abstractmethod
+    async def can_read_dataset(self, dataset_id: str, user_id: str) -> bool: ...
 
     @abstractmethod
     async def record_audit_event(
@@ -176,22 +144,18 @@ class AccessRepository(ABC):
         resource_id: str,
         actor_user_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> AuditEvent:
-        raise NotImplementedError
+    ) -> AuditEvent: ...
 
     @abstractmethod
-    async def list_audit_events(self, limit: int = 100) -> list[AuditEvent]:
-        raise NotImplementedError
+    async def list_audit_events(self, limit: int = 100) -> list[AuditEvent]: ...
 
 
 class InMemoryAccessRepository(AccessRepository):
     def __init__(self) -> None:
-        self._users: dict[str, UserPublic] = {}
-        self._orgs: dict[str, Organization] = {}
-        self._projects: dict[str, Project] = {}
-        self._memberships: dict[str, Membership] = {}
-        self._tokens: dict[str, ApiToken] = {}
-        self._audits: list[AuditEvent] = []
+        self.users: dict[str, tuple[UserPublic, str]] = {}
+        self.tokens: dict[str, tuple[ApiToken, str]] = {}
+        self.grants: dict[tuple[str, str], DatasetGrant] = {}
+        self.audits: list[AuditEvent] = []
 
     async def init(self) -> None:
         return None
@@ -199,320 +163,445 @@ class InMemoryAccessRepository(AccessRepository):
     async def close(self) -> None:
         return None
 
+    async def user_count(self) -> int:
+        return len(self.users)
+
     async def create_user(self, payload: UserCreate) -> UserPublic:
-        now = datetime.now(UTC)
-        existing = next(
-            (user for user in self._users.values() if user.email == payload.email),
-            None,
-        )
-        if existing is not None:
-            return existing
+        if any(user.email == payload.email for user, _ in self.users.values()):
+            raise ValidationError("A user with this email already exists")
+        now = _now()
         user = UserPublic(
             user_id=_new_id("usr"),
             email=payload.email,
             display_name=payload.display_name,
-            status=UserStatus.active,
-            is_superuser=payload.is_superuser,
+            role=payload.role,
             created_at=now,
             updated_at=now,
         )
-        self._users[user.user_id] = user
+        self.users[user.user_id] = (user, _password_hash(payload.password))
         return user
 
     async def list_users(self) -> list[UserPublic]:
-        return sorted(self._users.values(), key=lambda item: item.email)
+        return sorted((user for user, _ in self.users.values()), key=lambda item: item.email)
 
     async def get_user(self, user_id: str) -> UserPublic:
-        user = self._users.get(user_id)
-        if user is None:
+        record = self.users.get(user_id)
+        if record is None:
             raise NotFoundError(f"User '{user_id}' was not found")
-        return user
+        return record[0]
 
-    async def create_organization(self, payload: OrganizationCreate) -> Organization:
-        now = datetime.now(UTC)
-        existing = next((org for org in self._orgs.values() if org.slug == payload.slug), None)
-        if existing is not None:
-            return existing
-        org = Organization(
-            org_id=_new_id("org"),
-            slug=payload.slug,
-            name=payload.name,
-            created_by=payload.owner_user_id,
-            created_at=now,
-            updated_at=now,
+    async def update_user(self, user_id: str, payload: UserUpdate) -> UserPublic:
+        user, password_hash = self.users.get(user_id) or (None, None)
+        if user is None or password_hash is None:
+            raise NotFoundError(f"User '{user_id}' was not found")
+        changes = payload.model_dump(exclude_none=True, exclude={"password"})
+        changes["updated_at"] = _now()
+        updated = user.model_copy(update=changes)
+        if payload.password:
+            password_hash = _password_hash(payload.password)
+        self.users[user_id] = (updated, password_hash)
+        return updated
+
+    async def authenticate_password(self, email: str, password: str) -> UserPublic | None:
+        record = next(
+            (item for item in self.users.values() if item[0].email == email.lower()), None
         )
-        self._orgs[org.org_id] = org
-        return org
-
-    async def list_organizations(self) -> list[Organization]:
-        return sorted(self._orgs.values(), key=lambda item: item.slug)
-
-    async def create_project(self, payload: ProjectCreate) -> Project:
-        now = datetime.now(UTC)
-        project = Project(
-            project_id=_new_id("prj"),
-            org_id=payload.org_id,
-            slug=payload.slug,
-            name=payload.name,
-            description=payload.description,
-            visibility=payload.visibility,
-            created_at=now,
-            updated_at=now,
-        )
-        self._projects[project.project_id] = project
-        return project
-
-    async def list_projects(self, org_id: str | None = None) -> list[Project]:
-        items = list(self._projects.values())
-        if org_id is not None:
-            items = [item for item in items if item.org_id == org_id]
-        return sorted(items, key=lambda item: (item.org_id, item.slug))
-
-    async def create_membership(self, payload: MembershipCreate) -> Membership:
-        now = datetime.now(UTC)
-        existing = next(
-            (
-                membership
-                for membership in self._memberships.values()
-                if membership.org_id == payload.org_id and membership.user_id == payload.user_id
-            ),
-            None,
-        )
-        if existing is not None:
-            return existing
-        membership = Membership(
-            membership_id=_new_id("mem"),
-            org_id=payload.org_id,
-            user_id=payload.user_id,
-            role=payload.role,
-            status=MembershipStatus.active,
-            created_at=now,
-            updated_at=now,
-        )
-        self._memberships[membership.membership_id] = membership
-        return membership
+        if record is None or not _password_matches(password, record[1]):
+            return None
+        return record[0] if record[0].status == UserStatus.active else None
 
     async def create_api_token(self, payload: ApiTokenCreate) -> ApiTokenCreated:
         await self.get_user(payload.user_id)
-        token = f"shn_{secrets.token_urlsafe(32)}"
-        now = datetime.now(UTC)
+        plain = f"shn_{secrets.token_urlsafe(32)}"
         item = ApiToken(
             token_id=_new_id("tok"),
             user_id=payload.user_id,
             name=payload.name,
             scopes=payload.scopes,
             expires_at=payload.expires_at,
-            created_at=now,
+            created_at=_now(),
         )
-        self._tokens[item.token_id] = item
-        return ApiTokenCreated(token=token, data=item)
+        self.tokens[item.token_id] = (item, _token_hash(plain))
+        return ApiTokenCreated(token=plain, data=item)
 
-    async def record_audit_event(
-        self,
-        *,
-        action: str,
-        resource_type: str,
-        resource_id: str,
-        actor_user_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> AuditEvent:
+    async def list_api_tokens(self, user_id: str | None = None) -> list[ApiToken]:
+        tokens = [item for item, _ in self.tokens.values()]
+        if user_id:
+            tokens = [item for item in tokens if item.user_id == user_id]
+        return sorted(tokens, key=lambda item: item.created_at or _now(), reverse=True)
+
+    async def revoke_api_token(self, token_id: str) -> None:
+        record = self.tokens.get(token_id)
+        if record is None:
+            raise NotFoundError(f"Token '{token_id}' was not found")
+        self.tokens[token_id] = (record[0].model_copy(update={"revoked_at": _now()}), record[1])
+
+    async def authenticate_token(self, token: str) -> Principal | None:
+        digest = _token_hash(token)
+        record = next((item for item in self.tokens.values() if item[1] == digest), None)
+        if record is None:
+            return None
+        item = record[0]
+        if item.revoked_at or (item.expires_at and item.expires_at <= _now()):
+            return None
+        user = await self.get_user(item.user_id)
+        if user.status != UserStatus.active:
+            return None
+        return Principal(role=user.role, user_id=user.user_id, email=user.email, scopes=item.scopes)
+
+    async def grant_dataset(
+        self, dataset_id: str, user_id: str, granted_by: str | None
+    ) -> DatasetGrant:
+        await self.get_user(user_id)
+        grant = DatasetGrant(
+            dataset_id=dataset_id, user_id=user_id, granted_by=granted_by, created_at=_now()
+        )
+        self.grants[(dataset_id, user_id)] = grant
+        return grant
+
+    async def revoke_dataset(self, dataset_id: str, user_id: str) -> None:
+        self.grants.pop((dataset_id, user_id), None)
+
+    async def list_dataset_grants(self, dataset_id: str) -> list[DatasetGrant]:
+        return [grant for grant in self.grants.values() if grant.dataset_id == dataset_id]
+
+    async def can_read_dataset(self, dataset_id: str, user_id: str) -> bool:
+        return (dataset_id, user_id) in self.grants
+
+    async def record_audit_event(self, **kwargs: Any) -> AuditEvent:
         event = AuditEvent(
             event_id=_new_id("evt"),
-            actor_user_id=actor_user_id,
-            action=action,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            metadata=metadata or {},
-            created_at=datetime.now(UTC),
+            created_at=_now(),
+            metadata=kwargs.pop("metadata", None) or {},
+            **kwargs,
         )
-        self._audits.append(event)
+        self.audits.append(event)
         return event
 
     async def list_audit_events(self, limit: int = 100) -> list[AuditEvent]:
-        return list(reversed(self._audits[-limit:]))
+        return list(reversed(self.audits[-limit:]))
 
 
-class PostgresAccessRepository(AccessRepository):
+class SQLiteAccessRepository(AccessRepository):
     def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-        self.engine: AsyncEngine = create_async_engine(settings.metadata_url, pool_pre_ping=True)
-        self._session = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.path = settings.sqlite_path
+
+    def _connect(self) -> sqlite3.Connection:
+        db = sqlite3.connect(self.path)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA foreign_keys=ON")
+        return db
 
     async def init(self) -> None:
-        if not self.settings.auto_create_metadata_schema:
-            return
-        async with self.engine.begin() as conn:
-            await conn.run_sync(metadata.create_all)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        def initialize() -> None:
+            with self._connect() as db:
+                db.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS users (
+                      user_id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+                      display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
+                      role TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS api_tokens (
+                      token_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL,
+                      token_hash TEXT NOT NULL UNIQUE, scopes_json TEXT NOT NULL,
+                      expires_at TEXT, revoked_at TEXT, last_used_at TEXT, created_at TEXT NOT NULL,
+                      FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                    );
+                    CREATE TABLE IF NOT EXISTS dataset_grants (
+                      dataset_id TEXT NOT NULL, user_id TEXT NOT NULL, granted_by TEXT,
+                      created_at TEXT NOT NULL, PRIMARY KEY(dataset_id, user_id),
+                      FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE
+                    );
+                    CREATE TABLE IF NOT EXISTS audit_events (
+                      event_id TEXT PRIMARY KEY, actor_user_id TEXT, action TEXT NOT NULL,
+                      resource_type TEXT NOT NULL, resource_id TEXT NOT NULL,
+                      metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+                    );
+                    """
+                )
+
+        await asyncio.to_thread(initialize)
 
     async def close(self) -> None:
-        await self.engine.dispose()
+        return None
+
+    async def user_count(self) -> int:
+        def count() -> int:
+            with self._connect() as db:
+                return int(db.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+        return await asyncio.to_thread(count)
 
     async def create_user(self, payload: UserCreate) -> UserPublic:
-        values = {
-            "user_id": _new_id("usr"),
-            "email": str(payload.email),
-            "display_name": payload.display_name,
-            "status": UserStatus.active.value,
-            "is_superuser": payload.is_superuser,
-        }
-        async with self._session() as session, session.begin():
-            stmt = insert(users).values(**values)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[users.c.email],
-                set_={
-                    "display_name": stmt.excluded.display_name,
-                    "is_superuser": stmt.excluded.is_superuser,
-                },
-            ).returning(users)
-            result = await session.execute(stmt)
-            row = result.fetchone()
-        if row is None:
-            raise RuntimeError("User create did not return a row")
-        return _record_to_user(dict(row._mapping))
+        def write() -> UserPublic:
+            now = _now().isoformat()
+            values = (
+                _new_id("usr"),
+                payload.email,
+                payload.display_name,
+                _password_hash(payload.password),
+                payload.role.value,
+                UserStatus.active.value,
+                now,
+                now,
+            )
+            try:
+                with self._connect() as db:
+                    db.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?)", values)
+                    row = db.execute("SELECT * FROM users WHERE user_id=?", (values[0],)).fetchone()
+            except sqlite3.IntegrityError as exc:
+                raise ValidationError("A user with this email already exists") from exc
+            return _user(dict(row))
+
+        return await asyncio.to_thread(write)
 
     async def list_users(self) -> list[UserPublic]:
-        async with self._session() as session:
-            result = await session.execute(select(users).order_by(users.c.email))
-            return [_record_to_user(dict(row._mapping)) for row in result.fetchall()]
+        def read() -> list[UserPublic]:
+            with self._connect() as db:
+                return [
+                    _user(dict(row)) for row in db.execute("SELECT * FROM users ORDER BY email")
+                ]
+
+        return await asyncio.to_thread(read)
 
     async def get_user(self, user_id: str) -> UserPublic:
-        async with self._session() as session:
-            result = await session.execute(select(users).where(users.c.user_id == user_id))
-            row = result.fetchone()
-        if row is None:
-            raise NotFoundError(f"User '{user_id}' was not found")
-        return _record_to_user(dict(row._mapping))
+        def read() -> UserPublic:
+            with self._connect() as db:
+                row = db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+            if row is None:
+                raise NotFoundError(f"User '{user_id}' was not found")
+            return _user(dict(row))
 
-    async def create_organization(self, payload: OrganizationCreate) -> Organization:
-        values = {
-            "org_id": _new_id("org"),
-            "slug": payload.slug,
-            "name": payload.name,
-            "created_by": payload.owner_user_id,
-        }
-        async with self._session() as session, session.begin():
-            stmt = insert(organizations).values(**values)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=[organizations.c.slug],
-                set_={"name": stmt.excluded.name},
-            ).returning(organizations)
-            result = await session.execute(stmt)
-            row = result.fetchone()
-        if row is None:
-            raise RuntimeError("Organization create did not return a row")
-        return _record_to_org(dict(row._mapping))
+        return await asyncio.to_thread(read)
 
-    async def list_organizations(self) -> list[Organization]:
-        async with self._session() as session:
-            result = await session.execute(select(organizations).order_by(organizations.c.slug))
-            return [_record_to_org(dict(row._mapping)) for row in result.fetchall()]
+    async def update_user(self, user_id: str, payload: UserUpdate) -> UserPublic:
+        await self.get_user(user_id)
 
-    async def create_project(self, payload: ProjectCreate) -> Project:
-        values = {
-            "project_id": _new_id("prj"),
-            "org_id": payload.org_id,
-            "slug": payload.slug,
-            "name": payload.name,
-            "description": payload.description,
-            "visibility": payload.visibility.value,
-        }
-        async with self._session() as session, session.begin():
-            stmt = insert(projects).values(**values)
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_projects_org_slug",
-                set_={
-                    "name": stmt.excluded.name,
-                    "description": stmt.excluded.description,
-                    "visibility": stmt.excluded.visibility,
-                },
-            ).returning(projects)
-            result = await session.execute(stmt)
-            row = result.fetchone()
-        if row is None:
-            raise RuntimeError("Project create did not return a row")
-        return _record_to_project(dict(row._mapping))
+        def write() -> UserPublic:
+            fields = payload.model_dump(exclude_none=True)
+            password = fields.pop("password", None)
+            if password:
+                fields["password_hash"] = _password_hash(password)
+            fields = {
+                key: value.value if isinstance(value, (UserRole, UserStatus)) else value
+                for key, value in fields.items()
+            }
+            fields["updated_at"] = _now().isoformat()
+            assignments = ", ".join(f"{key}=?" for key in fields)
+            with self._connect() as db:
+                db.execute(
+                    f"UPDATE users SET {assignments} WHERE user_id=?",  # noqa: S608
+                    (*fields.values(), user_id),
+                )
+                row = db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+            return _user(dict(row))
 
-    async def list_projects(self, org_id: str | None = None) -> list[Project]:
-        stmt = select(projects)
-        if org_id is not None:
-            stmt = stmt.where(projects.c.org_id == org_id)
-        stmt = stmt.order_by(projects.c.org_id, projects.c.slug)
-        async with self._session() as session:
-            result = await session.execute(stmt)
-            return [_record_to_project(dict(row._mapping)) for row in result.fetchall()]
+        return await asyncio.to_thread(write)
 
-    async def create_membership(self, payload: MembershipCreate) -> Membership:
-        values = {
-            "membership_id": _new_id("mem"),
-            "org_id": payload.org_id,
-            "user_id": payload.user_id,
-            "role": payload.role.value,
-            "status": MembershipStatus.active.value,
-        }
-        async with self._session() as session, session.begin():
-            stmt = insert(memberships).values(**values)
-            stmt = stmt.on_conflict_do_update(
-                constraint="uq_memberships_org_user",
-                set_={"role": stmt.excluded.role, "status": stmt.excluded.status},
-            ).returning(memberships)
-            result = await session.execute(stmt)
-            row = result.fetchone()
-        if row is None:
-            raise RuntimeError("Membership create did not return a row")
-        return _record_to_membership(dict(row._mapping))
+    async def authenticate_password(self, email: str, password: str) -> UserPublic | None:
+        def read() -> UserPublic | None:
+            with self._connect() as db:
+                row = db.execute("SELECT * FROM users WHERE email=?", (email.lower(),)).fetchone()
+            if (
+                row is None
+                or row["status"] != UserStatus.active.value
+                or not _password_matches(password, row["password_hash"])
+            ):
+                return None
+            return _user(dict(row))
+
+        return await asyncio.to_thread(read)
 
     async def create_api_token(self, payload: ApiTokenCreate) -> ApiTokenCreated:
         await self.get_user(payload.user_id)
-        token = f"shn_{secrets.token_urlsafe(32)}"
-        values = {
-            "token_id": _new_id("tok"),
-            "user_id": payload.user_id,
-            "name": payload.name,
-            "token_hash": _token_hash(token),
-            "scopes": payload.scopes,
-            "expires_at": payload.expires_at,
-        }
-        async with self._session() as session, session.begin():
-            stmt = insert(api_tokens).values(**values).returning(api_tokens)
-            result = await session.execute(stmt)
-            row = result.fetchone()
-        if row is None:
-            raise RuntimeError("API token create did not return a row")
-        return ApiTokenCreated(token=token, data=_record_to_token(dict(row._mapping)))
 
-    async def record_audit_event(
-        self,
-        *,
-        action: str,
-        resource_type: str,
-        resource_id: str,
-        actor_user_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> AuditEvent:
-        values = {
-            "event_id": _new_id("evt"),
-            "actor_user_id": actor_user_id,
-            "action": action,
-            "resource_type": resource_type,
-            "resource_id": resource_id,
-            "metadata_json": metadata or {},
-        }
-        async with self._session() as session, session.begin():
-            stmt = insert(audit_events).values(**values).returning(audit_events)
-            result = await session.execute(stmt)
-            row = result.fetchone()
-        if row is None:
-            raise RuntimeError("Audit event create did not return a row")
-        return _record_to_audit(dict(row._mapping))
+        def write() -> ApiTokenCreated:
+            plain = f"shn_{secrets.token_urlsafe(32)}"
+            now = _now().isoformat()
+            values = (
+                _new_id("tok"),
+                payload.user_id,
+                payload.name,
+                _token_hash(plain),
+                json.dumps(payload.scopes),
+                payload.expires_at.isoformat() if payload.expires_at else None,
+                None,
+                None,
+                now,
+            )
+            with self._connect() as db:
+                db.execute("INSERT INTO api_tokens VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", values)
+                row = db.execute(
+                    "SELECT * FROM api_tokens WHERE token_id=?", (values[0],)
+                ).fetchone()
+            return ApiTokenCreated(token=plain, data=_token(dict(row)))
+
+        return await asyncio.to_thread(write)
+
+    async def list_api_tokens(self, user_id: str | None = None) -> list[ApiToken]:
+        def read() -> list[ApiToken]:
+            query = "SELECT * FROM api_tokens"
+            params: tuple[str, ...] = ()
+            if user_id:
+                query += " WHERE user_id=?"
+                params = (user_id,)
+            query += " ORDER BY created_at DESC"
+            with self._connect() as db:
+                return [_token(dict(row)) for row in db.execute(query, params)]
+
+        return await asyncio.to_thread(read)
+
+    async def revoke_api_token(self, token_id: str) -> None:
+        def write() -> None:
+            with self._connect() as db:
+                cursor = db.execute(
+                    "UPDATE api_tokens SET revoked_at=? WHERE token_id=?",
+                    (_now().isoformat(), token_id),
+                )
+            if cursor.rowcount == 0:
+                raise NotFoundError(f"Token '{token_id}' was not found")
+
+        await asyncio.to_thread(write)
+
+    async def authenticate_token(self, token: str) -> Principal | None:
+        def read() -> Principal | None:
+            now = _now()
+            with self._connect() as db:
+                row = db.execute(
+                    """SELECT t.*, u.email, u.role, u.status FROM api_tokens t
+                    JOIN users u ON u.user_id=t.user_id WHERE t.token_hash=?""",
+                    (_token_hash(token),),
+                ).fetchone()
+                if row is None or row["revoked_at"] or row["status"] != "active":
+                    return None
+                expires = _datetime(row["expires_at"])
+                if expires and expires <= now:
+                    return None
+                db.execute(
+                    "UPDATE api_tokens SET last_used_at=? WHERE token_id=?",
+                    (now.isoformat(), row["token_id"]),
+                )
+            return Principal(
+                role=UserRole(row["role"]),
+                user_id=row["user_id"],
+                email=row["email"],
+                scopes=json.loads(row["scopes_json"]),
+            )
+
+        return await asyncio.to_thread(read)
+
+    async def grant_dataset(
+        self, dataset_id: str, user_id: str, granted_by: str | None
+    ) -> DatasetGrant:
+        await self.get_user(user_id)
+
+        def write() -> DatasetGrant:
+            now = _now().isoformat()
+            with self._connect() as db:
+                db.execute(
+                    """INSERT INTO dataset_grants VALUES (?, ?, ?, ?)
+                    ON CONFLICT(dataset_id,user_id) DO UPDATE SET granted_by=excluded.granted_by""",
+                    (dataset_id, user_id, granted_by, now),
+                )
+            return DatasetGrant(
+                dataset_id=dataset_id,
+                user_id=user_id,
+                granted_by=granted_by,
+                created_at=_datetime(now),
+            )
+
+        return await asyncio.to_thread(write)
+
+    async def revoke_dataset(self, dataset_id: str, user_id: str) -> None:
+        def write() -> None:
+            with self._connect() as db:
+                db.execute(
+                    "DELETE FROM dataset_grants WHERE dataset_id=? AND user_id=?",
+                    (dataset_id, user_id),
+                )
+
+        await asyncio.to_thread(write)
+
+    async def list_dataset_grants(self, dataset_id: str) -> list[DatasetGrant]:
+        def read() -> list[DatasetGrant]:
+            with self._connect() as db:
+                rows = db.execute(
+                    "SELECT * FROM dataset_grants WHERE dataset_id=? ORDER BY user_id",
+                    (dataset_id,),
+                ).fetchall()
+            return [DatasetGrant(**dict(row)) for row in rows]
+
+        return await asyncio.to_thread(read)
+
+    async def can_read_dataset(self, dataset_id: str, user_id: str) -> bool:
+        def read() -> bool:
+            with self._connect() as db:
+                return (
+                    db.execute(
+                        "SELECT 1 FROM dataset_grants WHERE dataset_id=? AND user_id=?",
+                        (dataset_id, user_id),
+                    ).fetchone()
+                    is not None
+                )
+
+        return await asyncio.to_thread(read)
+
+    async def record_audit_event(self, **kwargs: Any) -> AuditEvent:
+        def write() -> AuditEvent:
+            event = AuditEvent(
+                event_id=_new_id("evt"),
+                created_at=_now(),
+                metadata=kwargs.get("metadata") or {},
+                actor_user_id=kwargs.get("actor_user_id"),
+                action=kwargs["action"],
+                resource_type=kwargs["resource_type"],
+                resource_id=kwargs["resource_id"],
+            )
+            with self._connect() as db:
+                db.execute(
+                    "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        event.event_id,
+                        event.actor_user_id,
+                        event.action,
+                        event.resource_type,
+                        event.resource_id,
+                        json.dumps(event.metadata),
+                        event.created_at.isoformat(),
+                    ),
+                )
+            return event
+
+        return await asyncio.to_thread(write)
 
     async def list_audit_events(self, limit: int = 100) -> list[AuditEvent]:
-        stmt = select(audit_events).order_by(audit_events.c.created_at.desc()).limit(limit)
-        async with self._session() as session:
-            result = await session.execute(stmt)
-            return [_record_to_audit(dict(row._mapping)) for row in result.fetchall()]
+        def read() -> list[AuditEvent]:
+            with self._connect() as db:
+                rows = db.execute(
+                    "SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?", (limit,)
+                ).fetchall()
+            return [
+                AuditEvent(
+                    event_id=row["event_id"],
+                    actor_user_id=row["actor_user_id"],
+                    action=row["action"],
+                    resource_type=row["resource_type"],
+                    resource_id=row["resource_id"],
+                    metadata=json.loads(row["metadata_json"]),
+                    created_at=_datetime(row["created_at"]),
+                )
+                for row in rows
+            ]
+
+        return await asyncio.to_thread(read)
 
 
 def build_access_repository(settings: Settings) -> AccessRepository:
     if settings.registry_backend == "memory":
         return InMemoryAccessRepository()
-    return PostgresAccessRepository(settings)
+    return SQLiteAccessRepository(settings)

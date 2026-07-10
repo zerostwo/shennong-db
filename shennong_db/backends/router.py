@@ -234,7 +234,12 @@ class BackendRouter:
             DatasetType.single_cell: DataModel.single_cell,
             DatasetType.spatial: DataModel.spatial,
             DatasetType.eqtl: DataModel.qtl,
-        }[dataset.type]
+        }.get(dataset.type)
+        if expected is None:
+            raise ValidationError(
+                f"Dataset type '{dataset.type}' is accessed through its asset manifest",
+                details={"dataset_type": dataset.type},
+            )
         if data_model != expected:
             raise ValidationError(
                 f"Dataset '{dataset.dataset_id}' is data_model '{expected}', not '{data_model}'",

@@ -1,186 +1,117 @@
-# Shennong Data Server
+# ShennongDB
 
-Shennong Data Server is a modular biomedical data API:
+ShennongDB is a versioned store and read API for bioinformatics datasets. Its scope is deliberately
+small: preserve data, describe it consistently, control access, and serve it efficiently. Analysis,
+workflow execution, chat, and agent features are outside this service.
 
-```text
-R client -> FastAPI -> Backend router -> ClickHouse / TileDB-SOMA / PostgreSQL
-```
+## Deploy
 
-It deliberately avoids a monolithic database. PostgreSQL stores dataset registry and version metadata only. ClickHouse serves bulk expression, survival, and eQTL tables. TileDB-SOMA serves sparse single-cell and spatial matrices.
-
-## Run
+The container includes the API, SQLite metadata registry, user system, and local asset storage. Only
+the persistent host path and published port normally need configuration:
 
 ```bash
 cp .env.example .env
-docker compose up --build
+# edit SHENNONG_DATA_PATH and SHENNONG_PORT if needed
+docker compose pull
+docker compose up -d
 ```
 
-Health check:
+Defaults:
+
+```dotenv
+SHENNONG_DATA_PATH=./data
+SHENNONG_PORT=8000
+```
+
+Open API documentation at `http://HOST:8000/docs` and check health at
+`http://HOST:8000/health`. All metadata, users, grants, uploaded files, optimized files, and indexes
+remain below the mounted `/data` directory.
+
+## First administrator
+
+Bootstrap is allowed exactly once:
 
 ```bash
-curl http://localhost:8000/v1/health
+curl -X POST http://localhost:8000/v1/auth/bootstrap \
+  -H 'content-type: application/json' \
+  -d '{
+    "email": "admin@example.org",
+    "display_name": "Administrator",
+    "password": "replace-with-a-long-password"
+  }'
 ```
 
-## Core APIs
+The response contains an API token that is shown only once. Later sessions use
+`POST /v1/auth/login`.
 
-SPEC v2 uses one semantic public API over multiple storage backends:
+## Access model
 
+- Guest: anonymous; sees and reads only `public` datasets.
+- User: authenticates with `Authorization: Bearer TOKEN`; reads public datasets plus private
+  datasets explicitly granted by an administrator.
+- Administrator: manages users, tokens, dataset grants, ingestion, and audit records.
+
+Unauthorized private datasets return `404` so their identifiers and metadata are not disclosed.
+Public datasets such as Toil and PBMC therefore remain directly readable by `ShennongData` without
+requiring every R user to create an account.
+
+## Dataset model
+
+A dataset is not assumed to be one table. The stable identity is:
+
+```text
+dataset_id + version + visibility + data_model + asset manifest
+```
+
+Each asset has a semantic `role`, a broad `kind`, a physical `format`, optional compression,
+checksum/size metadata, and a controlled storage path. Examples:
+
+- single-cell: `matrix`, `obs`, `var`, `embedding.umap`, `embedding.pca`;
+- reference genome: `reference.fasta`, `annotation.gtf`, `index.fai`, `index.bwa.*`;
+- transcription-factor resources: `data`, `metadata`, `index.*` in Feather/Parquet;
+- CellPhoneDB: `database`, `metadata`, and documentation assets;
+- bulk expression: `expression`, `phenotype`, `gene_map`.
+
+The server exposes standard profiles at `GET /v1/catalog/formats`. See
+[Unified data model](docs/SHENNONG_PLATFORM_BLUEPRINT.md) for the complete convention.
+
+## APIs
+
+Discovery and reading:
+
+- `GET /v1/catalog/formats`
 - `GET /v1/catalog/datasets`
-- `GET /v1/catalog/datasets/{dataset_id}`
-- `GET /v1/catalog/datasets/{dataset_id}/schema`
-- `GET /v1/catalog/datasets/{dataset_id}/capabilities`
-- `GET /v1/catalog/datasets/{dataset_id}/fields`
-- `GET /v1/catalog/datasets/{dataset_id}/values/{field}`
-- `POST /v1/query`
-- `POST /v1/compute`
-- `POST /v1/jobs`
-- `GET /v1/jobs/{job_id}`
-- `DELETE /v1/jobs/{job_id}`
-- `GET /v1/artifacts/{artifact_id}`
-- `GET /v1/agent/tools`
-- `POST /v1/agent/call`
-- `POST /v1/ingest` for admin-side dataset registration
-- `POST /v1/ingest/validate` for admin-side release validation reports
-- `POST /v1/ingest/upload/validate` to preview and validate uploaded files without registering
+- `GET /v1/catalog/datasets/{dataset}`
+- `GET /v1/catalog/datasets/{dataset}/manifest`
+- `GET /v1/catalog/assets/{asset_id}/download`
+- `POST /v1/query` for supported lazy matrix/table backends
 
-All query endpoints return bounded pages with `next_cursor`, so R clients can lazily request batches without loading full matrices.
+Authentication and administration:
 
-## Dataset Registry
+- `POST /v1/auth/bootstrap`, `POST /v1/auth/login`, `GET /v1/auth/me`
+- `GET|POST /v1/admin/users`, `GET|PATCH /v1/admin/users/{user_id}`
+- `GET|POST /v1/admin/tokens`, `DELETE /v1/admin/tokens/{token_id}`
+- `PUT|DELETE /v1/admin/datasets/{dataset}/grants/{user_id}`
+- `GET /v1/admin/datasets/{dataset}/grants`
+- `GET /v1/admin/audit-events`
 
-Register a dataset version:
+Ingestion:
 
-```bash
-curl -X POST http://localhost:8000/v1/ingest \
-  -H 'X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY' \
-  -H 'content-type: application/json' \
-  -d '{
-    "dataset": "tcga_bulk",
-    "data_model": "bulk",
-    "backend": "clickhouse",
-    "version": "2026.07",
-    "citation": "TCGA via curated pipeline",
-    "is_default": true,
-    "metadata": {"organism": "human"}
-  }'
-```
+- `POST /v1/ingest/validate`
+- `POST /v1/ingest`
+- `POST /v1/ingest/upload/validate`
+- `POST /v1/ingest/upload`
+- `GET /v1/ingest/{job_id}`
 
-## Lazy R-Compatible Query Shape
+`POST /v1/ingest` accepts `visibility: "public" | "private"`, a data model, backend, version,
+and a `source` mapping of asset roles to paths under `/data`.
 
-```bash
-curl -X POST http://localhost:8000/v1/query \
-  -H 'content-type: application/json' \
-  -d '{
-    "dataset": "tcga_bulk",
-    "version": "2026.07",
-    "assay": "rna",
-    "data_model": "bulk",
-    "select": {
-      "features": ["IDH1", "TP53"],
-      "observations": {"cancer": ["LGG"]},
-      "fields": ["sample_id", "cancer", "group"]
-    },
-    "layer": "log2_tpm",
-    "measure": "expression",
-    "return": {"format": "json", "shape": "tidy"},
-    "options": {"limit": 1000}
-  }'
-```
+## Read optimization
 
-Response fields include `status`, `data`, and `meta`. `meta.next_cursor` lets R clients
-continue lazy pagination without loading a full matrix.
+Format handling is performed during ingestion. The currently implemented fast path detects gzip
+Xena gene-by-sample matrices, preserves the original compressed asset, writes an uncompressed
+derived matrix under `/data/optimized`, builds a row-offset JSON index, and registers all three in
+the manifest. This avoids rescanning or decompressing the full Toil matrix for each gene query.
 
-## R Client
-
-The R client is now published as a standalone package in this workspace at
-`/home/duansq/dev/packages/shennong-data`, and is loaded as
-`library(ShennongData)`. It is lazy by default: `sn_load_data()` creates a
-remote dataset handle only, while `filter()` and `select()` record query
-constraints. Data is fetched from `/v1/query` only when `sn_collect()`,
-`sn_fetch_genes()`, or plotting helpers are called.
-
-Install from the local source tree:
-
-```bash
-R CMD INSTALL /home/duansq/dev/packages/shennong-data
-```
-
-Example:
-
-```r
-library(ShennongData)
-
-sn_set_api_url("http://127.0.0.1:18000")
-
-toil <- sn_load_data("toil")
-
-toil |>
-  filter(cancer == "PAAD") |>
-  sn_plot_box(gene = "YTHDF2", x = "group")
-```
-
-For bounded collection without plotting:
-
-```r
-rows <- toil |>
-  filter(cancer == "PAAD") |>
-  sn_collect(features = "YTHDF2", limit = 1000)
-
-attr(rows, "shennong_meta")
-```
-
-## Ingestion
-
-Validate a pending dataset release before registration:
-
-```bash
-curl -X POST http://localhost:8000/v1/ingest/validate \
-  -H 'content-type: application/json' \
-  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
-  -d '{
-    "dataset": "toil",
-    "version": "2026.07",
-    "data_model": "bulk",
-    "backend": "xena",
-    "source": {"expression": "/data/shennong/toil/expression.tsv"},
-    "metadata": {"title": "Toil Xena"}
-  }'
-```
-
-The report separates registry validity from immediate queryability, so metadata-only
-drafts can be staged without pretending they are queryable. For local tabular
-sources under `SHENNONG_LOCAL_DATA_ROOT`, validation previews the header/sample
-rows and applies initial modality checks for bulk expression, survival/clinical,
-and eQTL/QTL tables.
-
-Uploaded files can be checked before registration through
-`POST /v1/ingest/upload/validate`; the file is saved under the controlled upload
-staging directory, previewed, and validated with the same report shape.
-
-Initialize schemas:
-
-```bash
-shennong-ingest schema metadata
-shennong-ingest schema clickhouse
-```
-
-Load a CSV into ClickHouse in chunks and optionally register a dataset manifest:
-
-```bash
-shennong-ingest clickhouse load-csv \
-  --table expression_bulk \
-  --csv-file data/expression_bulk.csv \
-  --manifest manifests/tcga_bulk.json
-```
-
-TileDB-SOMA datasets are registered by `storage_uri`; the API reads sparse slices lazily from SOMA.
-
-## Gene Query Performance
-
-Gene-level bulk expression queries are optimized by:
-
-- ClickHouse `MergeTree` ordering on `(dataset, version, gene_symbol, cancer, sample_id)`
-- Bloom skip indexes for gene and sample filters
-- Redis-backed query cache with a longer TTL for expression queries
-- Cursor-bounded API responses to prevent accidental full loads
-
-The target is `<300ms` for cached gene-level queries under normal service/network conditions.
+Other formats are registered without lossy conversion. Their manifest makes it possible to add
+backend-specific derivatives later without changing the dataset identity or client API.

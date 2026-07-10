@@ -1,7 +1,7 @@
 [project]
 name = "shennong-data-server"
 version = "0.1.0"
-description = "Modular biomedical data server for expression, survival, single-cell, spatial, and eQTL queries."
+description = "Versioned storage and read API for bioinformatics datasets."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,8 +9,6 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.8.0",
     "pydantic-settings>=2.3.0",
-    "sqlalchemy[asyncio]>=2.0.30",
-    "asyncpg>=0.29.0",
     "clickhouse-connect[async]>=0.7.18",
     "redis>=5.0.0",
     "typer>=0.12.0",

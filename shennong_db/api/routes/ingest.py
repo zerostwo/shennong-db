@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import csv
+import gzip
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -12,10 +15,12 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from shennong_db.api.deps import get_registry, get_settings
 from shennong_db.config import Settings
 from shennong_db.errors import ValidationError
+from shennong_db.formats import infer_asset
+from shennong_db.ingest.loaders import build_xena_matrix_index
 from shennong_db.jobs import InMemoryJobStore
 from shennong_db.registry.service import DatasetRegistryService
 from shennong_db.schemas.common import DatasetType
-from shennong_db.schemas.datasets import DatasetVersionCreate
+from shennong_db.schemas.datasets import DatasetAssetCreate, DatasetVersionCreate
 from shennong_db.schemas.ingest import (
     IngestRequest,
     IngestResponse,
@@ -35,6 +40,9 @@ _SOURCE_ROLES_BY_MODEL: dict[str, set[str]] = {
     "qtl": {"eqtl", "qtl", "variants", "metadata", "file", "upload"},
     "single_cell": {"soma", "h5", "h5ad", "matrix", "metadata", "file", "upload"},
     "spatial": {"soma", "h5", "h5ad", "spatial", "metadata", "file", "upload"},
+    "table": {"table", "schema", "metadata", "file", "upload"},
+    "reference": {"reference", "genome", "annotation", "index", "file", "upload"},
+    "resource": {"data", "database", "metadata", "index", "file", "upload"},
 }
 _QUERY_BACKENDS_BY_MODEL: dict[str, set[str]] = {
     "bulk": {"clickhouse", "xena", "memory"},
@@ -75,6 +83,9 @@ def _dataset_type_for_model(payload: IngestRequest) -> DatasetType:
         "spatial": DatasetType.spatial,
         "clinical": DatasetType.survival,
         "qtl": DatasetType.eqtl,
+        "table": DatasetType.table,
+        "reference": DatasetType.reference,
+        "resource": DatasetType.resource,
     }
     dataset_type = mapping.get(payload.data_model.value)
     if dataset_type is None:
@@ -183,15 +194,20 @@ def _preview_upload(
     max_rows: int = 5,
 ) -> UploadPreview:
     warnings: list[str] = []
+    opener = gzip.open if path.name.lower().endswith((".gz", ".bgz")) else Path.open
     try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        with opener(
+            path, "rt" if opener is gzip.open else "r", encoding="utf-8-sig", newline=""
+        ) as handle:
             sample = handle.read(64 * 1024)
-    except UnicodeDecodeError:
+    except (OSError, UnicodeDecodeError):
         try:
-            with path.open("r", encoding="latin-1", newline="") as handle:
+            with opener(
+                path, "rt" if opener is gzip.open else "r", encoding="latin-1", newline=""
+            ) as handle:
                 sample = handle.read(64 * 1024)
             warnings.append("Preview decoded with latin-1 fallback.")
-        except UnicodeDecodeError:
+        except (OSError, UnicodeDecodeError):
             return UploadPreview(
                 filename=filename,
                 content_type=content_type,
@@ -258,6 +274,7 @@ def _dataset_create_from_ingest(payload: IngestRequest) -> DatasetVersionCreate:
         status=payload.status,
         is_default=payload.is_default,
         schema_version=payload.schema_version,
+        visibility=payload.visibility,
         metadata=metadata,
     )
 
@@ -689,6 +706,76 @@ def _validate_ingest_payload(
     )
 
 
+def _prepare_sources_sync(
+    payload: IngestRequest,
+    settings: Settings,
+) -> tuple[IngestRequest, list[DatasetAssetCreate]]:
+    source = dict(payload.source)
+    assets: list[DatasetAssetCreate] = []
+    storage_uri = payload.storage_uri
+    optimized = False
+
+    for role, uri in payload.source.items():
+        path = _path_from_uri(uri)
+        if path is None:
+            continue
+        if not path.exists() or not path.is_file():
+            assets.append(infer_asset(role, path))
+            continue
+
+        is_xena_matrix = payload.backend.value == "xena" and role in {"expression", "matrix"}
+        is_gzip = path.name.lower().endswith((".gz", ".bgz"))
+        if is_xena_matrix and is_gzip:
+            original_role = f"source.{role}"
+            assets.append(infer_asset(original_role, path))
+            target_dir = (
+                Path(settings.local_data_root) / "optimized" / payload.dataset / payload.version
+            )
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / path.name.removesuffix(".gz").removesuffix(".bgz")
+            temporary = target.with_suffix(f"{target.suffix}.tmp")
+            if not target.exists() or target.stat().st_mtime < path.stat().st_mtime:
+                with gzip.open(path, "rb") as source_handle, temporary.open("wb") as target_handle:
+                    shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                temporary.replace(target)
+            index_path = Path(f"{target}.idx.json")
+            if not index_path.exists() or index_path.stat().st_mtime < target.stat().st_mtime:
+                build_xena_matrix_index(target, index_path)
+            assets.append(infer_asset(role, target, derived_from=original_role))
+            assets.append(infer_asset(f"index.{role}", index_path, derived_from=role))
+            source[role] = str(target)
+            if storage_uri in {None, uri}:
+                storage_uri = str(target)
+            optimized = True
+            continue
+
+        assets.append(infer_asset(role, path))
+        if is_xena_matrix:
+            index_path = Path(f"{path}.idx.json")
+            if not index_path.exists() or index_path.stat().st_mtime < path.stat().st_mtime:
+                build_xena_matrix_index(path, index_path)
+            assets.append(infer_asset(f"index.{role}", index_path, derived_from=role))
+
+    metadata = dict(payload.metadata)
+    metadata["source"] = source
+    if optimized:
+        metadata["optimization"] = {
+            "strategy": "xena_uncompressed_row_index",
+            "source_preserved": True,
+        }
+    prepared = payload.model_copy(
+        update={"source": source, "storage_uri": storage_uri, "metadata": metadata}
+    )
+    return prepared, assets
+
+
+async def _prepare_sources(
+    payload: IngestRequest,
+    settings: Settings,
+) -> tuple[IngestRequest, list[DatasetAssetCreate]]:
+    return await asyncio.to_thread(_prepare_sources_sync, payload, settings)
+
+
 async def _handle_ingest_request(
     payload: IngestRequest,
     request: Request,
@@ -722,9 +809,20 @@ async def _handle_ingest_request(
                 "Ingest request failed validation.",
                 details={"issues": [issue.model_dump(mode="json") for issue in report.issues]},
             )
+        payload, assets = await _prepare_sources(payload, settings)
         dataset_create = _dataset_create_from_ingest(payload)
         validate_dataset_storage(settings, dataset_create)
         dataset = await registry.upsert(dataset_create)
+        for asset in assets:
+            await registry.add_asset(dataset.dataset_id, dataset.version, asset)
+        principal = request.state.principal
+        await request.app.state.access_service.audit(
+            action="dataset.upsert",
+            resource_type="dataset",
+            resource_id=dataset.dataset_id,
+            actor_user_id=principal.user_id,
+            metadata={"version": dataset.version},
+        )
     except Exception as exc:
         store.fail(job.job_id, error=str(exc), message="Ingest registration failed.")
         raise
@@ -735,7 +833,7 @@ async def _handle_ingest_request(
             "dataset": dataset.model_dump(mode="json"),
             **({"preview": preview.model_dump(mode="json")} if preview else {}),
         },
-        message="Dataset version registered. Backend data loading should be run by CLI/worker.",
+        message="Dataset version and assets registered; supported read indexes are ready.",
     )
     return IngestResponse(
         status=APIStatus.success,
@@ -778,6 +876,7 @@ def _payload_from_uploaded_file(
     status: str,
     is_default: bool,
     schema_version: str,
+    visibility: str,
     register_dataset: bool,
 ) -> IngestRequest:
     metadata = _json_form_object(metadata_json, "metadata_json")
@@ -805,6 +904,7 @@ def _payload_from_uploaded_file(
         status=status,
         is_default=is_default,
         schema_version=schema_version,
+        visibility=visibility,
         register=register_dataset,
     )
 
@@ -857,6 +957,7 @@ async def validate_uploaded_ingest_file(
     status: str = Form(default="active"),
     is_default: bool = Form(default=False),
     schema_version: str = Form(default="1.0"),
+    visibility: str = Form(default="public"),
     settings: Settings = Depends(get_settings),
 ) -> IngestValidationReport:
     filename, target, size, preview = await _save_and_preview_upload(
@@ -884,6 +985,7 @@ async def validate_uploaded_ingest_file(
         status=status,
         is_default=is_default,
         schema_version=schema_version,
+        visibility=visibility,
         register_dataset=True,
     )
     return _validate_ingest_payload(payload, settings, preview=preview)
@@ -905,6 +1007,7 @@ async def upload_ingest_file(
     status: str = Form(default="active"),
     is_default: bool = Form(default=False),
     schema_version: str = Form(default="1.0"),
+    visibility: str = Form(default="public"),
     register_dataset: bool = Form(default=True, alias="register"),
     settings: Settings = Depends(get_settings),
 ) -> IngestResponse:
@@ -933,6 +1036,7 @@ async def upload_ingest_file(
         status=status,
         is_default=is_default,
         schema_version=schema_version,
+        visibility=visibility,
         register_dataset=register_dataset,
     )
     return await _handle_ingest_request(payload, request, preview=preview)

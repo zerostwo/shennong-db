@@ -7,36 +7,22 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+class UserRole(StrEnum):
+    admin = "admin"
+    user = "user"
+    guest = "guest"
+
+
 class UserStatus(StrEnum):
     active = "active"
     disabled = "disabled"
 
 
-class MembershipRole(StrEnum):
-    owner = "owner"
-    admin = "admin"
-    curator = "curator"
-    analyst = "analyst"
-    viewer = "viewer"
-
-
-class MembershipStatus(StrEnum):
-    active = "active"
-    invited = "invited"
-    disabled = "disabled"
-
-
-class ProjectVisibility(StrEnum):
-    private = "private"
-    lab = "lab"
-    link = "link"
-    public = "public"
-
-
 class UserCreate(BaseModel):
-    email: str = Field(..., min_length=3, max_length=320)
+    email: str
     display_name: str = Field(..., min_length=1, max_length=200)
-    is_superuser: bool = False
+    password: str = Field(..., min_length=10, max_length=256)
+    role: UserRole = UserRole.user
 
     model_config = ConfigDict(extra="forbid")
 
@@ -53,82 +39,25 @@ class UserPublic(BaseModel):
     user_id: str
     email: str
     display_name: str
+    role: UserRole
     status: UserStatus = UserStatus.active
-    is_superuser: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
 
-class OrganizationCreate(BaseModel):
-    slug: str = Field(..., min_length=1, max_length=100)
-    name: str = Field(..., min_length=1, max_length=200)
-    owner_user_id: str | None = None
-
-    model_config = ConfigDict(extra="forbid")
-
-    @field_validator("slug")
-    @classmethod
-    def normalize_slug(cls, value: str) -> str:
-        slug = value.strip().lower()
-        if not slug.replace("-", "").replace("_", "").isalnum():
-            raise ValueError("Slug may only contain letters, numbers, dashes, and underscores")
-        return slug
-
-
-class Organization(BaseModel):
-    org_id: str
-    slug: str
-    name: str
-    created_by: str | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-
-class ProjectCreate(BaseModel):
-    org_id: str = Field(..., min_length=1)
-    slug: str = Field(..., min_length=1, max_length=100)
-    name: str = Field(..., min_length=1, max_length=200)
-    description: str | None = None
-    visibility: ProjectVisibility = ProjectVisibility.private
-
-    model_config = ConfigDict(extra="forbid")
-
-    @field_validator("slug")
-    @classmethod
-    def normalize_slug(cls, value: str) -> str:
-        slug = value.strip().lower()
-        if not slug.replace("-", "").replace("_", "").isalnum():
-            raise ValueError("Slug may only contain letters, numbers, dashes, and underscores")
-        return slug
-
-
-class Project(BaseModel):
-    project_id: str
-    org_id: str
-    slug: str
-    name: str
-    description: str | None = None
-    visibility: ProjectVisibility = ProjectVisibility.private
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-
-class MembershipCreate(BaseModel):
-    org_id: str
-    user_id: str
-    role: MembershipRole = MembershipRole.viewer
+class UserUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    password: str | None = Field(default=None, min_length=10, max_length=256)
+    role: UserRole | None = None
+    status: UserStatus | None = None
 
     model_config = ConfigDict(extra="forbid")
 
 
-class Membership(BaseModel):
-    membership_id: str
-    org_id: str
-    user_id: str
-    role: MembershipRole
-    status: MembershipStatus = MembershipStatus.active
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+    token_name: str = "login"
 
 
 class ApiTokenCreate(BaseModel):
@@ -156,6 +85,29 @@ class ApiTokenCreated(BaseModel):
     data: ApiToken
 
 
+class AuthResponse(BaseModel):
+    user: UserPublic
+    token: ApiTokenCreated
+
+
+class Principal(BaseModel):
+    role: UserRole = UserRole.guest
+    user_id: str | None = None
+    email: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == UserRole.admin
+
+
+class DatasetGrant(BaseModel):
+    dataset_id: str
+    user_id: str
+    granted_by: str | None = None
+    created_at: datetime | None = None
+
+
 class AuditEvent(BaseModel):
     event_id: str
     actor_user_id: str | None = None
@@ -166,22 +118,16 @@ class AuditEvent(BaseModel):
     created_at: datetime | None = None
 
 
-class AccessBootstrapResponse(BaseModel):
-    user: UserPublic
-    organization: Organization
-    membership: Membership
-
-
 class UserListResponse(BaseModel):
     users: list[UserPublic]
 
 
-class OrganizationListResponse(BaseModel):
-    organizations: list[Organization]
+class ApiTokenListResponse(BaseModel):
+    tokens: list[ApiToken]
 
 
-class ProjectListResponse(BaseModel):
-    projects: list[Project]
+class DatasetGrantListResponse(BaseModel):
+    grants: list[DatasetGrant]
 
 
 class AuditEventListResponse(BaseModel):

@@ -1,3 +1,4 @@
+import gzip
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -66,48 +67,39 @@ def test_admin_routes_require_api_key() -> None:
         assert response.status_code == 401
 
 
-def test_admin_access_bootstrap_project_token_and_audit() -> None:
+def test_user_bootstrap_login_and_admin_management() -> None:
     with make_client() as client:
         response = client.get("/v1/admin/users")
         assert response.status_code == 401
 
         response = client.post(
-            "/v1/admin/bootstrap",
-            headers=ADMIN_HEADERS,
+            "/v1/auth/bootstrap",
             json={
-                "user": {
-                    "email": "curator@example.org",
-                    "display_name": "Dataset Curator",
-                    "is_superuser": True,
-                },
-                "organization": {
-                    "slug": "demo-lab",
-                    "name": "Demo Lab",
-                },
+                "email": "curator@example.org",
+                "display_name": "Dataset Curator",
+                "password": "correct-horse-battery-staple",
+                "role": "user",
             },
         )
         assert response.status_code == 201, response.text
         bootstrap = response.json()
         user_id = bootstrap["user"]["user_id"]
-        org_id = bootstrap["organization"]["org_id"]
-        assert bootstrap["membership"]["role"] == "owner"
+        assert bootstrap["user"]["role"] == "admin"
+        assert bootstrap["token"]["token"].startswith("shn_")
 
         response = client.post(
-            "/v1/admin/projects",
-            headers=ADMIN_HEADERS,
+            "/v1/auth/login",
             json={
-                "org_id": org_id,
-                "slug": "pan-cancer-tcells",
-                "name": "Pan-cancer T cell atlas",
-                "description": "Draft project for a public T cell atlas release.",
-                "visibility": "private",
+                "email": "curator@example.org",
+                "password": "correct-horse-battery-staple",
             },
         )
-        assert response.status_code == 201, response.text
-        assert response.json()["slug"] == "pan-cancer-tcells"
+        assert response.status_code == 200, response.text
+        bearer = {"Authorization": f"Bearer {response.json()['token']['token']}"}
+        assert client.get("/v1/auth/me", headers=bearer).json()["role"] == "admin"
 
         response = client.post(
-            "/v1/admin/api-tokens",
+            "/v1/admin/tokens",
             headers=ADMIN_HEADERS,
             json={
                 "user_id": user_id,
@@ -120,19 +112,23 @@ def test_admin_access_bootstrap_project_token_and_audit() -> None:
         assert token["token"].startswith("shn_")
         assert "token_hash" not in token["data"]
         assert token["data"]["scopes"] == ["datasets:read", "datasets:write", "ingest:write"]
+        token_id = token["data"]["token_id"]
+
+        response = client.get("/v1/admin/tokens", headers=ADMIN_HEADERS)
+        assert response.status_code == 200
+        assert token_id in {item["token_id"] for item in response.json()["tokens"]}
+
+        response = client.delete(f"/v1/admin/tokens/{token_id}", headers=ADMIN_HEADERS)
+        assert response.status_code == 204
 
         response = client.get("/v1/admin/users", headers=ADMIN_HEADERS)
         assert response.status_code == 200
         assert response.json()["users"][0]["email"] == "curator@example.org"
 
-        response = client.get(f"/v1/admin/projects?org_id={org_id}", headers=ADMIN_HEADERS)
-        assert response.status_code == 200
-        assert response.json()["projects"][0]["org_id"] == org_id
-
         response = client.get("/v1/admin/audit-events", headers=ADMIN_HEADERS)
         assert response.status_code == 200
         actions = {event["action"] for event in response.json()["events"]}
-        assert {"access.bootstrap", "project.upsert", "api_token.create"} <= actions
+        assert "access.bootstrap" in actions
 
 
 def test_health_and_dataset_registry() -> None:
@@ -145,6 +141,53 @@ def test_health_and_dataset_registry() -> None:
         response = client.get("/v1/catalog/datasets")
         assert response.status_code == 200
         assert response.json()["data"][0]["dataset"] == "tcga_test"
+
+
+def test_sqlite_persists_users_and_datasets(tmp_path: Path) -> None:
+    settings = Settings(
+        environment="test",
+        registry_backend="sqlite",
+        database_path=str(tmp_path / "shennong.db"),
+        data_root=str(tmp_path),
+        local_data_root=str(tmp_path),
+        admin_api_key=ADMIN_KEY,
+    )
+    with TestClient(create_app(settings=settings)) as client:
+        assert (
+            client.post(
+                "/v1/auth/bootstrap",
+                json={
+                    "email": "persistent@example.org",
+                    "display_name": "Persistent Admin",
+                    "password": "persistent-password-123",
+                },
+            ).status_code
+            == 201
+        )
+        assert (
+            client.post(
+                "/v1/ingest",
+                headers=ADMIN_HEADERS,
+                json={
+                    "dataset": "persistent-data",
+                    "version": "v1",
+                    "data_model": "resource",
+                    "backend": "file",
+                },
+            ).status_code
+            == 200
+        )
+
+    with TestClient(create_app(settings=settings)) as client:
+        assert (
+            client.post(
+                "/v1/auth/login",
+                json={"email": "persistent@example.org", "password": "persistent-password-123"},
+            ).status_code
+            == 200
+        )
+        datasets = client.get("/v1/catalog/datasets").json()["data"]
+        assert [item["dataset"] for item in datasets] == ["persistent-data"]
 
 
 def test_ingest_registers_dataset_version(tmp_path: Path) -> None:
@@ -479,22 +522,10 @@ def test_v2_catalog_query_and_agent_call() -> None:
         assert query_body["data"][0]["feature_symbol"] == "IDH1"
         assert query_body["meta"]["n_rows"] == 1
 
-        response = client.get("/v1/agent/tools")
-        assert response.status_code == 200, response.text
-        tool_names = {tool["name"] for tool in response.json()["tools"]}
-        assert {"query_data", "compute", "list_datasets"} <= tool_names
-
-        response = client.post(
-            "/v1/agent/call",
-            json={"tool": "query_data", "args": payload},
-        )
-        assert response.status_code == 200, response.text
-        agent_body = response.json()
-        assert agent_body["tool"] == "query_data"
-        assert agent_body["data"][0]["sample_id"] == "S1"
+        assert client.get("/v1/agent/tools").status_code == 404
 
 
-def test_v2_compute_and_jobs() -> None:
+def test_agent_and_compute_routes_are_absent() -> None:
     with make_client() as client:
         register_dataset(client, "tcga_test", "bulk_expression")
         response = client.post(
@@ -507,25 +538,122 @@ def test_v2_compute_and_jobs() -> None:
                 "execution": {"mode": "auto"},
             },
         )
-        assert response.status_code == 200, response.text
-        job_id = response.json()["job_id"]
-        assert response.json()["status"] == "accepted"
+        assert response.status_code == 404
+        assert client.get("/v1/jobs/old-job", headers=ADMIN_HEADERS).status_code == 404
 
-        response = client.get(f"/v1/jobs/{job_id}", headers=ADMIN_HEADERS)
-        assert response.status_code == 200, response.text
-        assert response.json()["data"]["state"] == "queued"
 
-        response = client.delete(f"/v1/jobs/{job_id}", headers=ADMIN_HEADERS)
+def test_private_dataset_requires_grant(tmp_path: Path) -> None:
+    with make_client(str(tmp_path)) as client:
+        bootstrap = client.post(
+            "/v1/auth/bootstrap",
+            json={
+                "email": "admin@example.org",
+                "display_name": "Admin",
+                "password": "correct-horse-battery-staple",
+            },
+        )
+        assert bootstrap.status_code == 201
+        created = client.post(
+            "/v1/admin/users",
+            headers=ADMIN_HEADERS,
+            json={
+                "email": "member@example.org",
+                "display_name": "Member",
+                "password": "member-password-123",
+                "role": "user",
+            },
+        )
+        assert created.status_code == 201
+        user_id = created.json()["user_id"]
+        registered = client.post(
+            "/v1/ingest",
+            headers=ADMIN_HEADERS,
+            json={
+                "dataset": "unpublished",
+                "version": "v1",
+                "data_model": "table",
+                "dataset_type": "table",
+                "backend": "file",
+                "visibility": "private",
+            },
+        )
+        assert registered.status_code == 200, registered.text
+        assert client.get("/v1/catalog/datasets/unpublished").status_code == 404
+
+        login = client.post(
+            "/v1/auth/login",
+            json={"email": "member@example.org", "password": "member-password-123"},
+        )
+        token = login.json()["token"]["token"]
+        bearer = {"Authorization": f"Bearer {token}"}
+        assert client.get("/v1/catalog/datasets/unpublished", headers=bearer).status_code == 404
+
+        granted = client.put(
+            f"/v1/admin/datasets/unpublished/grants/{user_id}", headers=ADMIN_HEADERS
+        )
+        assert granted.status_code == 200, granted.text
+        assert client.get("/v1/catalog/datasets/unpublished", headers=bearer).status_code == 200
+        visible = client.get("/v1/catalog/datasets", headers=bearer).json()["data"]
+        assert [item["dataset"] for item in visible] == ["unpublished"]
+
+
+def test_reference_assets_are_manifested_and_downloadable(tmp_path: Path) -> None:
+    fasta = tmp_path / "GRCh38.fa"
+    fasta.write_text(">chr1\nACGT\n", encoding="utf-8")
+    with make_client(str(tmp_path)) as client:
+        response = client.post(
+            "/v1/ingest",
+            headers=ADMIN_HEADERS,
+            json={
+                "dataset": "grch38",
+                "version": "v1",
+                "data_model": "reference",
+                "backend": "file",
+                "source": {"reference.fasta": str(fasta)},
+            },
+        )
         assert response.status_code == 200, response.text
-        assert response.json()["data"]["state"] == "cancelled"
+        manifest = client.get("/v1/catalog/datasets/grch38/manifest")
+        assert manifest.status_code == 200, manifest.text
+        asset = manifest.json()["data"]["assets"][0]
+        assert asset["kind"] == "reference"
+        assert "storage_uri" not in asset
+        downloaded = client.get(asset["download_url"])
+        assert downloaded.status_code == 200
+        assert downloaded.content == fasta.read_bytes()
+
+
+def test_xena_gzip_is_decompressed_and_indexed(tmp_path: Path) -> None:
+    matrix = tmp_path / "toil.tsv.gz"
+    with gzip.open(matrix, "wt", encoding="utf-8") as handle:
+        handle.write("gene\tS1\tS2\nENSG1\t1.0\t2.0\n")
+    with make_client(str(tmp_path)) as client:
+        response = client.post(
+            "/v1/ingest",
+            headers=ADMIN_HEADERS,
+            json={
+                "dataset": "toil",
+                "version": "v1",
+                "data_model": "bulk",
+                "backend": "xena",
+                "source": {"expression": str(matrix)},
+                "is_default": True,
+            },
+        )
+        assert response.status_code == 200, response.text
+        manifest = client.get("/v1/catalog/datasets/toil/manifest").json()["data"]
+        assets = {asset["role"]: asset for asset in manifest["assets"]}
+        assert {"source.expression", "expression", "index.expression"} <= set(assets)
+        assert assets["source.expression"]["compression"] == "gzip"
+        optimized = tmp_path / "optimized" / "toil" / "v1" / "toil.tsv"
+        assert optimized.exists()
+        assert Path(f"{optimized}.idx.json").exists()
 
 
 def test_v2_xena_backend_queries_wide_matrix_lazily(tmp_path) -> None:
     matrix = tmp_path / "toil.tsv"
     matrix.write_text(
-        "\t".join(["gene", "S1", "S2", "S3"]) + "\n"
-        "ENSG1\t1.0\t2.0\t3.0\n"
-        "ENSG2\t4.0\t5.0\t6.0\n",
+        "\t".join(["gene", "S1", "S2", "S3"]) + "\nENSG1\t1.0\t2.0\t3.0\nENSG2\t4.0\t5.0\t6.0\n",
         encoding="utf-8",
     )
     build_xena_matrix_index(matrix)

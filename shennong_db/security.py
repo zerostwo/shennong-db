@@ -8,71 +8,64 @@ from fastapi import Depends, Header, HTTPException, Request, status
 
 from shennong_db.api.deps import get_settings
 from shennong_db.config import Settings
-from shennong_db.errors import ValidationError
-from shennong_db.schemas.datasets import DatasetVersionCreate
-
-
-def _configured_admin_key(settings: Settings) -> str:
-    key = settings.admin_api_key
-    if not key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Administrative API is disabled because SHENNONG_ADMIN_API_KEY is not set.",
-        )
-    return key
+from shennong_db.errors import NotFoundError, ValidationError
+from shennong_db.schemas.access import Principal, UserRole
+from shennong_db.schemas.datasets import DatasetVersion, DatasetVersionCreate, DatasetVisibility
 
 
 def _bearer_token(authorization: str | None) -> str | None:
     if not authorization:
         return None
     scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        return None
-    return token
+    return token if scheme.lower() == "bearer" and token else None
 
 
-def _is_valid_admin_token(
-    *,
-    settings: Settings,
-    authorization: str | None,
-    x_admin_key: str | None,
-) -> bool:
-    configured = _configured_admin_key(settings)
-    supplied = x_admin_key or _bearer_token(authorization)
-    if not supplied:
-        return False
-    return secrets.compare_digest(supplied, configured)
-
-
-def require_admin(
+async def get_principal(
+    request: Request,
     settings: Settings = Depends(get_settings),
     authorization: str | None = Header(default=None),
     x_admin_key: str | None = Header(default=None, alias="X-Shennong-Admin-Key"),
-) -> None:
-    if not _is_valid_admin_token(
-        settings=settings,
-        authorization=authorization,
-        x_admin_key=x_admin_key,
+) -> Principal:
+    cached = getattr(request.state, "principal", None)
+    if cached is not None:
+        return cached
+    if (
+        settings.admin_api_key
+        and x_admin_key
+        and secrets.compare_digest(x_admin_key, settings.admin_api_key)
     ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="A valid Shennong admin API key is required.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        principal = Principal(role=UserRole.admin, scopes=["*"])
+    else:
+        token = _bearer_token(authorization)
+        principal = (
+            await request.app.state.access_service.authenticate_token(token) if token else None
+        ) or Principal()
+    request.state.principal = principal
+    return principal
 
 
-def require_admin_request(request: Request) -> None:
-    settings: Settings = request.app.state.settings
-    if not _is_valid_admin_token(
-        settings=settings,
-        authorization=request.headers.get("authorization"),
-        x_admin_key=request.headers.get("x-shennong-admin-key"),
-    ):
+async def require_admin(principal: Principal = Depends(get_principal)) -> Principal:
+    if not principal.is_admin:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="A valid Shennong admin API key is required.",
+            detail="Administrator authentication is required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    return principal
+
+
+async def ensure_dataset_read(request: Request, dataset: DatasetVersion) -> Principal:
+    principal = await get_principal(
+        request,
+        request.app.state.settings,
+        request.headers.get("authorization"),
+        request.headers.get("x-shennong-admin-key"),
+    )
+    if dataset.visibility == DatasetVisibility.public:
+        return principal
+    if await request.app.state.access_service.can_read_dataset(dataset.dataset_id, principal):
+        return principal
+    raise NotFoundError(f"Dataset '{dataset.dataset_id}' was not found")
 
 
 def _assert_data_root_path(settings: Settings, value: str, *, field: str) -> None:
@@ -94,11 +87,7 @@ def _assert_data_root_path(settings: Settings, value: str, *, field: str) -> Non
     if not resolved.is_relative_to(root):
         raise ValidationError(
             "Storage paths must stay under SHENNONG_LOCAL_DATA_ROOT.",
-            details={
-                "field": field,
-                "storage_uri": value,
-                "local_data_root": str(root),
-            },
+            details={"field": field, "storage_uri": value, "local_data_root": str(root)},
         )
 
 
@@ -108,3 +97,8 @@ def validate_dataset_storage(settings: Settings, dataset: DatasetVersionCreate) 
     for key, value in dataset.metadata.items():
         if key.endswith("_uri") and isinstance(value, str):
             _assert_data_root_path(settings, value, field=f"metadata.{key}")
+    sources = dataset.metadata.get("source")
+    if isinstance(sources, dict):
+        for role, value in sources.items():
+            if isinstance(value, str):
+                _assert_data_root_path(settings, value, field=f"source.{role}")

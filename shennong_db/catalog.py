@@ -17,6 +17,9 @@ def dataset_data_model(dataset: DatasetVersion) -> DataModel:
         DatasetType.single_cell: DataModel.single_cell,
         DatasetType.spatial: DataModel.spatial,
         DatasetType.eqtl: DataModel.qtl,
+        DatasetType.table: DataModel.table,
+        DatasetType.reference: DataModel.reference,
+        DatasetType.resource: DataModel.resource,
     }
     return mapping[dataset.type]
 
@@ -31,6 +34,9 @@ def dataset_assays(dataset: DatasetVersion) -> list[str]:
         DatasetType.single_cell: ["rna"],
         DatasetType.spatial: ["spatial_rna"],
         DatasetType.eqtl: ["eqtl"],
+        DatasetType.table: [],
+        DatasetType.reference: [],
+        DatasetType.resource: [],
     }
     return mapping[dataset.type]
 
@@ -40,7 +46,7 @@ def dataset_title(dataset: DatasetVersion) -> str:
 
 
 def dataset_visibility(dataset: DatasetVersion) -> str:
-    return str(dataset.metadata.get("visibility") or "public")
+    return dataset.visibility.value
 
 
 def summarize_dataset(dataset: DatasetVersion) -> CatalogDatasetSummary:
@@ -143,6 +149,15 @@ def semantic_schema(dataset: DatasetVersion) -> dict[str, Any]:
             "measures": ["beta", "se", "pvalue", "qvalue"],
             "return_shapes": ["table"],
         }
+    if dataset.type in {DatasetType.table, DatasetType.reference, DatasetType.resource}:
+        return {
+            **common,
+            "observation": {"type": "asset", "id_field": "asset_id", "fields": {}},
+            "feature": {"type": "asset", "id_fields": ["role"]},
+            "layers": [],
+            "measures": [],
+            "return_shapes": ["asset"],
+        }
     if dataset.type == DatasetType.spatial:
         observation_type = "spot"
         id_field = "cell_id"
@@ -168,6 +183,7 @@ def capabilities(dataset: DatasetVersion) -> dict[str, Any]:
         return custom
     base = {
         "dataset": dataset.dataset_id,
+        "can_download_assets": True,
         "can_filter_observations": True,
         "can_filter_features": dataset.type
         in {
@@ -178,16 +194,9 @@ def capabilities(dataset: DatasetVersion) -> dict[str, Any]:
         },
         "can_query_matrix": dataset.type
         in {DatasetType.bulk_expression, DatasetType.single_cell, DatasetType.spatial},
-        "can_compute_pseudobulk": dataset.type in {DatasetType.single_cell, DatasetType.spatial},
-        "can_compute_de": dataset.type in {DatasetType.single_cell, DatasetType.spatial},
-        "can_compute_signature_score": dataset.type
-        in {DatasetType.bulk_expression, DatasetType.single_cell, DatasetType.spatial},
-        "can_query_embedding": dataset.type in {DatasetType.single_cell, DatasetType.spatial},
-        "can_export_seurat": dataset.type in {DatasetType.single_cell, DatasetType.spatial},
-        "can_export_h5ad": dataset.type in {DatasetType.single_cell, DatasetType.spatial},
+        "can_query_embedding": False,
         "max_sync_cells": 100_000,
         "max_sync_features": 200,
-        "async_required_above_cells": 100_000,
     }
     return base
 

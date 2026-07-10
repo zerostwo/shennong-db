@@ -5,11 +5,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class BackendKind(StrEnum):
+    file = "file"
     clickhouse = "clickhouse"
     tiledb_soma = "tiledb_soma"
     xena = "xena"
     tenx_h5 = "tenx_h5"
-    postgres = "postgres"
     memory = "memory"
 
 
@@ -19,6 +19,9 @@ class DatasetType(StrEnum):
     single_cell = "single_cell"
     spatial = "spatial"
     eqtl = "eqtl"
+    table = "table"
+    reference = "reference"
+    resource = "resource"
 
 
 class DatasetStatus(StrEnum):

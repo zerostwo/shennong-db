@@ -4,11 +4,21 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
-### Removed
-- Removed legacy compatibility routes for typed queries, dataset registry, and tool calls; use `/v1/query`, `/v1/ingest`, and `/v1/agent/*`.
-
 ### Added
-- 待记录：新功能和接口变更会在此预先登记，待发布时移入新版本。
+- Added SQLite-backed users, API tokens, administrator/user/guest roles, dataset grants, and audit events.
+- Added public/private dataset visibility enforcement across catalog, manifests, downloads, and queries.
+- Added versioned asset manifests for matrices, metadata, embeddings, references, indexes, annotations, databases, and tables.
+- Added upload format detection and automatic Xena gzip decompression with row-offset indexing.
+
+### Changed
+- Reduced Docker Compose to one container with only a persistent data path and published port.
+- Defined ShennongDB as a bioinformatics storage/read service with a format-neutral asset-role convention.
+- Replaced the PostgreSQL metadata registry with persistent embedded SQLite for single-container deployment.
+
+### Removed
+- Removed legacy typed query routes and old compatibility contracts.
+- Removed agent, compute, generic job/artifact, organization, project, and membership APIs and code.
+- Removed obsolete WebUI/agent specifications; WebUI redesign is intentionally deferred.
 
 ## [0.1.0] - 2026-07-09
 

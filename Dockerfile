@@ -7,9 +7,10 @@ WORKDIR /app
 
 COPY pyproject.toml README.md /app/
 COPY shennong_db /app/shennong_db
-COPY sql /app/sql
 
 RUN pip install --no-cache-dir .
+
+VOLUME ["/data"]
 
 EXPOSE 8000
 

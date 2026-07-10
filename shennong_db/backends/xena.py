@@ -294,10 +294,7 @@ class XenaExpressionBackend:
             offsets: dict[str, int] = {}
             with matrix_path.open("rb") as handle:
                 header = (
-                    handle.readline()
-                    .decode("utf-8", errors="replace")
-                    .rstrip("\n")
-                    .split("\t")
+                    handle.readline().decode("utf-8", errors="replace").rstrip("\n").split("\t")
                 )
                 while True:
                     offset = handle.tell()

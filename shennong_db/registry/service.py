@@ -1,7 +1,14 @@
+from __future__ import annotations
+
 from shennong_db.errors import ValidationError
 from shennong_db.registry.repository import DatasetRegistryRepository
 from shennong_db.schemas.common import DatasetType
-from shennong_db.schemas.datasets import DatasetVersion, DatasetVersionCreate
+from shennong_db.schemas.datasets import (
+    DatasetAsset,
+    DatasetAssetCreate,
+    DatasetVersion,
+    DatasetVersionCreate,
+)
 
 
 class DatasetRegistryService:
@@ -33,3 +40,14 @@ class DatasetRegistryService:
 
     async def upsert(self, dataset: DatasetVersionCreate) -> DatasetVersion:
         return await self.repository.upsert(dataset)
+
+    async def add_asset(
+        self, dataset_id: str, version: str, asset: DatasetAssetCreate
+    ) -> DatasetAsset:
+        return await self.repository.add_asset(dataset_id, version, asset)
+
+    async def list_assets(self, dataset_id: str, version: str) -> list[DatasetAsset]:
+        return await self.repository.list_assets(dataset_id, version)
+
+    async def get_asset(self, asset_id: str) -> DatasetAsset:
+        return await self.repository.get_asset(asset_id)

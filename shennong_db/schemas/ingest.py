@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from shennong_db.schemas.common import BackendKind, DatasetStatus, DatasetType
+from shennong_db.schemas.datasets import DatasetVisibility
 from shennong_db.schemas.semantic import APIStatus, DataModel, JobRecord
 
 
@@ -22,6 +23,7 @@ class IngestRequest(BaseModel):
     status: DatasetStatus = DatasetStatus.active
     is_default: bool = False
     schema_version: str = "1.0"
+    visibility: DatasetVisibility = DatasetVisibility.public
     register_dataset: bool = Field(default=True, alias="register")
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")

@@ -22,8 +22,8 @@ class DataModel(StrEnum):
     table = "table"
     clinical = "clinical"
     qtl = "qtl"
-    knowledge = "knowledge"
-    multiome = "multiome"
+    reference = "reference"
+    resource = "resource"
 
 
 class ReturnFormat(StrEnum):
@@ -113,48 +113,6 @@ class SemanticQueryResponse(BaseModel):
     meta: QueryMeta
 
 
-class ComputeReturnSpec(BaseModel):
-    format: ReturnFormat = ReturnFormat.json
-    include_plot_data: bool = True
-    shape: ReturnShape | None = None
-
-    model_config = ConfigDict(extra="allow")
-
-
-class ComputeExecutionSpec(BaseModel):
-    mode: Literal["sync", "async", "auto"] = "auto"
-
-    model_config = ConfigDict(extra="forbid")
-
-
-class ComputeSpec(BaseModel):
-    task: str = Field(..., min_length=1)
-    dataset: str = Field(..., min_length=1)
-    version: str | None = None
-    inputs: dict[str, Any] = Field(default_factory=dict)
-    cohort: dict[str, Any] = Field(default_factory=dict)
-    parameters: dict[str, Any] = Field(default_factory=dict)
-    return_spec: ComputeReturnSpec = Field(default_factory=ComputeReturnSpec, alias="return")
-    execution: ComputeExecutionSpec = Field(default_factory=ComputeExecutionSpec)
-
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    @field_validator("version")
-    @classmethod
-    def normalize_latest(cls, value: str | None) -> str | None:
-        if value is None or value == "latest":
-            return None
-        return value
-
-
-class ComputeResponse(BaseModel):
-    status: APIStatus
-    result: dict[str, Any] | None = None
-    job_id: str | None = None
-    state: str | None = None
-    meta: dict[str, Any] = Field(default_factory=dict)
-
-
 class CatalogDatasetSummary(BaseModel):
     dataset: str
     title: str
@@ -183,33 +141,8 @@ class CatalogResponse(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
-class AgentTool(BaseModel):
-    name: str
-    description: str
-    input_schema: dict[str, Any]
-
-
-class AgentToolsResponse(BaseModel):
-    status: APIStatus = APIStatus.success
-    tools: list[AgentTool]
-
-
-class AgentCallRequest(BaseModel):
-    tool: str = Field(..., min_length=1)
-    args: dict[str, Any] = Field(default_factory=dict)
-
-    model_config = ConfigDict(extra="forbid")
-
-
-class AgentCallResponse(BaseModel):
-    status: APIStatus = APIStatus.success
-    tool: str
-    data: Any = None
-    meta: dict[str, Any] = Field(default_factory=dict)
-
-
 class JobCreate(BaseModel):
-    type: Literal["query", "compute", "ingest"] = "compute"
+    type: Literal["ingest"] = "ingest"
     spec: dict[str, Any]
 
     model_config = ConfigDict(extra="forbid")
@@ -229,28 +162,6 @@ class JobRecord(BaseModel):
     updated_at: datetime
 
 
-class JobAcceptedResponse(BaseModel):
-    status: APIStatus = APIStatus.accepted
-    job_id: str
-    state: str
-
-
 class JobResponse(BaseModel):
     status: APIStatus = APIStatus.success
     data: JobRecord
-
-
-class ArtifactRecord(BaseModel):
-    artifact_id: str
-    type: str
-    format: str
-    path: str | None = None
-    size_bytes: int | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    download_url: str | None = None
-    expires_at: datetime | None = None
-
-
-class ArtifactResponse(BaseModel):
-    status: APIStatus = APIStatus.success
-    data: ArtifactRecord

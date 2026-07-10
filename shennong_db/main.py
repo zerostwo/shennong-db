@@ -5,11 +5,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import JSONResponse
 
 from shennong_db.access.repository import build_access_repository
 from shennong_db.access.service import AccessService
-from shennong_db.api.routes import admin, agent, catalog, ingest, semantic
+from shennong_db.api.routes import admin, auth, catalog, ingest, semantic
 from shennong_db.backends.router import BackendRouter
 from shennong_db.cache import AsyncQueryCache, InMemoryTTLCache, RedisQueryCache
 from shennong_db.config import Settings
@@ -63,7 +63,6 @@ def create_app(
     app = FastAPI(
         title=runtime_settings.app_name,
         version=runtime_settings.app_version,
-        default_response_class=ORJSONResponse,
         docs_url="/docs" if runtime_settings.docs_enabled else None,
         redoc_url="/redoc" if runtime_settings.docs_enabled else None,
         openapi_url="/openapi.json" if runtime_settings.docs_enabled else None,
@@ -83,10 +82,10 @@ def create_app(
     async def shennong_exception_handler(
         request: Request,
         exc: ShennongError,
-    ) -> ORJSONResponse:
+    ) -> JSONResponse:
         del request
         body = ErrorResponse(error=exc.code, message=exc.message, details=exc.details)
-        return ORJSONResponse(status_code=exc.status_code, content=body.model_dump(mode="json"))
+        return JSONResponse(status_code=exc.status_code, content=body.model_dump(mode="json"))
 
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
@@ -113,7 +112,7 @@ def create_app(
     app.include_router(ingest.router, prefix=runtime_settings.api_prefix)
     app.include_router(catalog.router, prefix=runtime_settings.api_prefix)
     app.include_router(semantic.router, prefix=runtime_settings.api_prefix)
-    app.include_router(agent.router, prefix=runtime_settings.api_prefix)
+    app.include_router(auth.router, prefix=runtime_settings.api_prefix)
     app.include_router(admin.router, prefix=runtime_settings.api_prefix)
     return app
 
