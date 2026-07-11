@@ -378,7 +378,7 @@ impl ProviderInstaller {
         }
         fs::rename(staging, final_directory).await?;
         match self
-            .run_materializer(&manifest.storage, &resource, &final_directory, &artifacts)
+            .run_materializer(&manifest.storage, &resource, final_directory, &artifacts)
             .await
         {
             Ok(Some(derived)) => artifacts.push(derived),
@@ -489,7 +489,9 @@ impl ProviderInstaller {
         final_directory: &Path,
         artifacts: &[ArtifactUpsert],
     ) -> Result<Option<ArtifactUpsert>, ProviderError> {
-        let Some(materializer) = storage.get("materializer").and_then(serde_json::Value::as_object)
+        let Some(materializer) = storage
+            .get("materializer")
+            .and_then(serde_json::Value::as_object)
         else {
             return Ok(None);
         };
@@ -507,7 +509,9 @@ impl ProviderInstaller {
             .ok_or(ProviderError::InvalidFile)?;
         let source = final_directory.join(source_file);
         let target = final_directory.join(target);
-        if Path::new(source_file).components().any(|part| !matches!(part, Component::Normal(_)))
+        if Path::new(source_file)
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
             || Path::new(target.strip_prefix(final_directory).unwrap_or(&target))
                 .components()
                 .any(|part| !matches!(part, Component::Normal(_)))
