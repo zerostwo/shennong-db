@@ -22,9 +22,9 @@ The API is available on `http://HOST:8000`. Use `/health` for process health,
 ## API
 
 - `GET /api/v1/resources`, `GET|PUT /api/v1/resources/{id}`
-- `GET|PUT /api/v1/resources/{id}/artifacts`
+- `GET|POST /api/v1/resources/{id}/artifacts`
 - `GET /api/v1/resources/{id}/artifacts/{artifact_id}/download`
-- `GET|PUT /api/v1/resources/{id}/relations`
+- `GET|POST /api/v1/resources/{id}/relations`
 - `PUT /api/v1/resources/{id}/grants/{user_id}`
 - `GET /api/v1/audit-events`, `GET /api/v1/capabilities`, `GET /api/v1/providers`
 - `GET /api/v1/agent-guide.md` for an agent-first, metadata-only routing index
