@@ -58,4 +58,6 @@ See [docs/guide.md](docs/guide.md) for production installation and complete API
 usage. See [docs/performance.md](docs/performance.md) for measured query latency
 and the current analysis-readiness boundaries. See
 [docs/gene-identifiers.md](docs/gene-identifiers.md) for GENCODE-aware
-cross-dataset gene coordination.
+cross-dataset gene coordination. Run the isolated production regression baseline
+with `./scripts/test-platform.sh`; details are in
+[docs/production-hardening.md](docs/production-hardening.md).

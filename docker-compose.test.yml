@@ -1,0 +1,26 @@
+services:
+  shennong-db:
+    build: .
+    image: ${SHENNONG_TEST_IMAGE:-shennong-db:test}
+    restart: "no"
+    ports:
+      - "127.0.0.1:${SHENNONG_TEST_PORT:-18081}:8000"
+    environment:
+      SHENNONG_ADMIN_API_KEY: integration-test-admin-key
+      SHENNONG_JWT_SECRET: integration-test-jwt-secret-with-32-bytes
+      SHENNONG_LOCAL_DATA_ROOT: /data
+      SHENNONG_PROVIDER_DIR: /app/providers
+    volumes:
+      - test_data:/data
+      - test_metadata:/var/lib/postgresql/data
+      - ./tests/fixtures:/data/fixtures:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz >/dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 5s
+
+volumes:
+  test_data:
+  test_metadata:
