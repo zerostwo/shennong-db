@@ -491,6 +491,10 @@ impl QueryAdapter for FileExpressionAdapter {
             &scan_query,
             &artifact_uri,
             index_uri.as_ref(),
+            artifact
+                .content_sha256
+                .as_deref()
+                .or(artifact.checksum.as_deref()),
         )
         .await?;
         if query
@@ -718,6 +722,7 @@ async fn expression_response_from_blob(
     query: &ResourceQuery,
     artifact_uri: &ArtifactUri,
     index_uri: Option<&ArtifactUri>,
+    expected_checksum: Option<&str>,
 ) -> Result<Value, QueryError> {
     let Some(index_uri) = index_uri else {
         let stream = storage.get_stream(artifact_uri).await?;
@@ -746,19 +751,43 @@ async fn expression_response_from_blob(
         }
     };
     let index = read_small_text(storage, index_uri).await?;
-    let offsets: Value = serde_json::from_str(&index)?;
+    let index: Value = serde_json::from_str(&index)?;
+    if index["schema_version"] != 2 {
+        return Err(QueryError::NoArtifact);
+    }
+    if let Some(expected) = expected_checksum {
+        let expected = expected.strip_prefix("sha256:").unwrap_or(expected);
+        if index["matrix_sha256"].as_str() != Some(expected) {
+            return Err(QueryError::NoArtifact);
+        }
+    }
     let feature = query.feature.as_ref().ok_or(QueryError::Unsupported)?;
-    let offset = offsets
-        .get("offsets")
+    let feature_index = index
+        .get("features")
         .and_then(|items| items.get(&feature.name))
+        .and_then(Value::as_object)
+        .ok_or(QueryError::NoArtifact)?;
+    let offset = feature_index
+        .get("offset")
         .and_then(Value::as_u64)
         .ok_or(QueryError::NoArtifact)?;
+    let length = feature_index
+        .get("length")
+        .and_then(Value::as_u64)
+        .filter(|length| *length > 0 && *length <= MAX_QUERY_RESPONSE_BYTES as u64)
+        .ok_or(QueryError::NoArtifact)?;
     let meta = storage.head(artifact_uri).await?;
-    let header_end = meta.size.min(1024 * 1024).saturating_sub(1);
+    if offset.saturating_add(length) > meta.size {
+        return Err(QueryError::NoArtifact);
+    }
+    let header_length = index["header"]["length"]
+        .as_u64()
+        .filter(|length| *length > 0 && *length <= 1024 * 1024)
+        .ok_or(QueryError::NoArtifact)?;
     let mut header_reader = storage
         .get_range(
             artifact_uri,
-            ByteRange::new(0, header_end).map_err(|_| QueryError::NoArtifact)?,
+            ByteRange::new(0, header_length - 1).map_err(|_| QueryError::NoArtifact)?,
         )
         .await?;
     let mut header_chunk = Vec::new();
@@ -768,28 +797,20 @@ async fn expression_response_from_blob(
         .next()
         .ok_or(QueryError::MalformedArtifact)?
         .to_owned();
-    let mut width = 64 * 1024_u64;
-    loop {
-        let end = offset
-            .saturating_add(width)
-            .min(meta.size.saturating_sub(1));
-        let mut row_reader = storage
-            .get_range(
-                artifact_uri,
-                ByteRange::new(offset, end).map_err(|_| QueryError::NoArtifact)?,
-            )
-            .await?;
-        let mut row_chunk = Vec::new();
-        row_reader.read_to_end(&mut row_chunk).await?;
-        let row = String::from_utf8_lossy(&row_chunk);
-        if let Some(line) = row.lines().next() {
-            return expression_response(resource, query, &format!("{header}\n{line}\n"));
-        }
-        if end >= meta.size.saturating_sub(1) || width >= MAX_QUERY_RESPONSE_BYTES as u64 {
-            return Err(QueryError::NoArtifact);
-        }
-        width = width.saturating_mul(2);
+    let mut row_reader = storage
+        .get_range(
+            artifact_uri,
+            ByteRange::new(offset, offset + length - 1).map_err(|_| QueryError::NoArtifact)?,
+        )
+        .await?;
+    let mut row_chunk = Vec::new();
+    row_reader.read_to_end(&mut row_chunk).await?;
+    let row = String::from_utf8(row_chunk).map_err(|_| QueryError::MalformedArtifact)?;
+    let line = row.lines().next().ok_or(QueryError::NoArtifact)?;
+    if line.split(['\t', ',']).next() != Some(feature.name.as_str()) {
+        return Err(QueryError::NoArtifact);
     }
+    expression_response(resource, query, &format!("{header}\n{line}\n"))
 }
 
 fn expression_response(

@@ -433,7 +433,9 @@ impl ProviderInstaller {
         if fs::metadata(&destination).await?.len() != file.size {
             return Err(ProviderError::Size);
         }
-        let index_path = self.ensure_index(file, &destination).await?;
+        let index_path = self
+            .ensure_index(file, &destination, &canonical_checksum)
+            .await?;
         Ok(PreparedFile {
             file: file.clone(),
             raw_path: source,
@@ -594,19 +596,32 @@ impl ProviderInstaller {
         &self,
         file: &ProviderFile,
         destination: &Path,
+        canonical_checksum: &str,
     ) -> Result<Option<PathBuf>, ProviderError> {
         if file.index.as_deref() != Some("gene_matrix") {
             return Ok(None);
         }
         let index = PathBuf::from(format!("{}.idx.json", destination.display()));
         if index.is_file() {
-            return Ok(Some(index));
+            let valid = std::fs::read_to_string(&index)
+                .ok()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+                .is_some_and(|value| {
+                    value["schema_version"] == 2
+                        && value["matrix_sha256"].as_str() == Some(canonical_checksum)
+                });
+            if valid {
+                return Ok(Some(index));
+            }
         }
         let source = destination.to_path_buf();
         let output = index.clone();
-        tokio::task::spawn_blocking(move || build_gene_index(&source, &output))
-            .await
-            .map_err(|error| ProviderError::Process(error.to_string()))??;
+        let checksum = canonical_checksum.to_owned();
+        tokio::task::spawn_blocking(move || {
+            build_gene_index_with_checksum(&source, &output, &checksum)
+        })
+        .await
+        .map_err(|error| ProviderError::Process(error.to_string()))??;
         Ok(Some(index))
     }
 }
@@ -779,10 +794,16 @@ fn ensure_disk_space(path: &Path, required: u64) -> Result<(), ProviderError> {
     Ok(())
 }
 
-fn build_gene_index(source: &Path, destination: &Path) -> Result<(), ProviderError> {
+fn build_gene_index_with_checksum(
+    source: &Path,
+    destination: &Path,
+    matrix_sha256: &str,
+) -> Result<(), ProviderError> {
     let mut reader = BufReader::new(std::fs::File::open(source)?);
     let mut line = String::new();
     let mut offset = reader.read_line(&mut line)? as u64;
+    let header_length = offset;
+    let mut features = BTreeMap::new();
     let mut offsets = BTreeMap::new();
     loop {
         line.clear();
@@ -791,6 +812,10 @@ fn build_gene_index(source: &Path, destination: &Path) -> Result<(), ProviderErr
             break;
         }
         if let Some(feature) = line.split('\t').next() {
+            features.insert(
+                feature.to_string(),
+                serde_json::json!({"offset": offset, "length": count}),
+            );
             offsets.insert(feature.to_string(), offset);
         }
         offset += count as u64;
@@ -798,10 +823,20 @@ fn build_gene_index(source: &Path, destination: &Path) -> Result<(), ProviderErr
     let partial = PathBuf::from(format!("{}.part", destination.display()));
     serde_json::to_writer(
         std::fs::File::create(&partial)?,
-        &serde_json::json!({"offsets": offsets}),
+        &serde_json::json!({
+            "schema_version": 2,
+            "matrix_sha256": matrix_sha256,
+            "header": {"offset": 0, "length": header_length},
+            "features": features
+            ,"offsets": offsets
+        }),
     )?;
     std::fs::rename(partial, destination)?;
     Ok(())
+}
+
+fn build_gene_index(source: &Path, destination: &Path) -> Result<(), ProviderError> {
+    build_gene_index_with_checksum(source, destination, "")
 }
 
 async fn upsert_resource_transaction(
