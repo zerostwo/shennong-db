@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Replace WebUI catalog and token mock data with live API calls, expose authentication, and make sidebar navigation collapsible and route-aware.
 - Include endpoint ports in S3 signatures and remove provider staging data after publication.
 - Fetch full Git history for the GitHub Actions secret scan so gitleaks can resolve push ranges.
 

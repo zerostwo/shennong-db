@@ -11,6 +11,13 @@ button { border:0; cursor:pointer; }
 .app-shell { display:flex; min-height:100vh; background:var(--background); }
 .sidebar { width:254px; border-right:1px solid var(--border); background:var(--sidebar); display:flex; flex-direction:column; padding:20px 16px 14px; position:fixed; inset:0 auto 0 0; z-index:20; }
 .main-column { margin-left:254px; min-width:0; width:calc(100% - 254px); }
+.sidebar,.main-column { transition:width .18s ease,margin-left .18s ease; }
+.sidebar-collapsed .sidebar { width:72px; padding-inline:12px; }
+.sidebar-collapsed .main-column { margin-left:72px; width:calc(100% - 72px); }
+.sidebar-collapsed .brand > span:last-child,.sidebar-collapsed .system-status,.sidebar-collapsed .nav-label,.sidebar-collapsed .nav-item span,.sidebar-collapsed .nav-chevron,.sidebar-collapsed .profile-copy,.sidebar-collapsed .profile-button > svg,.sidebar-collapsed .admin-footer > :not(.return-portal),.sidebar-collapsed .return-portal { display:none; }
+.sidebar-collapsed .sidebar-topbar { flex-direction:column; gap:12px; }
+.sidebar-collapsed .nav-item { justify-content:center; padding-inline:0; }
+.sign-in-button { width:100%; justify-content:center; }
 .admin-sidebar { background:var(--admin-sidebar); }
 .sidebar-topbar { display:flex; align-items:center; justify-content:space-between; min-height:34px; margin:0 2px 18px; }
 .brand { display:flex; align-items:center; gap:10px; font-size:18px; font-weight:650; letter-spacing:-.02em; }
