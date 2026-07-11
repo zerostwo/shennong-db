@@ -1,11 +1,16 @@
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State, connect_info::ConnectInfo},
     http::{
-        HeaderMap, StatusCode,
-        header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, RANGE},
+        HeaderMap, HeaderValue, Method, StatusCode,
+        header::{
+            ACCEPT_RANGES, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
+            CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderName, RANGE, REFERRER_POLICY,
+            X_CONTENT_TYPE_OPTIONS,
+        },
     },
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
@@ -23,16 +28,22 @@ use shennong_schema::{
 };
 use shennong_storage::{LocalObjectStorage, ObjectStorage};
 use std::{
+    collections::HashMap,
     env, io,
+    net::SocketAddr,
     path::{Path as FilePath, PathBuf},
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, SeekFrom},
     sync::{OwnedSemaphorePermit, Semaphore},
 };
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    limit::RequestBodyLimitLayer,
+    trace::TraceLayer,
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Clone)]
@@ -48,7 +59,204 @@ struct AppState {
     tiledb: TiledbExecutor,
     data_root: PathBuf,
     downloads: Arc<Semaphore>,
+    query_requests: Arc<Semaphore>,
+    global_requests: Arc<Semaphore>,
+    query_rate: RateLimiter,
+    download_rate: RateLimiter,
     download_timeout: Duration,
+    request_timeout: Duration,
+    trust_proxy_headers: bool,
+}
+
+#[derive(Clone)]
+struct RateLimiter {
+    limit: usize,
+    window: Duration,
+    buckets: Arc<Mutex<HashMap<String, RateBucket>>>,
+}
+
+struct RateBucket {
+    started: Instant,
+    count: usize,
+}
+
+impl RateLimiter {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.max(1),
+            window: Duration::from_secs(60),
+            buckets: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn allow(&self, key: &str) -> bool {
+        let Ok(mut buckets) = self.buckets.lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        let bucket = buckets.entry(key.to_owned()).or_insert(RateBucket {
+            started: now,
+            count: 0,
+        });
+        if now.duration_since(bucket.started) >= self.window {
+            bucket.started = now;
+            bucket.count = 0;
+        }
+        if bucket.count >= self.limit {
+            return false;
+        }
+        bucket.count += 1;
+        true
+    }
+}
+
+async fn request_limits(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let key = client_key(&request, &state);
+    let path = request.uri().path();
+    if path == "/api/v1/query" && !state.query_rate.allow(&key) {
+        return ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "query rate limit exceeded".into(),
+        )
+        .into_response();
+    }
+    if path.ends_with("/download") && !state.download_rate.allow(&key) {
+        return ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "download rate limit exceeded".into(),
+        )
+        .into_response();
+    }
+    let Ok(global_permit) = state.global_requests.clone().try_acquire_owned() else {
+        return ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "request concurrency limit exceeded".into(),
+        )
+        .into_response();
+    };
+    let query_permit = if path == "/api/v1/query" {
+        match state.query_requests.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                drop(global_permit);
+                return ApiError(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "query concurrency limit exceeded".into(),
+                )
+                .into_response();
+            }
+        }
+    } else {
+        None
+    };
+    let response = next.run(request).await;
+    drop(query_permit);
+    drop(global_permit);
+    response
+}
+
+async fn request_timeout_middleware(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if matches!(request.uri().path(), "/health" | "/healthz") {
+        return next.run(request).await;
+    }
+    match tokio::time::timeout(state.request_timeout, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => ApiError(
+            StatusCode::REQUEST_TIMEOUT,
+            "request processing timed out".into(),
+        )
+        .into_response(),
+    }
+}
+
+async fn security_headers(mut request: Request, next: Next) -> Response {
+    let request_id = request
+        .headers()
+        .get("x-request-id")
+        .filter(|value| value.as_bytes().len() <= 128)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_str(&uuid::Uuid::new_v4().to_string()).unwrap());
+    request
+        .headers_mut()
+        .insert(HeaderName::from_static("x-request-id"), request_id.clone());
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(HeaderName::from_static("x-request-id"), request_id);
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+    );
+    if env::var("SHENNONG_ENABLE_HSTS")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+    {
+        headers.insert(
+            HeaderName::from_static("strict-transport-security"),
+            HeaderValue::from_static("max-age=31536000"),
+        );
+    }
+    response
+}
+
+fn client_key(request: &Request, state: &AppState) -> String {
+    if state.trust_proxy_headers
+        && let Some(value) = request
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+    {
+        return value.trim().to_owned();
+    }
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(address)| address.ip().to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn cors_layer() -> CorsLayer {
+    let mut layer = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-shennong-admin-key"),
+            HeaderName::from_static("x-request-id"),
+            RANGE,
+        ]);
+    let origins = env::var("SHENNONG_CORS_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|value| value.trim().parse::<HeaderValue>().ok())
+        .collect::<Vec<_>>();
+    if !origins.is_empty() {
+        layer = layer.allow_origin(AllowOrigin::list(origins));
+    }
+    layer
+}
+
+fn env_duration(name: &str, default_seconds: u64) -> Duration {
+    Duration::from_secs(
+        env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value: &u64| *value > 0)
+            .unwrap_or(default_seconds),
+    )
+}
+
+fn env_usize(name: &str, default_value: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &usize| *value > 0)
+        .unwrap_or(default_value)
 }
 
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
@@ -92,16 +300,40 @@ struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let code = self.1.clone();
+        let message = self.1;
+        let code = public_error_code(&message);
         (
             self.0,
             Json(serde_json::json!({
                 "error": code,
                 "code": code,
+                "message": message,
                 "request_id": uuid::Uuid::new_v4(),
             })),
         )
             .into_response()
+    }
+}
+
+fn public_error_code(message: &str) -> String {
+    let mut code = String::with_capacity(message.len());
+    let mut separator = false;
+    for character in message.chars() {
+        if character.is_ascii_alphanumeric() {
+            code.push(character.to_ascii_lowercase());
+            separator = false;
+        } else if !separator && !code.is_empty() {
+            code.push('_');
+            separator = true;
+        }
+    }
+    while code.ends_with('_') {
+        code.pop();
+    }
+    if code.is_empty() {
+        "request_failed".into()
+    } else {
+        code
     }
 }
 
@@ -134,6 +366,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|value: &u64| *value > 0)
             .unwrap_or(300),
     );
+    let request_timeout = env_duration("SHENNONG_REQUEST_TIMEOUT_SECS", 30);
+    let max_body_bytes = env_usize("SHENNONG_MAX_BODY_BYTES", 1024 * 1024);
+    let global_concurrency = env_usize("SHENNONG_MAX_CONCURRENCY", 64);
+    let query_concurrency = env_usize("SHENNONG_QUERY_MAX_CONCURRENCY", 8);
+    let query_rate = RateLimiter::new(env_usize("SHENNONG_QUERY_RATE_LIMIT_PER_MINUTE", 120));
+    let download_rate = RateLimiter::new(env_usize("SHENNONG_DOWNLOAD_RATE_LIMIT_PER_MINUTE", 60));
+    let trust_proxy_headers = env::var("SHENNONG_TRUST_PROXY_HEADERS")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
     let clickhouse_connect_timeout = Duration::from_secs(
         env::var("SHENNONG_CLICKHOUSE_CONNECT_TIMEOUT_SECS")
             .ok()
@@ -204,7 +444,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         data_root,
         downloads: Arc::new(Semaphore::new(download_concurrency)),
+        query_requests: Arc::new(Semaphore::new(query_concurrency)),
+        global_requests: Arc::new(Semaphore::new(global_concurrency)),
+        query_rate,
+        download_rate,
         download_timeout,
+        request_timeout,
+        trust_proxy_headers,
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -243,13 +489,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/users/{id}", get(get_user).put(upsert_user))
         .route("/api/v1/users/{id}/tokens", post(issue_user_token))
         .route("/api/v1/query", post(query))
-        .with_state(state)
-        .layer(CorsLayer::permissive())
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_limits,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            request_timeout_middleware,
+        ))
+        .layer(middleware::from_fn(security_headers))
+        .layer(RequestBodyLimitLayer::new(max_body_bytes))
+        .layer(cors_layer())
         .layer(TraceLayer::new_for_http());
     let address = env::var("SHENNONG_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
     tracing::info!(%address, "shennong-db v0.1.0 listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1021,8 +1281,28 @@ async fn install_resource(
 
 async fn list_providers(
     State(state): State<AppState>,
-) -> Result<Json<Envelope<Vec<shennong_schema::ProviderManifest>>>, ApiError> {
-    let data = state.providers.list().await.map_err(provider_error)?;
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    let manifests = state.providers.list().await.map_err(provider_error)?;
+    let data = if admin(&headers, &state).await.is_ok() {
+        manifests
+            .into_iter()
+            .map(|manifest| serde_json::to_value(manifest).unwrap_or_default())
+            .collect()
+    } else {
+        manifests
+            .into_iter()
+            .map(|manifest| {
+                serde_json::json!({
+                    "name": manifest.name,
+                    "version": manifest.version,
+                    "kind": manifest.resource_schema.get("kind"),
+                    "title": manifest.resource_schema.get("title"),
+                    "summary": manifest.resource_schema.get("summary"),
+                })
+            })
+            .collect()
+    };
     Ok(Json(Envelope { data }))
 }
 
@@ -1506,7 +1786,8 @@ fn ensure_query_response_size(value: &serde_json::Value) -> Result<(), QueryErro
 mod tests {
     use super::{
         ByteRange, agent_catalog_entry, ensure_query_response_size, parse_single_range,
-        query_error, safe_download_name, valid_identifier, validate_artifact, validate_resource,
+        public_error_code, query_error, safe_download_name, valid_identifier, validate_artifact,
+        validate_resource,
     };
     use axum::{body::to_bytes, response::IntoResponse};
     use serde_json::json;
@@ -1532,6 +1813,19 @@ mod tests {
         assert_eq!(entry["details_url"], "/api/v1/agent/resources/toil");
         assert!(entry.get("dimensions").is_none());
         assert!(entry.get("fields").is_none());
+    }
+
+    #[test]
+    fn public_errors_use_stable_codes_and_safe_messages() {
+        assert_eq!(
+            public_error_code("query_backend_failed"),
+            "query_backend_failed"
+        );
+        assert_eq!(
+            public_error_code("metadata store is unavailable"),
+            "metadata_store_is_unavailable"
+        );
+        assert_eq!(public_error_code(""), "request_failed");
     }
 
     #[test]

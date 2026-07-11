@@ -62,6 +62,34 @@ curl --noproxy '*' --fail --silent "$base/health" \
   | jq -e '.status == "ok"' >/dev/null
 curl --noproxy '*' --fail --silent "$base/healthz" \
   | jq -e '.status == "ok" and .backends.postgres == "ok" and .backends.clickhouse == "ok"' >/dev/null
+curl --noproxy '*' --silent -D "$tmpdir/health.headers" -o /dev/null "$base/health"
+tr -d '\r' < "$tmpdir/health.headers" | grep -qi '^x-content-type-options: nosniff$'
+tr -d '\r' < "$tmpdir/health.headers" | grep -qi '^referrer-policy: no-referrer$'
+tr -d '\r' < "$tmpdir/health.headers" | grep -qi '^content-security-policy:'
+tr -d '\r' < "$tmpdir/health.headers" | grep -qi '^x-request-id:'
+curl --noproxy '*' --silent -D "$tmpdir/request-id.headers" -o /dev/null \
+  -H 'X-Request-ID: integration-request-id' "$base/health"
+tr -d '\r' < "$tmpdir/request-id.headers" | grep -qi '^x-request-id: integration-request-id$'
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -X OPTIONS \
+  -H 'Origin: https://allowed.example.test' -H 'Access-Control-Request-Method: GET' \
+  "$base/health")" = 200 ] || [ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -X OPTIONS \
+  -H 'Origin: https://allowed.example.test' -H 'Access-Control-Request-Method: GET' \
+  "$base/health")" = 204 ]
+curl --noproxy '*' --silent -D "$tmpdir/cors.allowed.headers" -o /dev/null -X OPTIONS \
+  -H 'Origin: https://allowed.example.test' -H 'Access-Control-Request-Method: GET' \
+  "$base/health"
+tr -d '\r' < "$tmpdir/cors.allowed.headers" | grep -qi '^access-control-allow-origin: https://allowed.example.test$'
+curl --noproxy '*' --silent -D "$tmpdir/cors.denied.headers" -o /dev/null -X OPTIONS \
+  -H 'Origin: https://evil.example.test' -H 'Access-Control-Request-Method: GET' \
+  "$base/health"
+! tr -d '\r' < "$tmpdir/cors.denied.headers" | grep -qi '^access-control-allow-origin:'
+truncate -s 1048577 "$tmpdir/oversized.body"
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -X POST \
+  -H "$json" --data-binary "@$tmpdir/oversized.body" "$base/api/v1/query")" = 413 ]
+curl --noproxy '*' --fail --silent "$base/api/v1/providers" \
+  | jq -e '.data | all(.[]; (.files == null))' >/dev/null
+curl --noproxy '*' --fail --silent -H "$admin" "$base/api/v1/providers" \
+  | jq -e '.data | any(.[]; (.files != null))' >/dev/null
 
 curl --noproxy '*' --fail --silent -X PUT -H "$admin" -H "$json" \
   -d '{"id":"fixture-public","kind":"Dataset","metadata":{},"spec":{"backend":"local","operations":["expression"],"version":"test"},"status":"available","provenance":{},"permissions":{"visibility":"public","read_scopes":["resource.read"]}}' \
@@ -292,5 +320,18 @@ until curl --noproxy '*' --fail --silent "$base/healthz" >/dev/null 2>&1; do
 done
 curl --noproxy '*' --fail --silent "$base/api/v1/resources/atomic-success/artifacts" \
   | jq -e '.data | length == 1 and .[0].id == "atomic-success-expression"' >/dev/null
+
+rate_status=
+for _ in $(seq 1 25); do
+  code=$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' \
+    -H 'X-Forwarded-For: 198.51.100.77' -H "$json" \
+    -d '{"resource":"fixture-public","operation":"expression","feature":{"type":"gene","name":"GENE1"},"options":{"limit":1}}' \
+    "$base/api/v1/query")
+  if [ "$code" = 429 ]; then
+    rate_status=429
+    break
+  fi
+done
+[ "$rate_status" = 429 ]
 
 echo 'production hardening baseline: all checks passed'

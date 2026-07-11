@@ -51,6 +51,9 @@ Compose file, starts an isolated stack, and checks:
 - Provider integrity checks: production rejection of missing checksums, streamed
   SHA-256 verification, bounded gzip materialization, free-space preflight, and
   raw-file retention;
+- HTTP boundary checks: request IDs, security headers, configured CORS allowlist,
+  oversized-body rejection, redacted Provider manifests, and per-IP query rate
+  limiting;
 - authenticated administrator writes;
 - a query bounded to two fixture rows;
 - a local expression fixture inside `/data` and rejection of an Artifact path

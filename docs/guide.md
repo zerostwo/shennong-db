@@ -49,6 +49,14 @@ docker compose exec shennong-db shennong-cli import /app/seed/toil-pbmc.json
 curl -fsS http://127.0.0.1:8000/healthz
 ```
 
+HTTP safety defaults deny cross-origin requests, cap request bodies at 1 MiB,
+limit total/query concurrency, apply per-IP query and download rate limits, and
+time out non-health requests. Configure `SHENNONG_CORS_ORIGINS` with a
+comma-separated allowlist when a browser client is required. Set
+`SHENNONG_TRUST_PROXY_HEADERS=1` only behind a trusted reverse proxy; otherwise
+rate limiting uses the direct peer address. HSTS is opt-in through
+`SHENNONG_ENABLE_HSTS=1` after TLS is confirmed at the proxy.
+
 Install or refresh the complete built-in Toil cohort directly from UCSC Xena:
 
 ```bash
