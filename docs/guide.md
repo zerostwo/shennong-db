@@ -11,7 +11,7 @@ Requirements:
 Create the deployment directory and data layout:
 
 ```bash
-sudo mkdir -p /srv/shennong-db/data/{toil,pbmc}
+sudo mkdir -p /srv/shennong-db/data/pbmc
 cd /srv/shennong-db
 curl -fsSLO https://raw.githubusercontent.com/zerostwo/shennong-db/main/docker-compose.yml
 ```
@@ -19,8 +19,6 @@ curl -fsSLO https://raw.githubusercontent.com/zerostwo/shennong-db/main/docker-c
 Place the supported source files at these exact paths:
 
 ```text
-/srv/shennong-db/data/toil/TcgaTargetGtex_rsem_gene_tpm.tsv
-/srv/shennong-db/data/toil/TcgaTargetGtex_rsem_gene_tpm.tsv.idx.json
 /srv/shennong-db/data/pbmc/pbmc1k_filtered_feature_bc_matrix.h5
 /srv/shennong-db/data/pbmc/pbmc3k_filtered_feature_bc_matrix.h5
 /srv/shennong-db/data/pbmc/pbmc4k_filtered_feature_bc_matrix.h5
@@ -132,8 +130,8 @@ curl -sS http://127.0.0.1:8000/api/v1/query \
   }' | jq
 ```
 
-The first Toil request reads the indexed row and fills ClickHouse. Later
-requests use ClickHouse.
+Toil reads only the requested indexed gene row, then joins the bounded result
+to phenotype or survival metadata when the query supplies context.
 
 PBMC accepts a gene symbol or Ensembl identifier and reads the sparse TileDB
 array:
