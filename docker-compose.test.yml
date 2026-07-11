@@ -29,7 +29,6 @@ services:
       SHENNONG_TILEDB_MAX_STDERR_BYTES: "1024"
     volumes:
       - test_data:/data
-      - test_metadata:/var/lib/postgresql/data
       - ./tests/fixtures:/data/fixtures:ro
       - ./tests/providers:/app/test-providers:ro
       - ./seed:/app/seed:ro
@@ -42,4 +41,3 @@ services:
 
 volumes:
   test_data:
-  test_metadata:
