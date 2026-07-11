@@ -17,14 +17,13 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader as AsyncBufReader},
-    process::{Child, Command},
-    sync::{RwLock, Semaphore},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader},
+    process::{Child, ChildStdin, ChildStdout, Command},
+    sync::{Mutex, RwLock, Semaphore},
 };
 
 pub const MAX_QUERY_ROWS: u64 = 10_000;
 pub const MAX_QUERY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-const TILED_B_IO_CHUNK_BYTES: usize = 8 * 1024;
 const MAX_METADATA_ROWS: usize = 1_000_000;
 const MAX_METADATA_LINE_BYTES: usize = 1024 * 1024;
 const MAX_METADATA_CACHE_ENTRIES: usize = 16;
@@ -63,7 +62,14 @@ pub struct TiledbExecutor {
     semaphore: Arc<Semaphore>,
     timeout: Duration,
     max_stdout_bytes: usize,
-    max_stderr_bytes: usize,
+    worker: Arc<Mutex<Option<TiledbWorker>>>,
+}
+
+struct TiledbWorker {
+    script: String,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: AsyncBufReader<ChildStdout>,
 }
 
 impl TiledbExecutor {
@@ -72,14 +78,14 @@ impl TiledbExecutor {
         max_concurrency: usize,
         timeout: Duration,
         max_stdout_bytes: usize,
-        max_stderr_bytes: usize,
+        _max_stderr_bytes: usize,
     ) -> Self {
         Self {
             python: python.into(),
             semaphore: Arc::new(Semaphore::new(max_concurrency.max(1))),
             timeout,
             max_stdout_bytes: max_stdout_bytes.max(1),
-            max_stderr_bytes: max_stderr_bytes.max(1),
+            worker: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -95,6 +101,7 @@ pub async fn execute_tiledb_expression(
         .get("array_uri")
         .and_then(Value::as_str)
         .ok_or(QueryError::Unsupported)?;
+    eprintln!("tiledb script={script} uri={uri}");
     let feature = query.feature.as_ref().ok_or(QueryError::Unsupported)?;
     let limit = query
         .options
@@ -129,7 +136,7 @@ pub async fn execute_tiledb_expression(
         ],
     )
     .await?;
-    let mut response: Value = serde_json::from_slice(&output)?;
+    let mut response = tiledb_response(&output)?;
     response["meta"]["dataset"] = resource.id.clone().into();
     response["meta"]["version"] = resource
         .spec
@@ -150,13 +157,21 @@ pub async fn resolve_tiledb_gene(
         .get("array_uri")
         .and_then(Value::as_str)
         .ok_or(QueryError::Unsupported)?;
-    Ok(serde_json::from_slice(
+    tiledb_response(
         &run_tiledb(
             executor,
             [script, "resolve", "--uri", uri, "--feature", feature],
         )
         .await?,
-    )?)
+    )
+}
+
+fn tiledb_response(output: &[u8]) -> Result<Value, QueryError> {
+    let response: Value = serde_json::from_slice(output)?;
+    if response.get("status").and_then(Value::as_str) == Some("error") {
+        return Err(QueryError::BackendUnavailable);
+    }
+    Ok(response)
 }
 
 pub async fn execute_clickhouse_expression(
@@ -297,43 +312,111 @@ async fn run_tiledb<'a>(
         .clone()
         .try_acquire_owned()
         .map_err(|_| QueryError::BackendBusy)?;
-    let mut child = Command::new(&executor.python)
-        .args(arguments)
-        .kill_on_drop(true)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let stdout = child.stdout.take().ok_or(QueryError::BackendUnavailable)?;
-    let stderr = child.stderr.take().ok_or(QueryError::BackendUnavailable)?;
-    let result = tokio::time::timeout(executor.timeout, async {
-        let (stdout, _stderr, status) = tokio::try_join!(
-            read_capped(stdout, executor.max_stdout_bytes),
-            read_capped(stderr, executor.max_stderr_bytes),
-            async { child.wait().await.map_err(QueryError::Io) },
-        )?;
-        if !status.success() {
-            return Err(QueryError::BackendUnavailable);
+    let arguments: Vec<_> = arguments.into_iter().collect();
+    let script = arguments.first().ok_or(QueryError::BackendUnavailable)?;
+    if !script.ends_with(".py") {
+        return run_tiledb_legacy(executor, arguments).await;
+    }
+    let command = arguments.get(1).ok_or(QueryError::BackendUnavailable)?;
+    let mut request = serde_json::Map::new();
+    request.insert("command".into(), (*command).into());
+    let mut index = 2;
+    while index + 1 < arguments.len() {
+        let key = arguments[index]
+            .strip_prefix("--")
+            .ok_or(QueryError::BackendUnavailable)?;
+        request.insert(key.into(), arguments[index + 1].into());
+        index += 2;
+    }
+    let payload = serde_json::Value::Object(request).to_string() + "\n";
+    let mut worker = executor.worker.lock().await;
+    if worker.as_ref().is_none_or(|value| value.script != *script) {
+        if let Some(value) = worker.as_mut() {
+            stop_child(&mut value.child).await;
         }
-        Ok(stdout)
+        let mut child = Command::new(&executor.python)
+            .arg(script)
+            .arg("serve")
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdin = child.stdin.take().ok_or(QueryError::BackendUnavailable)?;
+        let stdout = child.stdout.take().ok_or(QueryError::BackendUnavailable)?;
+        *worker = Some(TiledbWorker {
+            script: (*script).to_owned(),
+            child,
+            stdin,
+            stdout: AsyncBufReader::new(stdout),
+        });
+    }
+    let value = worker.as_mut().ok_or(QueryError::BackendUnavailable)?;
+    let result = tokio::time::timeout(executor.timeout, async {
+        value.stdin.write_all(payload.as_bytes()).await?;
+        value.stdin.flush().await?;
+        let mut line = String::new();
+        value.stdout.read_line(&mut line).await?;
+        if line.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "tiledb worker exited",
+            ));
+        }
+        if line.len() > executor.max_stdout_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "tiledb worker response too large",
+            ));
+        }
+        Ok(line.into_bytes())
     })
     .await;
     match result {
-        Ok(Ok(stdout)) => Ok(stdout),
+        Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => {
-            stop_child(&mut child).await;
-            Err(error)
+            stop_child(&mut value.child).await;
+            *worker = None;
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                Err(QueryError::BackendOutputTooLarge)
+            } else {
+                Err(QueryError::BackendUnavailable)
+            }
         }
         Err(_) => {
-            stop_child(&mut child).await;
+            stop_child(&mut value.child).await;
+            *worker = None;
             Err(QueryError::BackendTimeout)
         }
     }
 }
 
-async fn stop_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+async fn run_tiledb_legacy(
+    executor: &TiledbExecutor,
+    arguments: Vec<&str>,
+) -> Result<Vec<u8>, QueryError> {
+    let mut child = Command::new(&executor.python)
+        .args(arguments)
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = child.stdout.take().ok_or(QueryError::BackendUnavailable)?;
+    match tokio::time::timeout(executor.timeout, async {
+        let output = read_capped(stdout, executor.max_stdout_bytes).await?;
+        let status = child.wait().await?;
+        if !status.success() {
+            return Err(QueryError::BackendUnavailable);
+        }
+        Ok(output)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            stop_child(&mut child).await;
+            Err(QueryError::BackendTimeout)
+        }
     }
 }
 
@@ -342,7 +425,7 @@ async fn read_capped<R: AsyncRead + Unpin>(
     max_bytes: usize,
 ) -> Result<Vec<u8>, QueryError> {
     let mut output = Vec::new();
-    let mut buffer = [0; TILED_B_IO_CHUNK_BYTES];
+    let mut buffer = [0; 8 * 1024];
     loop {
         let count = reader.read(&mut buffer).await?;
         if count == 0 {
@@ -352,6 +435,13 @@ async fn read_capped<R: AsyncRead + Unpin>(
             return Err(QueryError::BackendOutputTooLarge);
         }
         output.extend_from_slice(&buffer[..count]);
+    }
+}
+
+async fn stop_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
     }
 }
 

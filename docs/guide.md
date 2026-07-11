@@ -16,13 +16,11 @@ cd /srv/shennong-db
 curl -fsSLO https://raw.githubusercontent.com/zerostwo/shennong-db/main/docker-compose.yml
 ```
 
-Place the supported source files at these exact paths:
-
-```text
-/srv/shennong-db/data/pbmc/pbmc1k_filtered_feature_bc_matrix.h5
-/srv/shennong-db/data/pbmc/pbmc3k_filtered_feature_bc_matrix.h5
-/srv/shennong-db/data/pbmc/pbmc4k_filtered_feature_bc_matrix.h5
-```
+PBMC files are not inspected during container startup. Install a PBMC Provider
+explicitly; its manifest owns the source URL, checksum, Resource version, and
+TileDB materializer. This keeps a clean deployment fast and makes missing or
+corrupt input fail as an ingestion job instead of creating an `available`
+Resource.
 
 Create `/srv/shennong-db/.env`:
 
@@ -72,9 +70,9 @@ and GENCODE v23 mapping Artifacts. The completed Resource occupies about 9 GB
 plus the small annotation files.
 
 The one container starts PostgreSQL, internal-only ClickHouse, embedded TileDB,
-and the HTTP API. On first startup it creates TileDB arrays under
-`$SHENNONG_DATA_PATH/tiledb`. ClickHouse data is stored under
-`$SHENNONG_DATA_PATH/clickhouse`.
+and the HTTP API. TileDB targets are created only by an explicit Provider
+materializer under `$SHENNONG_DATA_PATH/resources/<resource>/<version>/derived`;
+ClickHouse data is stored under `$SHENNONG_DATA_PATH/clickhouse`.
 
 Provider installation requires a SHA-256 checksum for every source file.
 Downloaded compressed raw files are retained beside canonical files, and

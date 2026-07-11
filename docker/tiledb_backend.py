@@ -8,8 +8,25 @@ import numpy as np
 import tiledb
 
 
+_METADATA_CACHE = {}
+_MAX_METADATA_CACHE = 16
+
+
 def text(values):
     return [value.decode() if isinstance(value, bytes) else str(value) for value in values]
+
+
+def metadata(uri):
+    if uri not in _METADATA_CACHE:
+        with tiledb.open(uri, "r") as array:
+            _METADATA_CACHE[uri] = {
+                "feature_ids": json.loads(array.meta["feature_ids"]),
+                "feature_names": json.loads(array.meta["feature_names"]),
+                "barcodes": json.loads(array.meta["barcodes"]),
+            }
+        while len(_METADATA_CACHE) > _MAX_METADATA_CACHE:
+            _METADATA_CACHE.pop(next(iter(_METADATA_CACHE)))
+    return _METADATA_CACHE[uri]
 
 
 def describe(uri):
@@ -56,10 +73,11 @@ def ingest(source, uri):
 
 
 def query(uri, feature, limit, offset=0):
+    cached = metadata(uri)
     with tiledb.open(uri, "r") as array:
-        feature_ids = json.loads(array.meta["feature_ids"])
-        feature_names = json.loads(array.meta["feature_names"])
-        barcodes = json.loads(array.meta["barcodes"])
+        feature_ids = cached["feature_ids"]
+        feature_names = cached["feature_names"]
+        barcodes = cached["barcodes"]
         try:
             feature_index = feature_ids.index(feature)
         except ValueError:
@@ -97,9 +115,9 @@ def query(uri, feature, limit, offset=0):
 
 
 def resolve(uri, feature):
-    with tiledb.open(uri, "r") as array:
-        feature_ids = json.loads(array.meta["feature_ids"])
-        feature_names = json.loads(array.meta["feature_names"])
+    cached = metadata(uri)
+    feature_ids = cached["feature_ids"]
+    feature_names = cached["feature_names"]
     query_value = feature.casefold()
     matches = []
     for feature_id, feature_name in zip(feature_ids, feature_names):
@@ -111,6 +129,27 @@ def resolve(uri, feature):
                 "symbol": feature_name,
             })
     return {"matches": matches}
+
+
+def serve():
+    """Keep one interpreter alive and cache TileDB metadata per array URI."""
+    for raw in __import__("sys").stdin:
+        try:
+            request = json.loads(raw)
+            command = request.pop("command")
+            if command == "health":
+                result = {"status": "ok"}
+            elif command == "query":
+                result = query(request["uri"], request["feature"], int(request.get("limit", 1000)), int(request.get("offset", 0)))
+            elif command == "resolve":
+                result = resolve(request["uri"], request["feature"])
+            elif command == "describe":
+                result = describe(request["uri"])
+            else:
+                raise ValueError("unsupported command")
+            print(json.dumps(result, separators=(",", ":")), flush=True)
+        except Exception as error:
+            print(json.dumps({"status": "error", "error": str(error)}, separators=(",", ":")), flush=True)
 
 
 def main():
@@ -129,7 +168,11 @@ def main():
     resolve_parser.add_argument("--feature", required=True)
     describe_parser = commands.add_parser("describe")
     describe_parser.add_argument("--uri", required=True)
+    commands.add_parser("serve")
     arguments = parser.parse_args()
+    if arguments.command == "serve":
+        serve()
+        return
     if arguments.command == "ingest":
         output = ingest(arguments.source, arguments.uri)
     elif arguments.command == "query":

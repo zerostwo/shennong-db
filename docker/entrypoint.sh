@@ -31,18 +31,6 @@ done
 wget -qO- --post-data='CREATE DATABASE IF NOT EXISTS shennong' http://127.0.0.1:8123/ >/dev/null
 wget -qO- --post-data='CREATE TABLE IF NOT EXISTS shennong.expression_cache (dataset String, version String, feature String, sample_id String, value Float64, cached_at DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(cached_at) ORDER BY (dataset, version, feature, sample_id)' http://127.0.0.1:8123/ >/dev/null
 
-for item in \
-  'pbmc1k_filtered_feature_bc_matrix.h5:pbmc-1k' \
-  'pbmc3k_filtered_feature_bc_matrix.h5:pbmc-3k' \
-  'pbmc4k_filtered_feature_bc_matrix.h5:pbmc-4k'
-do
-  source_file="/data/pbmc/${item%%:*}"
-  array_uri="/data/tiledb/${item#*:}"
-  if [ -f "$source_file" ]; then
-    gosu postgres /opt/tiledb/bin/python /app/tiledb_backend.py ingest --source "$source_file" --uri "$array_uri" >/dev/null
-  fi
-done
-
 export SHENNONG_DATABASE_URL="${SHENNONG_DATABASE_URL:-postgres://${POSTGRES_USER}@127.0.0.1:5432/${POSTGRES_DB}}"
 gosu postgres "$@" &
 server_pid=$!
