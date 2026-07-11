@@ -594,10 +594,7 @@ mod tests {
     use std::time::Duration;
     #[test]
     fn encodes_unicode_keys_for_sigv4() {
-        assert_eq!(
-            percent_encode("café/data".as_bytes()),
-            "caf%C3%A9%2Fdata"
-        );
+        assert_eq!(percent_encode("café/data".as_bytes()), "caf%C3%A9%2Fdata");
     }
     #[test]
     fn config_does_not_require_credentials_until_auth() {

@@ -644,6 +644,19 @@ async fn ready(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
             StatusCode::SERVICE_UNAVAILABLE,
             "ClickHouse is unavailable".into(),
         ))
+    } else if let Ok(endpoint) = env::var("SHENNONG_TILEDB_URL")
+        && state
+            .clickhouse_client
+            .get(format!("{endpoint}/health"))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .is_err()
+    {
+        Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "TileDB backend is unavailable".into(),
+        ))
     } else {
         Ok(Json(serde_json::json!({
             "status":"ok",
