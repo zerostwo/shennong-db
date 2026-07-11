@@ -41,7 +41,7 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin shennong
 COPY --from=clickhouse /usr/bin/clickhouse /usr/bin/clickhouse
 COPY --from=clickhouse /etc/clickhouse-server /etc/clickhouse-server
 COPY --from=seaweedfs /usr/bin/weed /usr/local/bin/weed
-COPY --from=web-builder /usr/local /usr/local
+COPY --from=web-builder /usr/local/bin/node /usr/local/bin/node
 COPY --from=web-builder /app/web/.next/standalone /app/web
 COPY --from=web-builder /app/web/.next/static /app/web/.next/static
 COPY --from=builder /app/target/release/shennong-server /usr/local/bin/shennong-server

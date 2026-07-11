@@ -421,13 +421,12 @@ impl ProviderInstaller {
                 artifact.storage_backend = "s3".into();
             }
             for artifact in &mut artifacts {
-                if let Some(index_uri) = artifact.schema_json.get_mut("index_uri") {
-                    if let Some((_, remote)) = uri_map
+                if let Some(index_uri) = artifact.schema_json.get_mut("index_uri")
+                    && let Some((_, remote)) = uri_map
                         .iter()
                         .find(|(local, _)| index_uri.as_str() == Some(local))
-                    {
-                        *index_uri = remote.clone().into();
-                    }
+                {
+                    *index_uri = remote.clone().into();
                 }
             }
         }
