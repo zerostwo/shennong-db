@@ -101,6 +101,42 @@ pub struct AuditEvent {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct User {
+    pub id: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserUpsert {
+    pub id: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub role: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenIssueRequest {
+    #[serde(default = "default_token_lifetime")]
+    pub expires_in: u64,
+    #[serde(default = "default_token_scopes")]
+    pub scopes: Vec<String>,
+}
+
+fn default_token_lifetime() -> u64 {
+    86_400
+}
+
+fn default_token_scopes() -> Vec<String> {
+    vec!["resource.read".into()]
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResourceQuery {
     pub resource: String,
@@ -163,7 +199,7 @@ pub struct Capabilities {
     pub api_version: &'static str,
     pub resources: [&'static str; 4],
     pub query_operations: Vec<&'static str>,
-    pub artifact_formats: [&'static str; 12],
+    pub artifact_formats: [&'static str; 14],
     pub storage_backends: Vec<&'static str>,
     pub query_schema: Value,
 }
@@ -175,10 +211,22 @@ impl Default for Capabilities {
             resources: ["discover", "inspect", "artifacts", "relations"],
             query_operations: vec!["expression", "embedding_expression"],
             artifact_formats: [
-                "h5", "h5ad", "zarr", "parquet", "csv", "tsv", "txt", "bam", "fasta", "gtf",
-                "sqlite", "feather",
+                "h5",
+                "h5ad",
+                "zarr",
+                "parquet",
+                "csv",
+                "tsv",
+                "txt",
+                "bam",
+                "fasta",
+                "gtf",
+                "sqlite",
+                "feather",
+                "tiledb",
+                "clickhouse",
             ],
-            storage_backends: vec!["local"],
+            storage_backends: vec!["local", "clickhouse", "tiledb"],
             query_schema: json!({
                 "resource": "resource id",
                 "operation": "expression",

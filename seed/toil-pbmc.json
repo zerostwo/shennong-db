@@ -6,10 +6,14 @@
       "metadata": {
         "title": "TCGA TARGET GTEx Toil RNA-seq",
         "summary": "Bulk RNA-seq expression matrix spanning TCGA, TARGET, and GTEx samples.",
+        "use_when": "Compare bulk RNA expression across TCGA tumors, TARGET cancers, or GTEx normal tissues.",
         "organism": "human",
         "data_model": "bulk",
         "assays": ["rna"],
-        "feature_identifier": "Ensembl gene ID with version suffix"
+        "feature_identifier": "Ensembl gene ID with version suffix",
+        "example_feature": "ENSG00000242268.2",
+        "dimensions": {"features": 60498, "samples": 19131},
+        "fields": ["sample_id", "ensembl_gene_id", "log2_tpm_plus_0.001"]
       },
       "spec": {
         "version": "2026.07",
@@ -26,11 +30,16 @@
       "metadata": {
         "title": "PBMC 1K filtered feature matrix",
         "summary": "10x Genomics PBMC single-cell filtered feature matrix in HDF5 format.",
+        "use_when": "Inspect sparse gene counts across 1,215 peripheral blood mononuclear cells.",
         "organism": "human",
         "data_model": "single_cell",
-        "assays": ["scRNA-seq"]
+        "assays": ["scRNA-seq"],
+        "feature_identifier": "Ensembl gene ID or gene symbol",
+        "example_feature": "CD3D",
+        "dimensions": {"features": 54872, "cells": 1215},
+        "fields": ["cell_barcode", "ensembl_gene_id", "gene_symbol", "count"]
       },
-      "spec": {"version": "1k", "backend": "local", "operations": ["artifacts"]},
+      "spec": {"version": "1k", "backend": "tiledb", "array_uri": "/data/tiledb/pbmc-1k", "operations": ["expression", "artifacts"]},
       "status": "available",
       "provenance": {"source": "10x Genomics"},
       "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
@@ -41,11 +50,16 @@
       "metadata": {
         "title": "PBMC 3K filtered feature matrix",
         "summary": "10x Genomics PBMC single-cell filtered feature matrix in HDF5 format.",
+        "use_when": "Inspect sparse gene counts across 2,753 peripheral blood mononuclear cells.",
         "organism": "human",
         "data_model": "single_cell",
-        "assays": ["scRNA-seq"]
+        "assays": ["scRNA-seq"],
+        "feature_identifier": "Ensembl gene ID or gene symbol",
+        "example_feature": "CD3D",
+        "dimensions": {"features": 54872, "cells": 2753},
+        "fields": ["cell_barcode", "ensembl_gene_id", "gene_symbol", "count"]
       },
-      "spec": {"version": "3k", "backend": "local", "operations": ["artifacts"]},
+      "spec": {"version": "3k", "backend": "tiledb", "array_uri": "/data/tiledb/pbmc-3k", "operations": ["expression", "artifacts"]},
       "status": "available",
       "provenance": {"source": "10x Genomics"},
       "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
@@ -56,11 +70,16 @@
       "metadata": {
         "title": "PBMC 4K filtered feature matrix",
         "summary": "10x Genomics PBMC single-cell filtered feature matrix in HDF5 format.",
+        "use_when": "Inspect sparse gene counts across 4,719 peripheral blood mononuclear cells.",
         "organism": "human",
         "data_model": "single_cell",
-        "assays": ["scRNA-seq"]
+        "assays": ["scRNA-seq"],
+        "feature_identifier": "Ensembl gene ID or gene symbol",
+        "example_feature": "CD3D",
+        "dimensions": {"features": 54872, "cells": 4719},
+        "fields": ["cell_barcode", "ensembl_gene_id", "gene_symbol", "count"]
       },
-      "spec": {"version": "4k", "backend": "local", "operations": ["artifacts"]},
+      "spec": {"version": "4k", "backend": "tiledb", "array_uri": "/data/tiledb/pbmc-4k", "operations": ["expression", "artifacts"]},
       "status": "available",
       "provenance": {"source": "10x Genomics"},
       "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
@@ -77,6 +96,17 @@
       "storage_backend": "local",
       "schema": {"role": "expression", "layout": "gene_by_sample", "index_uri": "/data/toil/TcgaTargetGtex_rsem_gene_tpm.tsv.idx.json"},
       "provenance": {"source": "UCSC Xena Toil"}
+    },
+    {
+      "id": "toil-clickhouse-cache",
+      "resource_id": "toil",
+      "uri": "shennong.expression_cache",
+      "format": "clickhouse",
+      "size": null,
+      "checksum": null,
+      "storage_backend": "clickhouse",
+      "schema": {"role": "query_cache", "fields": ["dataset", "version", "feature", "sample_id", "value"]},
+      "provenance": {"derived_from": "toil-expression"}
     },
     {
       "id": "pbmc-1k-matrix",
@@ -110,6 +140,39 @@
       "storage_backend": "local",
       "schema": {"role": "expression_matrix", "layout": "10x_hdf5"},
       "provenance": {"source": "10x Genomics"}
+    },
+    {
+      "id": "pbmc-1k-tiledb",
+      "resource_id": "pbmc-1k",
+      "uri": "/data/tiledb/pbmc-1k",
+      "format": "tiledb",
+      "size": null,
+      "checksum": null,
+      "storage_backend": "tiledb",
+      "schema": {"role": "expression", "layout": "sparse_feature_by_cell", "measure": "count"},
+      "provenance": {"derived_from": "pbmc-1k-matrix"}
+    },
+    {
+      "id": "pbmc-3k-tiledb",
+      "resource_id": "pbmc-3k",
+      "uri": "/data/tiledb/pbmc-3k",
+      "format": "tiledb",
+      "size": null,
+      "checksum": null,
+      "storage_backend": "tiledb",
+      "schema": {"role": "expression", "layout": "sparse_feature_by_cell", "measure": "count"},
+      "provenance": {"derived_from": "pbmc-3k-matrix"}
+    },
+    {
+      "id": "pbmc-4k-tiledb",
+      "resource_id": "pbmc-4k",
+      "uri": "/data/tiledb/pbmc-4k",
+      "format": "tiledb",
+      "size": null,
+      "checksum": null,
+      "storage_backend": "tiledb",
+      "schema": {"role": "expression", "layout": "sparse_feature_by_cell", "measure": "count"},
+      "provenance": {"derived_from": "pbmc-4k-matrix"}
     }
   ],
   "relations": [

@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use shennong_schema::{
     Artifact, ArtifactUpsert, AuditEvent, ProviderManifest, Relation, RelationUpsert, Resource,
-    ResourceUpsert,
+    ResourceUpsert, User, UserUpsert,
 };
 use shennong_storage::{LocalObjectStorage, ObjectStorage, StorageError};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -278,6 +278,30 @@ impl ResourceRepository {
         sqlx::query("INSERT INTO resource_grants (resource_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
             .bind(resource_id).bind(user_id).execute(&self.pool).await?;
         Ok(())
+    }
+
+    pub async fn list_users(&self) -> Result<Vec<User>, sqlx::Error> {
+        sqlx::query_as("SELECT id, display_name, email, role, status, created_at, updated_at FROM users ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+    }
+
+    pub async fn get_user(&self, id: &str) -> Result<Option<User>, sqlx::Error> {
+        sqlx::query_as("SELECT id, display_name, email, role, status, created_at, updated_at FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    pub async fn upsert_user(&self, value: &UserUpsert) -> Result<User, sqlx::Error> {
+        sqlx::query_as("INSERT INTO users (id, display_name, email, role, status) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, email = EXCLUDED.email, role = EXCLUDED.role, status = EXCLUDED.status, updated_at = NOW() RETURNING id, display_name, email, role, status, created_at, updated_at")
+            .bind(&value.id)
+            .bind(&value.display_name)
+            .bind(&value.email)
+            .bind(&value.role)
+            .bind(&value.status)
+            .fetch_one(&self.pool)
+            .await
     }
 
     pub async fn can_read_resource(

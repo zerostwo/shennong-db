@@ -1739,6 +1739,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "reqwest",
  "serde_json",
  "shennong-schema",
  "shennong-storage",
@@ -1761,6 +1762,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "http",
+ "reqwest",
  "serde",
  "serde_json",
  "shennong-auth",

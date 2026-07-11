@@ -6,6 +6,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader, Cursor, Seek, SeekFrom},
     path::Path,
+    process::Command,
 };
 use thiserror::Error;
 
@@ -23,6 +24,171 @@ pub enum QueryError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Http(#[from] reqwest::Error),
+    #[error("query backend is unavailable: {0}")]
+    BackendUnavailable(String),
+}
+
+pub async fn execute_tiledb_expression(
+    script: &str,
+    resource: &Resource,
+    query: &ResourceQuery,
+) -> Result<Value, QueryError> {
+    let uri = resource
+        .spec
+        .get("array_uri")
+        .and_then(Value::as_str)
+        .ok_or(QueryError::Unsupported)?;
+    let feature = query.feature.as_ref().ok_or(QueryError::Unsupported)?;
+    let limit = query
+        .options
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(1_000)
+        .clamp(1, 100_000);
+    let output = Command::new("/opt/tiledb/bin/python")
+        .args([
+            script,
+            "query",
+            "--uri",
+            uri,
+            "--feature",
+            &feature.name,
+            "--limit",
+            &limit.to_string(),
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(QueryError::BackendUnavailable(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    let mut response: Value = serde_json::from_slice(&output.stdout)?;
+    response["meta"]["dataset"] = resource.id.clone().into();
+    response["meta"]["version"] = resource
+        .spec
+        .get("version")
+        .cloned()
+        .unwrap_or_else(|| "latest".into());
+    Ok(response)
+}
+
+pub async fn execute_clickhouse_expression(
+    endpoint: &str,
+    resource: &Resource,
+    query: &ResourceQuery,
+) -> Result<Option<Value>, QueryError> {
+    let feature = query.feature.as_ref().ok_or(QueryError::Unsupported)?;
+    let version = query
+        .version
+        .as_deref()
+        .or_else(|| resource.spec.get("version").and_then(Value::as_str))
+        .unwrap_or("latest");
+    let limit = query
+        .options
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(1_000)
+        .clamp(1, 100_000);
+    let statement = format!(
+        "SELECT sample_id, anyLast(value) AS value FROM shennong.expression_cache WHERE dataset = '{}' AND version = '{}' AND feature = '{}' GROUP BY sample_id ORDER BY sample_id LIMIT {limit} FORMAT JSON",
+        quote(&resource.id),
+        quote(version),
+        quote(&feature.name),
+    );
+    let payload: Value = reqwest::Client::new()
+        .get(endpoint)
+        .query(&[("query", statement)])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let rows = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or(QueryError::MalformedArtifact)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let data: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "observation_id": row.get("sample_id"),
+                "sample_id": row.get("sample_id"),
+                "feature_id": feature.name,
+                "feature_symbol": feature.name,
+                "feature": feature.name,
+                "measure": "expression",
+                "value": row.get("value"),
+            })
+        })
+        .collect();
+    Ok(Some(serde_json::json!({
+        "status": "success",
+        "data": data,
+        "meta": {
+            "dataset": resource.id,
+            "version": version,
+            "backend": "clickhouse",
+            "n_rows": data.len(),
+            "columns": ["sample_id", "feature_symbol", "value"],
+            "elapsed_ms": 0.0
+        }
+    })))
+}
+
+pub async fn cache_clickhouse_expression(
+    endpoint: &str,
+    resource: &Resource,
+    query: &ResourceQuery,
+    response: &Value,
+) -> Result<(), QueryError> {
+    let feature = query.feature.as_ref().ok_or(QueryError::Unsupported)?;
+    let version = query
+        .version
+        .as_deref()
+        .or_else(|| resource.spec.get("version").and_then(Value::as_str))
+        .unwrap_or("latest");
+    let lines = response
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or(QueryError::MalformedArtifact)?
+        .iter()
+        .filter_map(|row| {
+            Some(
+                serde_json::json!({
+                    "dataset": resource.id,
+                    "version": version,
+                    "feature": feature.name,
+                    "sample_id": row.get("sample_id")?.as_str()?,
+                    "value": row.get("value")?.as_f64()?,
+                })
+                .to_string(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if lines.is_empty() {
+        return Ok(());
+    }
+    reqwest::Client::new()
+        .post(endpoint)
+        .query(&[(
+            "query",
+            "INSERT INTO shennong.expression_cache FORMAT JSONEachRow",
+        )])
+        .body(lines)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+fn quote(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "''")
 }
 
 #[async_trait]

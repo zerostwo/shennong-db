@@ -2,14 +2,16 @@
 
 ## v0.1.0 release boundary
 
-This release runs PostgreSQL metadata and local artifacts in one Docker image.
-It deliberately does not deploy ClickHouse or TileDB-SOMA: running either
-would turn the simple production path into a multi-service deployment.
+This release ships the API, PostgreSQL, ClickHouse, and TileDB in one Docker
+image and one Compose service. PostgreSQL stores metadata. ClickHouse is an
+internal-only server used for the Toil expression cache. TileDB is embedded in
+the query process and stores sparse PBMC feature-by-cell arrays under `/data`.
 
-The Resource, Artifact, Relation, and query contracts are the stable boundary.
-ClickHouse can later accelerate large bulk expression tables, while TileDB-SOMA
-or AnnData can provide native single-cell matrix queries, without changing the
-agent-facing API. They are planned backends, not current dependencies.
+This all-in-one boundary favors simple deployment and backup. It intentionally
+does not provide independent scaling, upgrades, or failure isolation for the
+internal engines. The Resource, Artifact, Relation, and query contracts remain
+storage-independent so those processes can be split later without changing the
+agent-facing API.
 
 ## Vision
 

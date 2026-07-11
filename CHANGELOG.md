@@ -9,10 +9,17 @@ and [Semantic Versioning](https://semver.org/).
 
 - Rust Resource, Artifact, Relation, access-grant, audit, provider, and query APIs.
 - PostgreSQL metadata, local artifact storage, and Docker Hub publishing.
+- Embedded TileDB sparse arrays and gene-expression queries for PBMC datasets.
+- An internal ClickHouse cache for bulk Toil expression queries.
+- Machine-readable agent discovery with dataset dimensions, fields, identifiers,
+  operations, artifacts, and query examples.
+- Administrator-managed users, roles, status, JWT issuance, and immediate access
+  revocation for disabled users.
 
 ### Changed
 
-- Production deployment now uses one Docker image and one Compose service.
+- Production deployment now uses one Docker image and one Compose service for
+  the API, PostgreSQL, ClickHouse, and TileDB.
 
 ### Removed
 

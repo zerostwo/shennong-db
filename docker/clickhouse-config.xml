@@ -1,0 +1,12 @@
+<clickhouse>
+  <listen_host>127.0.0.1</listen_host>
+  <path>/data/clickhouse/</path>
+  <tmp_path>/data/clickhouse/tmp/</tmp_path>
+  <user_files_path>/data/clickhouse/user_files/</user_files_path>
+  <format_schema_path>/data/clickhouse/format_schemas/</format_schema_path>
+  <access_control_path>/data/clickhouse/access/</access_control_path>
+  <logger>
+    <level>warning</level>
+    <console>true</console>
+  </logger>
+</clickhouse>
