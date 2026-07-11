@@ -25,6 +25,7 @@ COPY providers /app/providers
 COPY seed /app/seed
 COPY docker/entrypoint.sh /usr/local/bin/shennong-entrypoint
 COPY docker/clickhouse-config.xml /etc/clickhouse-server/config.d/shennong.xml
+COPY docker/clickhouse/001_expression_cache.sql /app/clickhouse/001_expression_cache.sql
 COPY docker/tiledb_backend.py /app/tiledb_backend.py
 RUN chmod 755 /usr/local/bin/shennong-entrypoint \
     && chmod 755 /app/tiledb_backend.py \

@@ -35,6 +35,8 @@ services:
       SHENNONG_S3_PRESIGN_DOWNLOADS: "1"
       SHENNONG_CLICKHOUSE_URL_FILE: /run/secrets/clickhouse_url
       SHENNONG_TILEDB_URL: http://tiledb-backend:8090
+      SHENNONG_CLICKHOUSE_CACHE_TTL_DAYS: ${SHENNONG_CLICKHOUSE_CACHE_TTL_DAYS:-30}
+      SHENNONG_CLICKHOUSE_CACHE_MAX_BYTES: ${SHENNONG_CLICKHOUSE_CACHE_MAX_BYTES:-1073741824}
       SHENNONG_PROVIDER_DIR: /app/providers
       SHENNONG_CORS_ORIGINS: ${SHENNONG_CORS_ORIGINS:-}
       SHENNONG_MAX_BODY_BYTES: ${SHENNONG_MAX_BODY_BYTES:-1048576}
@@ -121,6 +123,7 @@ services:
     secrets: [clickhouse_password]
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse/001_expression_cache.sql:/docker-entrypoint-initdb.d/001_expression_cache.sql:ro
     expose: ["8123"]
     networks: [private]
     healthcheck:

@@ -39,8 +39,9 @@ for _ in $(seq 1 60); do
   wget -qO- 'http://127.0.0.1:8123/?query=SELECT%201' >/dev/null 2>&1 && break
   sleep 1
 done
-wget -qO- --post-data='CREATE DATABASE IF NOT EXISTS shennong' http://127.0.0.1:8123/ >/dev/null
-wget -qO- --post-data='CREATE TABLE IF NOT EXISTS shennong.expression_cache (dataset String, version String, feature String, sample_id String, value Float64, cached_at DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(cached_at) ORDER BY (dataset, version, feature, sample_id)' http://127.0.0.1:8123/ >/dev/null
+cache_ttl_days="${SHENNONG_CLICKHOUSE_CACHE_TTL_DAYS:-30}"
+sed "s/__TTL_DAYS__/${cache_ttl_days}/g" /app/clickhouse/001_expression_cache.sql \
+  | clickhouse-client --host 127.0.0.1 --multiquery >/dev/null
 
 export SHENNONG_DATABASE_URL="${SHENNONG_DATABASE_URL:-postgres://${POSTGRES_USER}@127.0.0.1:5432/${POSTGRES_DB}}"
 gosu postgres "$@" &
