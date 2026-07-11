@@ -220,6 +220,12 @@ pub struct UserUpsert {
     pub email: Option<String>,
     pub role: String,
     pub status: String,
+    #[serde(default, skip_serializing)]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub password_hash: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub totp_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

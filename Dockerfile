@@ -1,5 +1,8 @@
 FROM rust:1.97-bookworm AS builder
 
+ARG VCS_REF=unknown
+ARG VERSION=0.1.0
+
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
@@ -8,6 +11,13 @@ RUN cargo build --release --package shennong-server --package shennong-cli
 FROM clickhouse/clickhouse-server:26.4.4.38 AS clickhouse
 
 FROM postgres:17-bookworm
+
+ARG VCS_REF=unknown
+ARG VERSION=0.1.0
+LABEL org.opencontainers.image.source="https://github.com/zerostwo/shennong-db" \
+      org.opencontainers.image.revision="$VCS_REF" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.title="ShennongDB"
 
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes gzip python3 python3-venv wget \

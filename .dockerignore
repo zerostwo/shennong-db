@@ -1,7 +1,12 @@
 .git
+.env
+.env.*
+secrets
 .venv
 __pycache__
 .pytest_cache
 .ruff_cache
 data
-
+target
+web/node_modules
+web/.next

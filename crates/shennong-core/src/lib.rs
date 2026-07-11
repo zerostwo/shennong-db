@@ -73,6 +73,29 @@ pub struct IngestionJob {
     pub error_code: Option<String>,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UserCredentials {
+    pub id: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub password_hash: Option<String>,
+    pub totp_secret: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AccessToken {
+    pub token_hash: String,
+    pub user_id: String,
+    pub issued_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub scopes: serde_json::Value,
+}
+
 enum IngestionStart {
     Available(Resource),
     Started(IngestionJob),
@@ -1205,13 +1228,76 @@ impl ResourceRepository {
             .await
     }
 
+    pub async fn get_user_credentials(
+        &self,
+        email: &str,
+    ) -> Result<Option<UserCredentials>, sqlx::Error> {
+        sqlx::query_as("SELECT id, display_name, email, role, status, password_hash, totp_secret, created_at, updated_at FROM users WHERE LOWER(email) = LOWER($1)")
+            .bind(email)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    pub async fn get_user_security(
+        &self,
+        id: &str,
+    ) -> Result<Option<UserCredentials>, sqlx::Error> {
+        sqlx::query_as("SELECT id, display_name, email, role, status, password_hash, totp_secret, created_at, updated_at FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    pub async fn store_access_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        expires_at: u64,
+        scopes: &serde_json::Value,
+    ) -> Result<(), sqlx::Error> {
+        let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at as i64, 0)
+            .unwrap_or_else(chrono::Utc::now);
+        sqlx::query("INSERT INTO access_tokens (token_hash, user_id, issued_at, expires_at, scopes) VALUES ($1, $2, NOW(), $3, $4)")
+            .bind(token_hash)
+            .bind(user_id)
+            .bind(expires_at)
+            .bind(scopes)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn token_is_active(&self, token_hash: &str) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM access_tokens WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > NOW())")
+            .bind(token_hash)
+            .fetch_one(&self.pool)
+            .await
+    }
+
+    pub async fn revoke_access_token(&self, token_hash: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("UPDATE access_tokens SET revoked_at = NOW() WHERE token_hash = $1 AND revoked_at IS NULL")
+            .bind(token_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn list_access_tokens(&self, user_id: &str) -> Result<Vec<AccessToken>, sqlx::Error> {
+        sqlx::query_as("SELECT token_hash, user_id, issued_at, expires_at, revoked_at, scopes FROM access_tokens WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW() ORDER BY issued_at DESC")
+            .bind(user_id)
+            .fetch_all(&self.pool)
+            .await
+    }
+
     pub async fn upsert_user(&self, value: &UserUpsert) -> Result<User, sqlx::Error> {
-        sqlx::query_as("INSERT INTO users (id, display_name, email, role, status) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, email = EXCLUDED.email, role = EXCLUDED.role, status = EXCLUDED.status, updated_at = NOW() RETURNING id, display_name, email, role, status, created_at, updated_at")
+        sqlx::query_as("INSERT INTO users (id, display_name, email, role, status, password_hash, totp_secret) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, email = EXCLUDED.email, role = EXCLUDED.role, status = EXCLUDED.status, password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash), totp_secret = COALESCE(EXCLUDED.totp_secret, users.totp_secret), updated_at = NOW() RETURNING id, display_name, email, role, status, created_at, updated_at")
             .bind(&value.id)
             .bind(&value.display_name)
             .bind(&value.email)
             .bind(&value.role)
             .bind(&value.status)
+            .bind(&value.password_hash)
+            .bind(&value.totp_secret)
             .fetch_one(&self.pool)
             .await
     }

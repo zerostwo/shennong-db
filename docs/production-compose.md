@@ -32,3 +32,14 @@ an untouched `/data` backup. Review and upload retained objects before restoring
 the dump; the script never deletes the old volume. Rollback is the reverse:
 stop the production stack and start the original single-container Compose file
 with its original volumes.
+
+Release images are immutable semantic-version tags plus a `sha-<git-sha>` tag.
+Verify the recorded digest and signature before deployment:
+
+```sh
+cosign verify zerostwo/shennong-db@sha256:<digest>
+docker pull zerostwo/shennong-db@sha256:<digest>
+```
+
+Never deploy `latest` in production; keep the previous digest available for a
+one-command rollback in the Compose `SHENNONG_IMAGE` variable.

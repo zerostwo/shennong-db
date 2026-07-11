@@ -6,7 +6,7 @@ use axum::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{
             ACCEPT_RANGES, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
-            CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderName, RANGE, REFERRER_POLICY,
+            CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderName, RANGE, REFERRER_POLICY, SET_COOKIE,
             X_CONTENT_TYPE_OPTIONS,
         },
     },
@@ -15,12 +15,14 @@ use axum::{
     routing::{get, post, put},
 };
 use serde::Serialize;
-use shennong_auth::{Principal, Role, issue_token};
+use shennong_auth::{
+    Principal, Role, hash_password, issue_token, token_fingerprint, verify_password, verify_totp,
+};
 use shennong_core::{ProviderInstaller, ResourceRepository};
 use shennong_query::{
     FileExpressionAdapter, MAX_QUERY_RESPONSE_BYTES, QueryAdapter, QueryError, QueryPlanner,
-    TiledbExecutor, cache_clickhouse_expression, execute_clickhouse_expression,
-    execute_tiledb_expression, resolve_tiledb_gene,
+    TiledbExecutor, cache_clickhouse_expression, clickhouse_cache_bytes,
+    execute_clickhouse_expression, execute_tiledb_expression, resolve_tiledb_gene,
 };
 use shennong_schema::{
     ArtifactUpsert, Capabilities, RelationUpsert, ResourceInstallRequest, ResourcePermissions,
@@ -32,12 +34,15 @@ use std::{
     env, io,
     net::SocketAddr,
     path::{Path as FilePath, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
 };
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -65,6 +70,10 @@ struct AppState {
     download_timeout: Duration,
     request_timeout: Duration,
     trust_proxy_headers: bool,
+    cache_fill: Arc<AsyncMutex<()>>,
+    cache_hits: Arc<AtomicU64>,
+    cache_misses: Arc<AtomicU64>,
+    cache_max_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -112,6 +121,37 @@ impl RateLimiter {
 async fn request_limits(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let key = client_key(&request, &state);
     let path = request.uri().path();
+    let authenticated = principal(request.headers(), &state);
+    if !matches!(path, "/api/v1/auth/sign-in" | "/api/v1/auth/verify-2fa")
+        && let Some(token_hash) = authenticated.token_hash.as_deref()
+    {
+        match state.repository.token_is_active(token_hash).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return ApiError(
+                    StatusCode::UNAUTHORIZED,
+                    "token is revoked or expired".into(),
+                )
+                .into_response();
+            }
+            Err(error) => return database_error(error).into_response(),
+        }
+    }
+    if !matches!(path, "/api/v1/auth/sign-in" | "/api/v1/auth/verify-2fa")
+        && let Some(user_id) = authenticated.user_id.as_deref()
+    {
+        match state.repository.get_user(user_id).await {
+            Ok(Some(user))
+                if user.status == "active"
+                    && ((user.role == "admin" && authenticated.role == Role::Admin)
+                        || (user.role == "user" && authenticated.role == Role::User)) => {}
+            Ok(_) => {
+                return ApiError(StatusCode::UNAUTHORIZED, "user session is inactive".into())
+                    .into_response();
+            }
+            Err(error) => return database_error(error).into_response(),
+        }
+    }
     if matches!(path, "/api/v1/query" | "/api/v1/query/batch") && !state.query_rate.allow(&key) {
         return ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -341,7 +381,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
-    let database_url = env::var("SHENNONG_DATABASE_URL")?;
+    let database_url = env_secret("SHENNONG_DATABASE_URL")
+        .ok_or("SHENNONG_DATABASE_URL or SHENNONG_DATABASE_URL_FILE is required")?;
+    let production = env::var("SHENNONG_ENV")
+        .is_ok_and(|value| value.eq_ignore_ascii_case("production"))
+        || env::var("SHENNONG_ROLE").is_ok_and(|value| value == "api");
+    let jwt_secret = env_secret("SHENNONG_JWT_SECRET");
+    let admin_key = env_secret("SHENNONG_ADMIN_API_KEY");
+    if production
+        && (jwt_secret.as_deref().is_none_or(|value| value.len() < 32)
+            || (admin_key.is_some() && admin_key.as_deref().is_none_or(|value| value.len() < 32)))
+    {
+        return Err("production secrets must be at least 32 bytes".into());
+    }
     let data_root =
         PathBuf::from(env::var("SHENNONG_LOCAL_DATA_ROOT").unwrap_or_else(|_| "/data".into()));
     let repository = ResourceRepository::connect(&database_url).await?;
@@ -430,10 +482,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_download_bytes,
         )),
         storage,
-        admin_key: env::var("SHENNONG_ADMIN_API_KEY").ok(),
-        jwt_secret: env::var("SHENNONG_JWT_SECRET").ok(),
-        clickhouse_url: env::var("SHENNONG_CLICKHOUSE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8123".into()),
+        admin_key,
+        jwt_secret,
+        clickhouse_url: env_secret("SHENNONG_CLICKHOUSE_URL")
+            .unwrap_or_else(|| "http://127.0.0.1:8123".into()),
         clickhouse_client: reqwest::Client::builder()
             .connect_timeout(clickhouse_connect_timeout)
             .timeout(clickhouse_timeout)
@@ -456,10 +508,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         download_timeout,
         request_timeout,
         trust_proxy_headers,
+        cache_fill: Arc::new(AsyncMutex::new(())),
+        cache_hits: Arc::new(AtomicU64::new(0)),
+        cache_misses: Arc::new(AtomicU64::new(0)),
+        cache_max_bytes: env::var("SHENNONG_CLICKHOUSE_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1024 * 1024 * 1024),
     };
     let app = Router::new()
         .route("/health", get(health))
         .route("/healthz", get(ready))
+        .route("/metrics", get(metrics))
         .route("/version", get(version))
         .route("/api/v1/resources", get(list_resources))
         .route(
@@ -486,6 +546,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/resources/install", post(install_resource))
         .route("/api/v1/providers", get(list_providers))
         .route("/api/v1/capabilities", get(capabilities))
+        .route("/api/v1/cache/stats", get(cache_stats))
+        .route("/api/v1/cache", axum::routing::delete(clear_cache))
         .route("/.well-known/shennong-agent.json", get(agent_manifest))
         .route("/api/v1/agent-manifest", get(agent_manifest))
         .route("/api/v1/agent/resources/{id}", get(agent_resource))
@@ -494,7 +556,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/genes/resolve", get(resolve_gene))
         .route("/api/v1/users", get(list_users))
         .route("/api/v1/users/{id}", get(get_user).put(upsert_user))
-        .route("/api/v1/users/{id}/tokens", post(issue_user_token))
+        .route(
+            "/api/v1/users/{id}/tokens",
+            get(list_user_tokens).post(issue_user_token),
+        )
+        .route("/api/v1/auth/revoke", post(revoke_current_token))
+        .route("/api/v1/auth/sign-in", post(sign_in))
+        .route("/api/v1/auth/verify-2fa", post(verify_2fa))
+        .route("/api/v1/auth/sign-out", post(sign_out))
+        .route("/api/v1/auth/session", get(auth_session))
+        .route("/api/v1/auth/tokens", post(issue_current_user_token))
         .route("/api/v1/query", post(query))
         .route("/api/v1/query/batch", post(query_batch))
         .route("/api/v1/query/stream", post(query_stream))
@@ -522,8 +593,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn env_secret(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let path = env::var(format!("{name}_FILE")).ok()?;
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+}
+
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status":"ok","service":"ShennongDB","version":"0.1.0"}))
+}
+
+async fn metrics(State(state): State<AppState>) -> Response {
+    let body = format!(
+        "# TYPE shennong_cache_hits_total counter\nshennong_cache_hits_total {}\n# TYPE shennong_cache_misses_total counter\nshennong_cache_misses_total {}\n# TYPE shennong_cache_max_bytes gauge\nshennong_cache_max_bytes {}\n",
+        state.cache_hits.load(Ordering::Relaxed),
+        state.cache_misses.load(Ordering::Relaxed),
+        state.cache_max_bytes,
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain; version=0.0.4")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 async fn ready(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
     if !state.repository.is_ready().await.map_err(database_error)? {
@@ -554,6 +652,368 @@ async fn ready(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
 async fn version() -> Json<serde_json::Value> {
     Json(serde_json::json!({"service":"ShennongDB","version":"0.1.0","api":"v1"}))
 }
+
+#[derive(serde::Deserialize)]
+struct SignInRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(serde::Deserialize)]
+struct Verify2faRequest {
+    challenge: String,
+    code: String,
+}
+
+fn auth_cookie(token: &str, max_age: u64) -> String {
+    let secure = if env::var("SHENNONG_COOKIE_SECURE")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+    {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!("shennong_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}{secure}")
+}
+
+fn expired_auth_cookie() -> &'static str {
+    "shennong_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+}
+
+async fn sign_in(
+    State(state): State<AppState>,
+    Json(value): Json<SignInRequest>,
+) -> Result<Response, ApiError> {
+    if value.email.len() > 320 || value.password.len() > 1024 {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid credentials".into(),
+        ));
+    }
+    let user = state
+        .repository
+        .get_user_credentials(&value.email)
+        .await
+        .map_err(database_error)?
+        .filter(|user| {
+            user.status == "active"
+                && user
+                    .password_hash
+                    .as_deref()
+                    .is_some_and(|hash| verify_password(&value.password, hash))
+        })
+        .ok_or(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid credentials".into(),
+        ))?;
+    let secret = state.jwt_secret.as_deref().ok_or(ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session signing is unavailable".into(),
+    ))?;
+    let role = if user.role == "admin" {
+        Role::Admin
+    } else {
+        Role::User
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "system clock failed".into(),
+            )
+        })?
+        .as_secs();
+    if user.totp_secret.is_some() {
+        let challenge = issue_token(
+            secret,
+            user.id,
+            role,
+            (now + 300) as usize,
+            vec!["auth:2fa".into()],
+        )
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "challenge signing failed".into(),
+            )
+        })?;
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({"data":{"requires_2fa":true,"challenge":challenge}}).to_string(),
+            ))
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "auth response failed".into(),
+                )
+            });
+    }
+    let token = issue_token(
+        secret,
+        user.id.clone(),
+        role,
+        (now + 28_800) as usize,
+        vec!["resource.read".into(), "query.execute".into()],
+    )
+    .map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session signing failed".into(),
+        )
+    })?;
+    state
+        .repository
+        .store_access_token(
+            &token_fingerprint(&token),
+            &user.id,
+            now + 28_800,
+            &serde_json::json!(["resource.read", "query.execute"]),
+        )
+        .await
+        .map_err(database_error)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .header(SET_COOKIE, auth_cookie(&token, 28_800))
+        .body(Body::from(
+            serde_json::json!({"data":{"authenticated":true,"user_id":user.id,"role":role}})
+                .to_string(),
+        ))
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "auth response failed".into(),
+            )
+        })
+}
+
+async fn verify_2fa(
+    State(state): State<AppState>,
+    Json(value): Json<Verify2faRequest>,
+) -> Result<Response, ApiError> {
+    let secret = state.jwt_secret.as_deref().ok_or(ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session signing is unavailable".into(),
+    ))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", value.challenge))
+            .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "invalid challenge".into()))?,
+    );
+    let challenge = Principal::from_headers(&headers, None, Some(secret));
+    if !challenge.has_scopes(&["auth:2fa".into()]) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired challenge".into(),
+        ));
+    }
+    let user_id = challenge.user_id.ok_or(ApiError(
+        StatusCode::UNAUTHORIZED,
+        "invalid challenge".into(),
+    ))?;
+    let user = state
+        .repository
+        .get_user_security(&user_id)
+        .await
+        .map_err(database_error)?
+        .filter(|user| {
+            user.status == "active"
+                && user.totp_secret.as_deref().is_some_and(|totp| {
+                    verify_totp(
+                        totp,
+                        &value.code,
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    )
+                })
+        })
+        .ok_or(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid verification code".into(),
+        ))?;
+    let role = if user.role == "admin" {
+        Role::Admin
+    } else {
+        Role::User
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "system clock failed".into(),
+            )
+        })?
+        .as_secs();
+    let token = issue_token(
+        secret,
+        user.id.clone(),
+        role,
+        (now + 28_800) as usize,
+        vec!["resource.read".into(), "query.execute".into()],
+    )
+    .map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session signing failed".into(),
+        )
+    })?;
+    state
+        .repository
+        .store_access_token(
+            &token_fingerprint(&token),
+            &user.id,
+            now + 28_800,
+            &serde_json::json!(["resource.read", "query.execute"]),
+        )
+        .await
+        .map_err(database_error)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .header(SET_COOKIE, auth_cookie(&token, 28_800))
+        .body(Body::from(
+            serde_json::json!({"data":{"authenticated":true,"user_id":user.id,"role":role}})
+                .to_string(),
+        ))
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "auth response failed".into(),
+            )
+        })
+}
+
+async fn sign_out(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
+    if let Some(token_hash) = principal(&headers, &state).token_hash {
+        state
+            .repository
+            .revoke_access_token(&token_hash)
+            .await
+            .map_err(database_error)?;
+    }
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(SET_COOKIE, expired_auth_cookie())
+        .body(Body::empty())
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "auth response failed".into(),
+            )
+        })
+}
+
+async fn auth_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let principal = principal(&headers, &state);
+    if principal.role == Role::Guest {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "authentication required".into(),
+        ));
+    }
+    if let Some(token_hash) = &principal.token_hash
+        && !state
+            .repository
+            .token_is_active(token_hash)
+            .await
+            .map_err(database_error)?
+    {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "token is revoked or expired".into(),
+        ));
+    }
+    Ok(Json(Envelope {
+        data: serde_json::json!({"authenticated":true,"user_id":principal.user_id,"role":principal.role,"scopes":principal.scopes}),
+    }))
+}
+
+async fn issue_current_user_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<TokenIssueRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let principal = principal(&headers, &state);
+    if principal.role != Role::Admin && !principal.has_scopes(&value.scopes) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "requested scopes exceed the current token".into(),
+        ));
+    }
+    let user_id = principal.user_id.ok_or(ApiError(
+        StatusCode::UNAUTHORIZED,
+        "authentication required".into(),
+    ))?;
+    if !matches!(principal.role, Role::User | Role::Admin) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "authentication required".into(),
+        ));
+    }
+    if !(60..=31_536_000).contains(&value.expires_in)
+        || value.scopes.len() > 32
+        || value
+            .scopes
+            .iter()
+            .any(|scope| scope.is_empty() || scope.len() > 128)
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid token request".into(),
+        ));
+    }
+    let secret = state.jwt_secret.as_deref().ok_or(ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "JWT signing is unavailable".into(),
+    ))?;
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "system clock failed".into(),
+            )
+        })?
+        .as_secs()
+        + value.expires_in;
+    let scopes = value.scopes;
+    let token = issue_token(
+        secret,
+        user_id.clone(),
+        principal.role,
+        expires_at as usize,
+        scopes.clone(),
+    )
+    .map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "token signing failed".into(),
+        )
+    })?;
+    state
+        .repository
+        .store_access_token(
+            &token_fingerprint(&token),
+            &user_id,
+            expires_at,
+            &serde_json::json!(scopes),
+        )
+        .await
+        .map_err(database_error)?;
+    Ok(Json(Envelope {
+        data: serde_json::json!({"token": token, "token_type": "Bearer", "expires_at": expires_at, "token_id": token_fingerprint(&token)}),
+    }))
+}
 async fn capabilities() -> Json<Envelope<serde_json::Value>> {
     let mut data = serde_json::to_value(Capabilities::default()).unwrap_or_default();
     data["batch_features"] = true.into();
@@ -567,6 +1027,73 @@ async fn capabilities() -> Json<Envelope<serde_json::Value>> {
         operations.push("expression_batch".into());
     }
     Json(Envelope { data })
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CacheClearRequest {
+    resource: Option<String>,
+    version: Option<String>,
+}
+
+async fn cache_stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    admin(&headers, &state).await?;
+    let bytes = clickhouse_cache_bytes(&state.clickhouse_client, &state.clickhouse_url)
+        .await
+        .map_err(query_error)?;
+    Ok(Json(Envelope {
+        data: serde_json::json!({
+            "bytes_on_disk": bytes,
+            "max_bytes": state.cache_max_bytes,
+            "hits": state.cache_hits.load(Ordering::Relaxed),
+            "misses": state.cache_misses.load(Ordering::Relaxed),
+            "ttl_days": env::var("SHENNONG_CLICKHOUSE_CACHE_TTL_DAYS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(30)
+        }),
+    }))
+}
+
+async fn clear_cache(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(request): Query<CacheClearRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    admin(&headers, &state).await?;
+    let mut statement = String::from("ALTER TABLE shennong.expression_cache DELETE WHERE 1 = 1");
+    if let Some(resource) = request.resource.as_deref() {
+        statement.push_str(" AND dataset = '");
+        statement.push_str(&resource.replace('\'', "''"));
+        statement.push('\'');
+    }
+    if let Some(version) = request.version.as_deref() {
+        statement.push_str(" AND version = '");
+        statement.push_str(&version.replace('\'', "''"));
+        statement.push('\'');
+    }
+    statement.push_str(" SETTINGS mutations_sync = 1");
+    state
+        .clickhouse_client
+        .post(&state.clickhouse_url)
+        .query(&[("query", statement)])
+        .send()
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cache clear unavailable".into(),
+            )
+        })?
+        .error_for_status()
+        .map_err(|_| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cache clear unavailable".into(),
+            )
+        })?;
+    Ok(Json(Envelope {
+        data: serde_json::json!({"status":"cleared"}),
+    }))
 }
 
 async fn agent_manifest(
@@ -1106,6 +1633,18 @@ async fn admin(headers: &HeaderMap, state: &AppState) -> Result<Principal, ApiEr
         ));
     }
     if let Some(user_id) = &principal.user_id {
+        if let Some(token_hash) = &principal.token_hash
+            && !state
+                .repository
+                .token_is_active(token_hash)
+                .await
+                .map_err(database_error)?
+        {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "token is revoked or expired".into(),
+            ));
+        }
         let user = state
             .repository
             .get_user(user_id)
@@ -1665,6 +2204,16 @@ async fn upsert_user(
 ) -> Result<Json<Envelope<shennong_schema::User>>, ApiError> {
     admin(&headers, &state).await?;
     validate_user(&value, &id)?;
+    let mut value = value;
+    if let Some(password) = value.password.as_deref() {
+        if password.len() < 12 || password.len() > 1024 {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "password must be 12..1024 characters".into(),
+            ));
+        }
+        value.password_hash = Some(hash_password(password));
+    }
     let data = state
         .repository
         .upsert_user(&value)
@@ -1727,13 +2276,30 @@ async fn issue_user_token(
         StatusCode::SERVICE_UNAVAILABLE,
         "JWT signing is unavailable".into(),
     ))?;
-    let token =
-        issue_token(secret, id.clone(), role, expires_at as usize, value.scopes).map_err(|_| {
-            ApiError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "token signing failed".into(),
-            )
-        })?;
+    let scopes = value.scopes;
+    let token = issue_token(
+        secret,
+        id.clone(),
+        role,
+        expires_at as usize,
+        scopes.clone(),
+    )
+    .map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "token signing failed".into(),
+        )
+    })?;
+    state
+        .repository
+        .store_access_token(
+            &token_fingerprint(&token),
+            &id,
+            expires_at,
+            &serde_json::json!(scopes),
+        )
+        .await
+        .map_err(database_error)?;
     audit(
         &state,
         &headers,
@@ -1744,8 +2310,52 @@ async fn issue_user_token(
     )
     .await?;
     Ok(Json(Envelope {
-        data: serde_json::json!({"token": token, "token_type": "Bearer", "expires_at": expires_at}),
+        data: serde_json::json!({"token": token, "token_type": "Bearer", "expires_at": expires_at, "token_id": token_fingerprint(&token)}),
     }))
+}
+
+async fn list_user_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    admin(&headers, &state).await?;
+    let tokens = state
+        .repository
+        .list_access_tokens(&id)
+        .await
+        .map_err(database_error)?;
+    Ok(Json(Envelope {
+        data: tokens
+            .into_iter()
+            .map(|token| {
+                serde_json::json!({
+                    "token_id": token.token_hash,
+                    "user_id": token.user_id,
+                    "issued_at": token.issued_at,
+                    "expires_at": token.expires_at,
+                    "scopes": token.scopes
+                })
+            })
+            .collect(),
+    }))
+}
+
+async fn revoke_current_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let principal = principal(&headers, &state);
+    let token_hash = principal.token_hash.ok_or(ApiError(
+        StatusCode::UNAUTHORIZED,
+        "bearer token authentication is required".into(),
+    ))?;
+    state
+        .repository
+        .revoke_access_token(&token_hash)
+        .await
+        .map_err(database_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn grant_resource(
@@ -1854,23 +2464,44 @@ async fn query(
     .await
     .map_err(query_error)?
     {
+        state.cache_hits.fetch_add(1, Ordering::Relaxed);
         cached
     } else {
+        state.cache_misses.fetch_add(1, Ordering::Relaxed);
+        let _fill_guard = state.cache_fill.lock().await;
+        if let Some(cached) = execute_clickhouse_expression(
+            &state.clickhouse_client,
+            &state.clickhouse_url,
+            &resource,
+            &value,
+        )
+        .await
+        .map_err(query_error)?
+        {
+            state.cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(Json(Envelope { data: cached }));
+        }
         let mut cache_query = value.clone();
         cache_query.options = serde_json::json!({"limit": 100000});
         let full = FileExpressionAdapter::new(state.storage.clone())
             .execute(&resource, &artifacts, &cache_query)
             .await
             .map_err(query_error)?;
-        cache_clickhouse_expression(
-            &state.clickhouse_client,
-            &state.clickhouse_url,
-            &resource,
-            &cache_query,
-            &full,
-        )
-        .await
-        .map_err(query_error)?;
+        let cache_bytes = clickhouse_cache_bytes(&state.clickhouse_client, &state.clickhouse_url)
+            .await
+            .unwrap_or(state.cache_max_bytes);
+        if cache_bytes < state.cache_max_bytes
+            && let Err(error) = cache_clickhouse_expression(
+                &state.clickhouse_client,
+                &state.clickhouse_url,
+                &resource,
+                &cache_query,
+                &full,
+            )
+            .await
+        {
+            tracing::warn!(?error, resource = %resource.id, "clickhouse cache write skipped");
+        }
         limit_response(full, &value)
     };
     ensure_query_response_size(&data).map_err(query_error)?;
@@ -2185,6 +2816,15 @@ async fn can_read(
     principal: &Principal,
     resource: &shennong_schema::Resource,
 ) -> Result<bool, ApiError> {
+    if let Some(token_hash) = &principal.token_hash
+        && !state
+            .repository
+            .token_is_active(token_hash)
+            .await
+            .map_err(database_error)?
+    {
+        return Ok(false);
+    }
     if resource.status != "available" {
         return Ok(false);
     }
@@ -2238,6 +2878,20 @@ async fn audit(
     metadata: serde_json::Value,
 ) -> Result<(), ApiError> {
     let principal = principal(headers, state);
+    let mut metadata = metadata;
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "actor_type".into(),
+            if principal.user_id.is_some() {
+                "user_token"
+            } else if headers.contains_key("x-shennong-admin-key") {
+                "admin_key"
+            } else {
+                "anonymous"
+            }
+            .into(),
+        );
+    }
     state
         .repository
         .record_audit_event(

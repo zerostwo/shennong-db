@@ -63,6 +63,8 @@ pub struct TiledbExecutor {
     timeout: Duration,
     max_stdout_bytes: usize,
     worker: Arc<Mutex<Option<TiledbWorker>>>,
+    endpoint: Option<String>,
+    client: reqwest::Client,
 }
 
 struct TiledbWorker {
@@ -86,6 +88,13 @@ impl TiledbExecutor {
             timeout,
             max_stdout_bytes: max_stdout_bytes.max(1),
             worker: Arc::new(Mutex::new(None)),
+            endpoint: std::env::var("SHENNONG_TILEDB_URL")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            client: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 }
@@ -101,7 +110,6 @@ pub async fn execute_tiledb_expression(
         .get("array_uri")
         .and_then(Value::as_str)
         .ok_or(QueryError::Unsupported)?;
-    eprintln!("tiledb script={script} uri={uri}");
     let feature = query.feature.as_ref().ok_or(QueryError::Unsupported)?;
     let limit = query
         .options
@@ -303,6 +311,23 @@ pub async fn cache_clickhouse_expression(
     Ok(())
 }
 
+pub async fn clickhouse_cache_bytes(
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> Result<u64, QueryError> {
+    let payload = read_bounded_json(
+        client
+            .get(endpoint)
+            .query(&[("query", "SELECT coalesce(sum(bytes_on_disk), 0) AS bytes FROM system.parts WHERE database = 'shennong' AND table = 'expression_cache' AND active FORMAT JSON")])
+            .send()
+            .await?
+            .error_for_status()?,
+        1024 * 1024,
+    )
+    .await?;
+    Ok(payload["data"][0]["bytes"].as_u64().unwrap_or_default())
+}
+
 async fn run_tiledb<'a>(
     executor: &TiledbExecutor,
     arguments: impl IntoIterator<Item = &'a str>,
@@ -330,6 +355,26 @@ async fn run_tiledb<'a>(
     }
     let payload = serde_json::Value::Object(request).to_string() + "\n";
     let mut worker = executor.worker.lock().await;
+    if let Some(endpoint) = &executor.endpoint {
+        let response = tokio::time::timeout(
+            executor.timeout,
+            executor.client.post(endpoint).body(payload).send(),
+        )
+        .await
+        .map_err(|_| QueryError::BackendTimeout)?
+        .map_err(|_| QueryError::BackendUnavailable)?;
+        if !response.status().is_success() {
+            return Err(QueryError::BackendUnavailable);
+        }
+        let output = response
+            .bytes()
+            .await
+            .map_err(|_| QueryError::BackendUnavailable)?;
+        if output.len() > executor.max_stdout_bytes {
+            return Err(QueryError::BackendOutputTooLarge);
+        }
+        return Ok(output.to_vec());
+    }
     if worker.as_ref().is_none_or(|value| value.script != *script) {
         if let Some(value) = worker.as_mut() {
             stop_child(&mut value.child).await;

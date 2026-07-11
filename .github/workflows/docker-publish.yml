@@ -1,49 +1,78 @@
-name: Build and Publish Docker Image
+name: Immutable Docker release
 
 on:
   push:
-    branches:
-      - main
+    tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
 
 env:
   DOCKERHUB_IMAGE: zerostwo/shennong-db
-  VERSION: 0.1.0
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  packages: write
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    environment: production
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Verify Docker Hub token exists
-        env:
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          if [ -z "$DOCKERHUB_TOKEN" ]; then
-            echo "::error::Missing DOCKERHUB_TOKEN secret. Please set it in repo Settings > Secrets and variables > Actions."
-            exit 1
-          fi
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1
         with:
           username: zerostwo
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Build and push immutable release
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
           context: .
           push: true
           tags: |
-            ${{ env.DOCKERHUB_IMAGE }}:latest
-            ${{ env.DOCKERHUB_IMAGE }}:${{ env.VERSION }}
-          platforms: linux/amd64
+            ${{ env.DOCKERHUB_IMAGE }}:${{ github.ref_name || inputs.version }}
+            ${{ env.DOCKERHUB_IMAGE }}:sha-${{ github.sha }}
+          build-args: |
+            VERSION=${{ github.ref_name || inputs.version }}
+            VCS_REF=${{ github.sha }}
+          provenance: true
+          sbom: true
+          outputs: type=registry
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@d94f46e13c6c62f59525ac9a1e147a99dc0b9bf5
+        with:
+          image: ${{ env.DOCKERHUB_IMAGE }}@${{ steps.build.outputs.digest }}
+          artifact-name: shennongdb-${{ github.ref_name || inputs.version }}.spdx.json
+          output-file: shennongdb.spdx.json
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409
+
+      - name: Sign image digest
+        env:
+          IMAGE: ${{ env.DOCKERHUB_IMAGE }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
+
+      - name: Record digest
+        run: echo "${{ env.DOCKERHUB_IMAGE }}@${{ steps.build.outputs.digest }}" > image-digest.txt
+
+      - name: Upload release metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: shennongdb-${{ github.ref_name || inputs.version }}-metadata
+          path: |
+            shennongdb.spdx.json
+            image-digest.txt
