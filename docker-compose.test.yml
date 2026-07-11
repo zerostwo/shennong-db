@@ -9,7 +9,7 @@ services:
       SHENNONG_ADMIN_API_KEY: integration-test-admin-key
       SHENNONG_JWT_SECRET: integration-test-jwt-secret-with-32-bytes
       SHENNONG_LOCAL_DATA_ROOT: /data
-      SHENNONG_PROVIDER_DIR: /app/providers
+      SHENNONG_PROVIDER_DIR: /app/test-providers
       SHENNONG_DOWNLOAD_CONCURRENCY: "1"
       SHENNONG_DOWNLOAD_TIMEOUT_SECS: "30"
       SHENNONG_TILEDB_SCRIPT: /data/fixtures/tiledb-test.py
@@ -21,6 +21,8 @@ services:
       - test_data:/data
       - test_metadata:/var/lib/postgresql/data
       - ./tests/fixtures:/data/fixtures:ro
+      - ./tests/providers:/app/test-providers:ro
+      - ./seed:/app/seed:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz >/dev/null"]
       interval: 2s

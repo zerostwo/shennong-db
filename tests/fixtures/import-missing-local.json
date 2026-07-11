@@ -1,0 +1,26 @@
+{
+  "resources": [
+    {
+      "id": "atomic-missing-local",
+      "kind": "Dataset",
+      "metadata": {},
+      "spec": {},
+      "status": "available",
+      "provenance": {},
+      "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "atomic-missing-local-expression",
+      "resource_id": "atomic-missing-local",
+      "uri": "/data/fixtures/does-not-exist.tsv",
+      "format": "tsv",
+      "size": 1,
+      "checksum": null,
+      "storage_backend": "local",
+      "schema": {"role": "expression"},
+      "provenance": {}
+    }
+  ]
+}

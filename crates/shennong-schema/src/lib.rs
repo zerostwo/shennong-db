@@ -93,7 +93,7 @@ pub struct ResourceUpsert {
     pub metadata: Value,
     #[serde(default)]
     pub spec: Value,
-    #[serde(default = "available")]
+    #[serde(default = "registered")]
     pub status: String,
     #[serde(default)]
     pub provenance: Value,
@@ -101,8 +101,8 @@ pub struct ResourceUpsert {
     pub permissions: ResourcePermissions,
 }
 
-fn available() -> String {
-    "available".into()
+fn registered() -> String {
+    "registered".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

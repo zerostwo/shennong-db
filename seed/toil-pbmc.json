@@ -35,7 +35,7 @@
         "backend": "local",
         "operations": ["expression"]
       },
-      "status": "available",
+      "status": "unavailable",
       "provenance": {"source": "UCSC Xena Toil"},
       "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
     },
@@ -66,7 +66,7 @@
         "supported_context": []
       },
       "spec": {"version": "1k", "backend": "tiledb", "array_uri": "/data/tiledb/pbmc-1k", "operations": ["expression", "artifacts"]},
-      "status": "available",
+      "status": "unavailable",
       "provenance": {"source": "10x Genomics"},
       "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
     },
@@ -97,7 +97,7 @@
         "supported_context": []
       },
       "spec": {"version": "3k", "backend": "tiledb", "array_uri": "/data/tiledb/pbmc-3k", "operations": ["expression", "artifacts"]},
-      "status": "available",
+      "status": "unavailable",
       "provenance": {"source": "10x Genomics"},
       "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
     },
@@ -128,7 +128,7 @@
         "supported_context": []
       },
       "spec": {"version": "4k", "backend": "tiledb", "array_uri": "/data/tiledb/pbmc-4k", "operations": ["expression", "artifacts"]},
-      "status": "available",
+      "status": "unavailable",
       "provenance": {"source": "10x Genomics"},
       "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
     }

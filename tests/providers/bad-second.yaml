@@ -1,0 +1,31 @@
+name: bad-second
+version: "1"
+source: test
+files:
+  - id: first
+    download: https://example.test/first.tsv
+    filename: first.tsv
+    format: tsv
+    download_size: 1
+    size: 1
+    checksum: null
+    compression: null
+    index: null
+  - id: second
+    download: https://example.test/second.tsv
+    filename: ../second.tsv
+    format: tsv
+    download_size: 1
+    size: 1
+    checksum: null
+    compression: null
+    index: null
+resource_schema:
+  kind: Dataset
+resource_spec:
+  backend: local
+  operations: [expression]
+storage:
+  permissions:
+    visibility: public
+    read_scopes: [resource.read]

@@ -5,6 +5,7 @@ base="http://127.0.0.1:${SHENNONG_TEST_PORT:-18081}"
 project="shennong-test-$$"
 compose="${COMPOSE_COMMAND:-docker compose}"
 file="docker-compose.test.yml"
+docker_command=$(printenv DOCKER_COMMAND 2>/dev/null || printf docker)
 admin='X-Shennong-Admin-Key: integration-test-admin-key'
 json='Content-Type: application/json'
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/shennong-test.XXXXXX")
@@ -14,6 +15,10 @@ query_pid=
 run_compose() {
   # ponytail: word splitting lets callers use COMPOSE_COMMAND='sudo docker compose'.
   $compose --project-name "$project" -f "$file" "$@"
+}
+
+run_docker() {
+  $docker_command "$@"
 }
 
 cleanup() {
@@ -244,5 +249,45 @@ sleep 0.2
 [ "$(query_tiledb fixture-tiledb-normal -o /dev/null -w '%{http_code}')" = 429 ]
 wait "$query_pid" 2>/dev/null || true
 query_pid=
+
+curl --noproxy '*' --fail --silent -X PUT -H "$admin" -H "$json" \
+  -d '{"id":"fixture-registered","kind":"Dataset","metadata":{},"spec":{"backend":"local","operations":["expression"]},"status":"registered","provenance":{},"permissions":{"visibility":"public","read_scopes":["resource.read"]}}' \
+  "$base/api/v1/resources/fixture-registered" >/dev/null
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -H "$json" -d '{"resource":"fixture-registered","operation":"expression","feature":{"type":"gene","name":"GENE1"}}' "$base/api/v1/query")" = 404 ]
+
+database_url='postgres://shennong@127.0.0.1:5432/shennong'
+run_compose exec -T -e "SHENNONG_DATABASE_URL=$database_url" shennong-db shennong-cli import /data/fixtures/import-success.json >/dev/null
+curl --noproxy '*' --fail --silent "$base/api/v1/resources/atomic-success" \
+  | jq -e '.data.status == "available"' >/dev/null
+curl --noproxy '*' --fail --silent "$base/api/v1/resources/atomic-success/artifacts" \
+  | jq -e '.data | length == 1 and .[0].id == "atomic-success-expression"' >/dev/null
+if run_compose exec -T -e "SHENNONG_DATABASE_URL=$database_url" shennong-db shennong-cli import /data/fixtures/import-failure.json >/dev/null 2>&1; then
+  exit 1
+fi
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/atomic-failure")" = 404 ]
+if run_compose exec -T -e "SHENNONG_DATABASE_URL=$database_url" shennong-db shennong-cli import /data/fixtures/import-missing-local.json >/dev/null 2>&1; then
+  exit 1
+fi
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/atomic-missing-local")" = 404 ]
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -H "$admin" -H "$json" -d '{"name":"bad-second"}' "$base/api/v1/resources/install")" = 422 ]
+container_id=$(run_compose ps -q shennong-db)
+run_docker exec "$container_id" psql -U shennong -d shennong -A -t -c "SELECT status FROM ingestion_jobs WHERE provider_name = 'bad-second'" > "$tmpdir/bad-second.status"
+[ "$(tr -d '\r\n' < "$tmpdir/bad-second.status")" = failed ]
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/bad-second")" = 404 ]
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -H "$admin" -H "$json" -d '{"name":"bad-materialization"}' "$base/api/v1/resources/install")" = 422 ]
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/bad-materialization")" = 404 ]
+run_docker exec "$container_id" psql -U shennong -d shennong -c "UPDATE ingestion_jobs SET status = 'downloading' WHERE provider_name = 'bad-second'" >/dev/null
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -H "$admin" -H "$json" -d '{"name":"bad-second"}' "$base/api/v1/resources/install")" = 422 ]
+run_compose exec -T -e "SHENNONG_DATABASE_URL=$database_url" shennong-db shennong-cli import /app/seed/toil-pbmc.json >/dev/null
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/toil")" = 404 ]
+run_compose restart shennong-db >/dev/null
+attempt=0
+until curl --noproxy '*' --fail --silent "$base/healthz" >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 90 ] || exit 1
+  sleep 2
+done
+curl --noproxy '*' --fail --silent "$base/api/v1/resources/atomic-success/artifacts" \
+  | jq -e '.data | length == 1 and .[0].id == "atomic-success-expression"' >/dev/null
 
 echo 'production hardening baseline: all checks passed'

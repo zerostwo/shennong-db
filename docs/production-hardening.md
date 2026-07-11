@@ -24,6 +24,7 @@ with sudo, preserve that variable explicitly:
 ```bash
 SHENNONG_TEST_IMAGE=zerostwo/shennong-db:0.1.0 \
   COMPOSE_COMMAND='sudo --preserve-env=SHENNONG_TEST_IMAGE docker compose' \
+  DOCKER_COMMAND='sudo docker' \
   ./scripts/test-platform.sh
 ```
 
@@ -44,6 +45,9 @@ Compose file, starts an isolated stack, and checks:
   invalid-range rejection, a large sparse-file probe, and concurrency limiting;
 - bounded TileDB subprocesses and shared ClickHouse HTTP clients, including
   timeout, output-cap, non-zero-exit, and concurrency regression checks;
+- atomic seed import and provider-ingestion state checks, including failed
+  transaction rollback, duplicate-provider rejection, unavailable resources,
+  and restart persistence;
 - authenticated administrator writes;
 - a query bounded to two fixture rows;
 - a local expression fixture inside `/data` and rejection of an Artifact path

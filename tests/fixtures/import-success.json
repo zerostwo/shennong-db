@@ -1,0 +1,26 @@
+{
+  "resources": [
+    {
+      "id": "atomic-success",
+      "kind": "Dataset",
+      "metadata": {},
+      "spec": {"backend": "local", "operations": ["expression"]},
+      "status": "available",
+      "provenance": {},
+      "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "atomic-success-expression",
+      "resource_id": "atomic-success",
+      "uri": "/data/fixtures/expression.tsv",
+      "format": "tsv",
+      "size": 29,
+      "checksum": null,
+      "storage_backend": "local",
+      "schema": {"role": "expression"},
+      "provenance": {}
+    }
+  ]
+}

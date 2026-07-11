@@ -92,20 +92,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let repository = ResourceRepository::connect(&database_url).await?;
             repository.migrate().await?;
             let input: ImportBundle = serde_json::from_slice(&std::fs::read(bundle)?)?;
-            for resource in &input.resources {
-                repository.upsert_resource(resource).await?;
-            }
-            for artifact in &input.artifacts {
-                repository.upsert_artifact(artifact).await?;
-            }
-            for relation in &input.relations {
-                repository.upsert_relation(relation).await?;
-            }
-            for grant in &input.grants {
-                repository
-                    .grant_resource(&grant.resource_id, &grant.user_id)
-                    .await?;
-            }
+            let grants = input
+                .grants
+                .iter()
+                .map(|grant| (grant.resource_id.clone(), grant.user_id.clone()))
+                .collect::<Vec<_>>();
+            repository
+                .import_atomic(
+                    &input.resources,
+                    &input.artifacts,
+                    &input.relations,
+                    &grants,
+                )
+                .await?;
             println!(
                 "imported {} resources, {} artifacts, {} relations, {} grants",
                 input.resources.len(),

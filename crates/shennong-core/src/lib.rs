@@ -3,7 +3,7 @@ use shennong_schema::{
     Artifact, ArtifactUpsert, AuditEvent, ProviderFile, ProviderManifest, Relation, RelationUpsert,
     Resource, ResourcePermissions, ResourceUpsert, User, UserUpsert,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read},
@@ -32,6 +32,12 @@ pub enum ProviderError {
     InvalidFile,
     #[error("provider permissions are invalid")]
     InvalidPermissions,
+    #[error("provider installation is already in progress")]
+    Busy,
+    #[error("provider ingestion state is invalid")]
+    InvalidState,
+    #[error("an available resource requires at least one artifact")]
+    MissingArtifact,
     #[error("provider file processing failed: {0}")]
     Process(String),
     #[error(transparent)]
@@ -42,6 +48,21 @@ pub enum ProviderError {
     Http(#[from] reqwest::Error),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct IngestionJob {
+    pub id: String,
+    pub provider_name: String,
+    pub provider_version: String,
+    pub resource_id: String,
+    pub status: String,
+    pub error_code: Option<String>,
+}
+
+enum IngestionStart {
+    Available(Resource),
+    Started(IngestionJob),
 }
 
 pub struct ProviderInstaller {
@@ -79,10 +100,62 @@ impl ProviderInstaller {
         if manifest.files.is_empty() {
             return Err(ProviderError::InvalidFile);
         }
+        let job = match repository
+            .start_ingestion(&manifest.name, &manifest.version, &manifest.name)
+            .await?
+        {
+            IngestionStart::Available(resource) => return Ok(resource),
+            IngestionStart::Started(job) => job,
+        };
+        let staging = self
+            .data_root
+            .join("resources")
+            .join(".staging")
+            .join(&job.id);
+        let final_directory = self
+            .data_root
+            .join("resources")
+            .join(&manifest.name)
+            .join(&manifest.version);
+        let result = self
+            .install_staged(repository, &manifest, &job, &staging, &final_directory)
+            .await;
+        match result {
+            Ok(resource) => Ok(resource),
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging).await;
+                let _ = repository.fail_ingestion(&job.id, error.code()).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn install_staged(
+        &self,
+        repository: &ResourceRepository,
+        manifest: &ProviderManifest,
+        job: &IngestionJob,
+        staging: &Path,
+        final_directory: &Path,
+    ) -> Result<Resource, ProviderError> {
+        if fs::try_exists(final_directory).await? {
+            return Err(ProviderError::InvalidState);
+        }
+        fs::create_dir_all(staging).await?;
+        repository
+            .transition_ingestion(&job.id, "downloading")
+            .await?;
+        for file in &manifest.files {
+            self.validate_file(file)?;
+        }
         let mut files = Vec::with_capacity(manifest.files.len());
         for file in &manifest.files {
-            files.push((file, self.prepare_file(&manifest, file).await?));
+            self.prepare_file(file, staging).await?;
+            files.push(file.clone());
         }
+        repository
+            .transition_ingestion(&job.id, "verifying")
+            .await?;
         let mut metadata = serde_json::Map::new();
         metadata.insert("name".into(), manifest.name.clone().into());
         metadata.insert("source".into(), manifest.source.clone());
@@ -113,40 +186,52 @@ impl ProviderInstaller {
             .cloned()
             .unwrap_or_default();
         spec.insert("version".into(), manifest.version.clone().into());
-        let resource = repository
-            .upsert_resource(&ResourceUpsert {
-                id: manifest.name.clone(),
-                kind,
-                metadata: metadata.into(),
-                spec: spec.into(),
-                status: "available".into(),
-                provenance: serde_json::json!({"source": manifest.source, "version": manifest.version}),
-                permissions,
-            })
-            .await?;
-        for (file, path) in files {
+        let resource = ResourceUpsert {
+            id: manifest.name.clone(),
+            kind,
+            metadata: metadata.into(),
+            spec: spec.into(),
+            status: "available".into(),
+            provenance: serde_json::json!({"source": manifest.source, "version": manifest.version}),
+            permissions,
+        };
+        let mut artifacts = Vec::with_capacity(files.len());
+        for file in files {
             let mut schema = file.schema.as_object().cloned().unwrap_or_default();
+            let path = final_directory.join(&file.filename);
             if file.index.as_deref() == Some("gene_matrix") {
                 schema.insert(
                     "index_uri".into(),
                     format!("{}.idx.json", path.display()).into(),
                 );
             }
-            repository
-                .upsert_artifact(&ArtifactUpsert {
-                    id: file.id.clone(),
-                    resource_id: resource.id.clone(),
-                    uri: path.display().to_string(),
-                    format: file.format.clone(),
-                    size: Some(file.size as i64),
-                    checksum: file.checksum.clone(),
-                    storage_backend: "local".into(),
-                    schema_json: schema.into(),
-                    provenance: serde_json::json!({"source": manifest.source, "version": manifest.version, "download": file.download}),
-                })
-                .await?;
+            artifacts.push(ArtifactUpsert {
+                id: file.id.clone(),
+                resource_id: resource.id.clone(),
+                uri: path.display().to_string(),
+                format: file.format.clone(),
+                size: Some(file.size as i64),
+                checksum: file.checksum.clone(),
+                storage_backend: "local".into(),
+                schema_json: schema.into(),
+                provenance: serde_json::json!({"source": manifest.source, "version": manifest.version, "download": file.download}),
+            });
         }
-        Ok(resource)
+        repository
+            .transition_ingestion(&job.id, "materializing")
+            .await?;
+        if let Some(parent) = final_directory.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::rename(staging, final_directory).await?;
+        let result = repository
+            .publish_ingestion(&job.id, &resource, &artifacts)
+            .await
+            .map_err(ProviderError::Database);
+        if result.is_err() {
+            let _ = fs::remove_dir_all(final_directory).await;
+        }
+        result
     }
 
     pub async fn list(&self) -> Result<Vec<ProviderManifest>, ProviderError> {
@@ -181,31 +266,10 @@ impl ProviderInstaller {
 
     async fn prepare_file(
         &self,
-        manifest: &ProviderManifest,
         file: &ProviderFile,
-    ) -> Result<PathBuf, ProviderError> {
-        if file.id.is_empty()
-            || file.download_size > self.max_download_bytes as u64
-            || Path::new(&file.filename)
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(ProviderError::InvalidFile);
-        }
-        let directory = self
-            .data_root
-            .join("resources")
-            .join(&manifest.name)
-            .join(&manifest.version);
-        fs::create_dir_all(&directory).await?;
+        directory: &Path,
+    ) -> Result<(), ProviderError> {
         let destination = directory.join(&file.filename);
-        if fs::metadata(&destination)
-            .await
-            .is_ok_and(|metadata| metadata.len() == file.size)
-        {
-            self.ensure_index(file, &destination).await?;
-            return Ok(destination);
-        }
         let source = if file.compression.as_deref() == Some("gzip") {
             PathBuf::from(format!("{}.gz", destination.display()))
         } else {
@@ -232,7 +296,26 @@ impl ProviderInstaller {
             return Err(ProviderError::Size);
         }
         self.ensure_index(file, &destination).await?;
-        Ok(destination)
+        Ok(())
+    }
+
+    fn validate_file(&self, file: &ProviderFile) -> Result<(), ProviderError> {
+        if file.id.is_empty()
+            || file.download_size > self.max_download_bytes as u64
+            || Path::new(&file.filename)
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(ProviderError::InvalidFile);
+        }
+        if file
+            .compression
+            .as_deref()
+            .is_some_and(|value| value != "gzip")
+        {
+            return Err(ProviderError::UnsupportedSource);
+        }
+        Ok(())
     }
 
     async fn download_to(
@@ -318,6 +401,29 @@ impl ProviderInstaller {
     }
 }
 
+impl ProviderError {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "provider_not_found",
+            Self::Manifest(_) => "provider_manifest_invalid",
+            Self::UnsupportedSource => "provider_source_unsupported",
+            Self::TooLarge => "provider_download_too_large",
+            Self::Size => "provider_size_mismatch",
+            Self::Checksum => "provider_checksum_mismatch",
+            Self::InvalidFile => "provider_file_invalid",
+            Self::InvalidPermissions => "provider_permissions_invalid",
+            Self::Busy => "provider_busy",
+            Self::InvalidState => "provider_state_invalid",
+            Self::MissingArtifact => "provider_artifact_missing",
+            Self::Process(_) => "provider_materialization_failed",
+            Self::Io(_) => "provider_io_failed",
+            Self::Json(_) => "provider_json_invalid",
+            Self::Http(_) => "provider_http_failed",
+            Self::Database(_) => "provider_database_failed",
+        }
+    }
+}
+
 fn hash_file(path: &Path) -> Result<String, ProviderError> {
     let mut file = std::fs::File::open(path)?;
     let mut digest = Sha256::new();
@@ -376,6 +482,40 @@ fn build_gene_index(source: &Path, destination: &Path) -> Result<(), ProviderErr
     Ok(())
 }
 
+async fn upsert_resource_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    value: &ResourceUpsert,
+) -> Result<Resource, sqlx::Error> {
+    sqlx::query_as("INSERT INTO resources (id, kind, metadata, spec, status, provenance, permissions) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, metadata = EXCLUDED.metadata, spec = EXCLUDED.spec, status = EXCLUDED.status, provenance = EXCLUDED.provenance, permissions = EXCLUDED.permissions, updated_at = NOW() RETURNING id, kind, metadata, spec, status, provenance, permissions, created_at, updated_at")
+        .bind(&value.id)
+        .bind(&value.kind)
+        .bind(&value.metadata)
+        .bind(&value.spec)
+        .bind(&value.status)
+        .bind(&value.provenance)
+        .bind(value.permissions.as_value())
+        .fetch_one(&mut **transaction)
+        .await
+}
+
+async fn upsert_artifact_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    value: &ArtifactUpsert,
+) -> Result<Artifact, sqlx::Error> {
+    sqlx::query_as("INSERT INTO artifacts (id, resource_id, uri, format, size, checksum, storage_backend, schema_json, provenance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO UPDATE SET resource_id = EXCLUDED.resource_id, uri = EXCLUDED.uri, format = EXCLUDED.format, size = EXCLUDED.size, checksum = EXCLUDED.checksum, storage_backend = EXCLUDED.storage_backend, schema_json = EXCLUDED.schema_json, provenance = EXCLUDED.provenance RETURNING id, resource_id, uri, format, size, checksum, storage_backend, schema_json, provenance, created_at")
+        .bind(&value.id)
+        .bind(&value.resource_id)
+        .bind(&value.uri)
+        .bind(&value.format)
+        .bind(value.size)
+        .bind(&value.checksum)
+        .bind(&value.storage_backend)
+        .bind(&value.schema_json)
+        .bind(&value.provenance)
+        .fetch_one(&mut **transaction)
+        .await
+}
+
 pub struct ResourceRepository {
     pool: PgPool,
 }
@@ -399,6 +539,226 @@ impl ResourceRepository {
             .fetch_one(&self.pool)
             .await?
             == 1)
+    }
+
+    async fn start_ingestion(
+        &self,
+        provider_name: &str,
+        provider_version: &str,
+        resource_id: &str,
+    ) -> Result<IngestionStart, ProviderError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("{provider_name}@{provider_version}"))
+            .execute(&mut *transaction)
+            .await?;
+        let existing: Option<IngestionJob> = sqlx::query_as(
+            "SELECT id, provider_name, provider_version, resource_id, status, error_code FROM ingestion_jobs WHERE provider_name = $1 AND provider_version = $2 FOR UPDATE",
+        )
+        .bind(provider_name)
+        .bind(provider_version)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if let Some(job) = &existing {
+            if job.status == "available" {
+                let resource = sqlx::query_as(
+                    "SELECT id, kind, metadata, spec, status, provenance, permissions, created_at, updated_at FROM resources WHERE id = $1",
+                )
+                .bind(&job.resource_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ProviderError::InvalidState)?;
+                transaction.commit().await?;
+                return Ok(IngestionStart::Available(resource));
+            }
+            if matches!(
+                job.status.as_str(),
+                "registered" | "downloading" | "verifying" | "materializing"
+            ) {
+                return Err(ProviderError::Busy);
+            }
+        }
+        let id = existing
+            .as_ref()
+            .map(|job| job.id.clone())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let job: IngestionJob = sqlx::query_as(
+            "INSERT INTO ingestion_jobs (id, provider_name, provider_version, resource_id, status, error_code) VALUES ($1, $2, $3, $4, 'registered', NULL) ON CONFLICT (provider_name, provider_version) DO UPDATE SET resource_id = EXCLUDED.resource_id, status = 'registered', error_code = NULL, updated_at = NOW() RETURNING id, provider_name, provider_version, resource_id, status, error_code",
+        )
+        .bind(&id)
+        .bind(provider_name)
+        .bind(provider_version)
+        .bind(resource_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(IngestionStart::Started(job))
+    }
+
+    async fn transition_ingestion(&self, id: &str, status: &str) -> Result<(), ProviderError> {
+        let result = sqlx::query(
+            "UPDATE ingestion_jobs SET status = $2, error_code = NULL, updated_at = NOW() WHERE id = $1 AND status IN ('registered', 'downloading', 'verifying', 'materializing')",
+        )
+        .bind(id)
+        .bind(status)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(ProviderError::InvalidState);
+        }
+        Ok(())
+    }
+
+    async fn fail_ingestion(&self, id: &str, error_code: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE ingestion_jobs SET status = 'failed', error_code = $2, updated_at = NOW() WHERE id = $1 AND status <> 'available'",
+        )
+        .bind(id)
+        .bind(error_code)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn publish_ingestion(
+        &self,
+        job_id: &str,
+        resource: &ResourceUpsert,
+        artifacts: &[ArtifactUpsert],
+    ) -> Result<Resource, sqlx::Error> {
+        if artifacts.is_empty() {
+            return Err(sqlx::Error::Protocol("provider has no artifacts".into()));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let job_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM ingestion_jobs WHERE id = $1 FOR UPDATE")
+                .bind(job_id)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if job_status.as_deref() != Some("materializing") {
+            return Err(sqlx::Error::Protocol(
+                "ingestion job is not materializing".into(),
+            ));
+        }
+        let data = upsert_resource_transaction(&mut transaction, resource).await?;
+        for artifact in artifacts {
+            if artifact.resource_id != data.id {
+                return Err(sqlx::Error::Protocol("artifact resource mismatch".into()));
+            }
+            upsert_artifact_transaction(&mut transaction, artifact).await?;
+        }
+        sqlx::query(
+            "UPDATE ingestion_jobs SET status = 'available', error_code = NULL, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(data)
+    }
+
+    pub async fn import_atomic(
+        &self,
+        resources: &[ResourceUpsert],
+        artifacts: &[ArtifactUpsert],
+        relations: &[RelationUpsert],
+        grants: &[(String, String)],
+    ) -> Result<(), ProviderError> {
+        for resource in resources {
+            if resource.status == "available"
+                && !artifacts
+                    .iter()
+                    .any(|artifact| artifact.resource_id == resource.id)
+            {
+                return Err(ProviderError::MissingArtifact);
+            }
+        }
+        for artifact in artifacts {
+            let is_available = resources
+                .iter()
+                .find(|resource| resource.id == artifact.resource_id)
+                .is_some_and(|resource| resource.status == "available");
+            if is_available && artifact.storage_backend == "local" {
+                let metadata =
+                    std::fs::metadata(&artifact.uri).map_err(|_| ProviderError::MissingArtifact)?;
+                if !metadata.is_file() {
+                    return Err(ProviderError::MissingArtifact);
+                }
+                if artifact
+                    .size
+                    .is_some_and(|size| metadata.len() != size as u64)
+                {
+                    return Err(ProviderError::Size);
+                }
+            }
+        }
+        let mut transaction = self.pool.begin().await?;
+        for resource in resources {
+            upsert_resource_transaction(&mut transaction, resource).await?;
+        }
+        for artifact in artifacts {
+            upsert_artifact_transaction(&mut transaction, artifact).await?;
+        }
+        for relation in relations {
+            sqlx::query("INSERT INTO relations (source, target, relation_type, evidence, provenance) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (source, target, relation_type) DO UPDATE SET evidence = EXCLUDED.evidence, provenance = EXCLUDED.provenance")
+                .bind(&relation.source)
+                .bind(&relation.target)
+                .bind(&relation.relation_type)
+                .bind(&relation.evidence)
+                .bind(&relation.provenance)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        for (resource_id, user_id) in grants {
+            sqlx::query("INSERT INTO resource_grants (resource_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+                .bind(resource_id)
+                .bind(user_id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn reconcile_local_availability(
+        &self,
+        data_root: &Path,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let root = match data_root.canonicalize() {
+            Ok(root) => root,
+            Err(_) => return Ok(vec![]),
+        };
+        let artifacts: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+            "SELECT r.id, a.uri, a.size FROM resources r JOIN artifacts a ON a.resource_id = r.id WHERE r.status = 'available' AND a.storage_backend = 'local'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let unavailable: BTreeMap<String, ()> = artifacts
+            .into_iter()
+            .filter_map(|(resource_id, uri, size)| {
+                let available = PathBuf::from(uri)
+                    .canonicalize()
+                    .ok()
+                    .and_then(|path| path.metadata().ok().map(|metadata| (path, metadata)))
+                    .is_some_and(|(path, metadata)| {
+                        path.starts_with(&root)
+                            && metadata.is_file()
+                            && size.is_none_or(|size| metadata.len() == size as u64)
+                    });
+                (!available).then_some((resource_id, ()))
+            })
+            .collect();
+        if unavailable.is_empty() {
+            return Ok(vec![]);
+        }
+        let ids = unavailable.into_keys().collect::<Vec<_>>();
+        sqlx::query(
+            "UPDATE resources SET status = 'unavailable', updated_at = NOW() WHERE id = ANY($1)",
+        )
+        .bind(&ids)
+        .execute(&self.pool)
+        .await?;
+        Ok(ids)
     }
 
     pub async fn list_resources(

@@ -111,10 +111,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
     let database_url = env::var("SHENNONG_DATABASE_URL")?;
-    let repository = ResourceRepository::connect(&database_url).await?;
-    repository.migrate().await?;
     let data_root =
         PathBuf::from(env::var("SHENNONG_LOCAL_DATA_ROOT").unwrap_or_else(|_| "/data".into()));
+    let repository = ResourceRepository::connect(&database_url).await?;
+    repository.migrate().await?;
+    for resource_id in repository.reconcile_local_availability(&data_root).await? {
+        tracing::warn!(%resource_id, "marked unavailable because a local artifact is missing or invalid");
+    }
     let max_download_bytes = env::var("SHENNONG_MAX_DOWNLOAD_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -1337,7 +1340,13 @@ fn validate_resource(value: &ResourceUpsert) -> Result<(), ApiError> {
     }
     if !matches!(
         value.status.as_str(),
-        "available" | "processing" | "unavailable"
+        "registered"
+            | "downloading"
+            | "verifying"
+            | "materializing"
+            | "available"
+            | "failed"
+            | "unavailable"
     ) {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1407,6 +1416,9 @@ async fn can_read(
     principal: &Principal,
     resource: &shennong_schema::Resource,
 ) -> Result<bool, ApiError> {
+    if resource.status != "available" {
+        return Ok(false);
+    }
     let permissions = match ResourcePermissions::from_value(&resource.permissions) {
         Ok(permissions) => permissions,
         Err(error) => {
