@@ -9,6 +9,7 @@ services:
       SHENNONG_ADMIN_API_KEY: integration-test-admin-key
       SHENNONG_JWT_SECRET: integration-test-jwt-secret-with-32-bytes
       SHENNONG_LOCAL_DATA_ROOT: /data
+      SHENNONG_STORAGE_BACKEND: local
       SHENNONG_PROVIDER_DIR: /app/test-providers
       SHENNONG_CORS_ORIGINS: https://allowed.example.test
       SHENNONG_MAX_BODY_BYTES: "1048576"

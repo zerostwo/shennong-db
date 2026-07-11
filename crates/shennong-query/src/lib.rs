@@ -469,13 +469,14 @@ impl QueryAdapter for FileExpressionAdapter {
         let artifact = artifacts
             .iter()
             .find(|artifact| {
-                artifact.storage_backend == "local"
+                matches!(artifact.storage_backend.as_str(), "local" | "s3")
                     && matches!(artifact.format.as_str(), "csv" | "tsv" | "txt")
                     && artifact.schema_json.get("role").and_then(Value::as_str)
                         == Some("expression")
             })
             .ok_or(QueryError::NoArtifact)?;
-        let artifact_uri = ArtifactUri::parse(&artifact.uri)?;
+        let artifact_uri =
+            ArtifactUri::parse(artifact.storage_uri.as_deref().unwrap_or(&artifact.uri))?;
         let index_uri = artifact
             .schema_json
             .get("index_uri")
@@ -507,7 +508,7 @@ impl QueryAdapter for FileExpressionAdapter {
             join_metadata_from_blob(
                 self.storage.as_ref(),
                 &mut response,
-                &metadata.uri,
+                metadata.storage_uri.as_deref().unwrap_or(&metadata.uri),
                 Some(&query.context),
                 metadata.schema_json.get("context_fields"),
             )
@@ -524,7 +525,7 @@ impl QueryAdapter for FileExpressionAdapter {
             join_metadata_from_blob(
                 self.storage.as_ref(),
                 &mut response,
-                &survival.uri,
+                survival.storage_uri.as_deref().unwrap_or(&survival.uri),
                 None,
                 None,
             )
@@ -534,7 +535,7 @@ impl QueryAdapter for FileExpressionAdapter {
             let embedding = artifacts
                 .iter()
                 .find(|artifact| {
-                    artifact.storage_backend == "local"
+                    matches!(artifact.storage_backend.as_str(), "local" | "s3")
                         && artifact
                             .schema_json
                             .get("role")
@@ -542,8 +543,12 @@ impl QueryAdapter for FileExpressionAdapter {
                             .is_some_and(|role| role.starts_with("embedding"))
                 })
                 .ok_or(QueryError::NoArtifact)?;
-            attach_embedding_from_blob(self.storage.as_ref(), &mut response, &embedding.uri)
-                .await?;
+            attach_embedding_from_blob(
+                self.storage.as_ref(),
+                &mut response,
+                embedding.storage_uri.as_deref().unwrap_or(&embedding.uri),
+            )
+            .await?;
         }
         truncate_response(&mut response, query);
         Ok(response)

@@ -14,6 +14,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod s3;
+pub use s3::{S3Config, S3ObjectStorage};
+
 pub type BlobReader = Pin<Box<dyn AsyncRead + Send + Unpin>>;
 
 #[derive(Debug, Error)]
@@ -30,6 +33,12 @@ pub enum StorageError {
     PresignUnsupported,
     #[error("storage object length does not match the declared length")]
     LengthMismatch,
+    #[error("storage request failed")]
+    Http,
+    #[error("storage backend returned an invalid response")]
+    Protocol,
+    #[error("storage credentials are unavailable")]
+    Credentials,
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -169,6 +178,46 @@ pub trait BlobStore: Send + Sync {
     ) -> Result<ArtifactUri, StorageError>;
     async fn presign_get(&self, _uri: &ArtifactUri) -> Result<String, StorageError> {
         Err(StorageError::PresignUnsupported)
+    }
+}
+
+#[async_trait]
+impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
+    async fn head(&self, uri: &ArtifactUri) -> Result<ObjectMeta, StorageError> {
+        (**self).head(uri).await
+    }
+    async fn get_stream(&self, uri: &ArtifactUri) -> Result<BlobReader, StorageError> {
+        (**self).get_stream(uri).await
+    }
+    async fn get_range(
+        &self,
+        uri: &ArtifactUri,
+        range: ByteRange,
+    ) -> Result<BlobReader, StorageError> {
+        (**self).get_range(uri, range).await
+    }
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        reader: &mut (dyn AsyncRead + Send + Unpin),
+    ) -> Result<ArtifactUri, StorageError> {
+        (**self).put_stream(key, reader).await
+    }
+    async fn delete(&self, uri: &ArtifactUri) -> Result<(), StorageError> {
+        (**self).delete(uri).await
+    }
+    async fn exists(&self, uri: &ArtifactUri) -> Result<bool, StorageError> {
+        (**self).exists(uri).await
+    }
+    async fn copy_or_promote(
+        &self,
+        source: &ArtifactUri,
+        destination: &ObjectKey,
+    ) -> Result<ArtifactUri, StorageError> {
+        (**self).copy_or_promote(source, destination).await
+    }
+    async fn presign_get(&self, uri: &ArtifactUri) -> Result<String, StorageError> {
+        (**self).presign_get(uri).await
     }
 }
 

@@ -26,7 +26,7 @@ use shennong_schema::{
     ArtifactUpsert, Capabilities, RelationUpsert, ResourceInstallRequest, ResourcePermissions,
     ResourceQuery, ResourceUpsert, TokenIssueRequest, UserUpsert, Visibility,
 };
-use shennong_storage::{ArtifactUri, BlobStore, LocalObjectStorage};
+use shennong_storage::{ArtifactUri, BlobStore, LocalObjectStorage, S3Config, S3ObjectStorage};
 use std::{
     collections::HashMap,
     env, io,
@@ -50,7 +50,7 @@ use tracing_subscriber::EnvFilter;
 struct AppState {
     repository: Arc<ResourceRepository>,
     providers: Arc<ProviderInstaller>,
-    storage: Arc<LocalObjectStorage>,
+    storage: Arc<dyn BlobStore>,
     admin_key: Option<String>,
     jwt_secret: Option<String>,
     clickhouse_url: String,
@@ -414,7 +414,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.parse().ok())
         .filter(|value: &usize| *value > 0)
         .unwrap_or(64 * 1024);
-    let storage = Arc::new(LocalObjectStorage::new(&data_root));
+    let storage: Arc<dyn BlobStore> = if env::var("SHENNONG_STORAGE_BACKEND")
+        .is_ok_and(|value| value.eq_ignore_ascii_case("s3"))
+    {
+        let bucket = env::var("SHENNONG_S3_BUCKET").unwrap_or_else(|_| "shennong".into());
+        Arc::new(S3ObjectStorage::new(S3Config::from_env(bucket)?)?)
+    } else {
+        Arc::new(LocalObjectStorage::new(&data_root))
+    };
     let state = AppState {
         repository: Arc::new(repository),
         providers: Arc::new(ProviderInstaller::new(
@@ -766,17 +773,18 @@ async fn agent_axis(
     });
     if ids.is_none()
         && let Some(artifact) = artifact.filter(|artifact| {
-            artifact.storage_backend == "local"
+            matches!(artifact.storage_backend.as_str(), "local" | "s3")
                 && matches!(artifact.format.as_str(), "csv" | "tsv" | "txt")
                 && artifact.size.is_some_and(|size| size <= 16 * 1024 * 1024)
         })
     {
-        let uri = ArtifactUri::parse(&artifact.uri).map_err(|_| {
-            ApiError(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "axis metadata unavailable".into(),
-            )
-        })?;
+        let uri = ArtifactUri::parse(artifact.storage_uri.as_deref().unwrap_or(&artifact.uri))
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "axis metadata unavailable".into(),
+                )
+            })?;
         let mut lines = BufReader::new(state.storage.get_stream(&uri).await.map_err(|_| {
             ApiError(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -860,7 +868,7 @@ async fn agent_metadata(
             data: serde_json::json!({"data": [], "meta": {"n_rows": 0, "total_rows": 0}}),
         }));
     };
-    if artifact.storage_backend != "local"
+    if !matches!(artifact.storage_backend.as_str(), "local" | "s3")
         || artifact.size.is_some_and(|size| size > 64 * 1024 * 1024)
     {
         return Err(ApiError(
@@ -868,12 +876,13 @@ async fn agent_metadata(
             "metadata view is unavailable for this Artifact".into(),
         ));
     }
-    let uri = ArtifactUri::parse(&artifact.uri).map_err(|_| {
-        ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "metadata view unavailable".into(),
-        )
-    })?;
+    let uri = ArtifactUri::parse(artifact.storage_uri.as_deref().unwrap_or(&artifact.uri))
+        .map_err(|_| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "metadata view unavailable".into(),
+            )
+        })?;
     let mut lines = BufReader::new(state.storage.get_stream(&uri).await.map_err(|_| {
         ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1258,7 +1267,7 @@ async fn download_artifact(
         .map_err(database_error)?
         .filter(|artifact| artifact.resource_id == id)
         .ok_or_else(not_found)?;
-    if artifact.storage_backend != "local" {
+    if !matches!(artifact.storage_backend.as_str(), "local" | "s3") {
         return Err(ApiError(
             StatusCode::NOT_IMPLEMENTED,
             "artifact download is unavailable for this storage backend".into(),
@@ -1270,13 +1279,37 @@ async fn download_artifact(
             "too many active downloads".into(),
         )
     })?;
-    let uri = ArtifactUri::parse(&artifact.uri).map_err(|_| not_found())?;
+    let uri = ArtifactUri::parse(artifact.storage_uri.as_deref().unwrap_or(&artifact.uri))
+        .map_err(|_| not_found())?;
     let size = state
         .storage
         .head(&uri)
         .await
         .map_err(|_| not_found())?
         .size;
+    let presign_threshold = env::var("SHENNONG_S3_PRESIGN_THRESHOLD_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(64 * 1024 * 1024);
+    let presign_enabled = env::var("SHENNONG_S3_PRESIGN_DOWNLOADS")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    if artifact.storage_backend == "s3"
+        && !headers.contains_key(RANGE)
+        && presign_enabled
+        && size >= presign_threshold
+        && let Ok(url) = state.storage.presign_get(&uri).await
+    {
+        return Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header("location", url)
+            .body(Body::empty())
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "artifact response failed".into(),
+                )
+            });
+    }
     let range = match headers.get(RANGE) {
         Some(value) => match value
             .to_str()
@@ -1808,7 +1841,7 @@ async fn query(
             .await
             .map_err(query_error)?
     } else if has_context || value.operation == "survival_expression" {
-        FileExpressionAdapter::new(state.storage.as_ref().clone())
+        FileExpressionAdapter::new(state.storage.clone())
             .execute(&resource, &artifacts, &value)
             .await
             .map_err(query_error)?
@@ -1825,7 +1858,7 @@ async fn query(
     } else {
         let mut cache_query = value.clone();
         cache_query.options = serde_json::json!({"limit": 100000});
-        let full = FileExpressionAdapter::new(state.storage.as_ref().clone())
+        let full = FileExpressionAdapter::new(state.storage.clone())
             .execute(&resource, &artifacts, &cache_query)
             .await
             .map_err(query_error)?;

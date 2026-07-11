@@ -351,7 +351,7 @@ impl Default for Capabilities {
                 "tiledb",
                 "clickhouse",
             ],
-            storage_backends: vec!["local", "clickhouse", "tiledb"],
+            storage_backends: vec!["local", "s3", "clickhouse", "tiledb"],
             query_schema: json!({
                 "resource": "resource id",
                 "operation": "expression",
