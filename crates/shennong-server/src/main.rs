@@ -36,7 +36,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt, SeekFrom},
+    io::AsyncReadExt,
     sync::{OwnedSemaphorePermit, Semaphore},
 };
 use tower_http::{
@@ -57,7 +57,6 @@ struct AppState {
     clickhouse_client: reqwest::Client,
     tiledb_script: String,
     tiledb: TiledbExecutor,
-    data_root: PathBuf,
     downloads: Arc<Semaphore>,
     query_requests: Arc<Semaphore>,
     global_requests: Arc<Semaphore>,
@@ -262,7 +261,7 @@ fn env_usize(name: &str, default_value: usize) -> usize {
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
 struct DownloadStreamState {
-    file: tokio::fs::File,
+    reader: shennong_storage::BlobReader,
     remaining: u64,
     timeout: Duration,
     _permit: OwnedSemaphorePermit,
@@ -442,7 +441,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tiledb_max_stdout,
             tiledb_max_stderr,
         ),
-        data_root,
         downloads: Arc::new(Semaphore::new(download_concurrency)),
         query_requests: Arc::new(Semaphore::new(query_concurrency)),
         global_requests: Arc::new(Semaphore::new(global_concurrency)),
@@ -1006,27 +1004,19 @@ async fn download_artifact(
             "artifact download is unavailable for this storage backend".into(),
         ));
     }
-    let root = state.data_root.canonicalize().map_err(|_| not_found())?;
-    let path = PathBuf::from(&artifact.uri)
-        .canonicalize()
-        .map_err(|_| not_found())?;
-    if !path.starts_with(root) {
-        return Err(not_found());
-    }
     let permit = state.downloads.clone().try_acquire_owned().map_err(|_| {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
             "too many active downloads".into(),
         )
     })?;
-    let mut file = tokio::fs::File::open(&path)
+    let uri = ArtifactUri::parse(&artifact.uri).map_err(|_| not_found())?;
+    let size = state
+        .storage
+        .head(&uri)
         .await
-        .map_err(|_| not_found())?;
-    let metadata = file.metadata().await.map_err(|_| not_found())?;
-    if !metadata.is_file() {
-        return Err(not_found());
-    }
-    let size = metadata.len();
+        .map_err(|_| not_found())?
+        .size;
     let range = match headers.get(RANGE) {
         Some(value) => match value
             .to_str()
@@ -1043,12 +1033,27 @@ async fn download_artifact(
         end: size.saturating_sub(1),
     });
     let length = if size == 0 { 0 } else { range.len() };
-    if length > 0 {
-        file.seek(SeekFrom::Start(range.start))
+    let reader = if headers.contains_key(RANGE) {
+        state
+            .storage
+            .get_range(
+                &uri,
+                shennong_storage::ByteRange::new(range.start, range.end)
+                    .map_err(|_| not_found())?,
+            )
             .await
-            .map_err(|_| not_found())?;
-    }
-    let filename = safe_download_name(&path);
+            .map_err(|_| not_found())?
+    } else {
+        state
+            .storage
+            .get_stream(&uri)
+            .await
+            .map_err(|_| not_found())?
+    };
+    let filename = match &uri {
+        ArtifactUri::Local(path) => safe_download_name(path),
+        ArtifactUri::S3 { .. } => "artifact".into(),
+    };
     let mut response = Response::builder()
         .status(if headers.contains_key(RANGE) {
             StatusCode::PARTIAL_CONTENT
@@ -1069,8 +1074,8 @@ async fn download_artifact(
         );
     }
     response
-        .body(Body::from_stream(stream_local_file(
-            file,
+        .body(Body::from_stream(stream_blob(
+            reader,
             length,
             permit,
             state.download_timeout,
@@ -1083,15 +1088,15 @@ async fn download_artifact(
         })
 }
 
-fn stream_local_file(
-    file: tokio::fs::File,
+fn stream_blob(
+    reader: shennong_storage::BlobReader,
     remaining: u64,
     permit: OwnedSemaphorePermit,
     timeout: Duration,
 ) -> impl futures_util::Stream<Item = Result<Bytes, io::Error>> {
     futures_util::stream::unfold(
         DownloadStreamState {
-            file,
+            reader,
             remaining,
             timeout,
             _permit: permit,
@@ -1101,7 +1106,7 @@ fn stream_local_file(
                 return None;
             }
             let mut buffer = vec![0; state.remaining.min(DOWNLOAD_CHUNK_BYTES as u64) as usize];
-            match tokio::time::timeout(state.timeout, state.file.read(&mut buffer)).await {
+            match tokio::time::timeout(state.timeout, state.reader.read(&mut buffer)).await {
                 Ok(Ok(0)) => {
                     state.remaining = 0;
                     Some((

@@ -346,8 +346,27 @@ impl fmt::Display for ArtifactUri {
 mod tests {
     use super::{ArtifactUri, BlobStore, ByteRange, LocalObjectStorage, ObjectKey, StorageError};
     use std::env::temp_dir;
-    use tokio::{fs, io::AsyncReadExt};
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::{
+        fs,
+        io::{AsyncRead, AsyncReadExt},
+    };
     use uuid::Uuid;
+
+    struct FailingReader;
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(std::io::Error::other("interrupted fixture")))
+        }
+    }
 
     #[tokio::test]
     async fn local_blob_store_streams_ranges_and_publishes_atomically() {
@@ -371,6 +390,23 @@ mod tests {
         range.read_to_end(&mut value).await.unwrap();
         assert_eq!(value, b"bcd");
         assert!(storage.exists(&uri).await.unwrap());
+        assert!(matches!(
+            storage.presign_get(&uri).await,
+            Err(StorageError::PresignUnsupported)
+        ));
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_put_does_not_publish_a_partial_object() {
+        let root = temp_dir().join(format!("shennong-storage-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).await.unwrap();
+        let storage = LocalObjectStorage::new(&root);
+        let key = ObjectKey::new("interrupted/value.bin").unwrap();
+        let mut reader = FailingReader;
+        assert!(storage.put_stream(&key, &mut reader).await.is_err());
+        let mut entries = fs::read_dir(root.join("interrupted")).await.unwrap();
+        assert!(entries.next_entry().await.unwrap().is_none());
         fs::remove_dir_all(root).await.unwrap();
     }
 
