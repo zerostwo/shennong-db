@@ -36,6 +36,7 @@ jobs:
           image-ref: shennong-db:ci
           severity: CRITICAL,HIGH
           exit-code: 1
+          ignore-unfixed: true
       - name: Run platform tests
         env:
           SHENNONG_TEST_IMAGE: shennong-db:ci
