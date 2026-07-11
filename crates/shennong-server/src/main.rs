@@ -147,7 +147,7 @@ async fn request_limits(State(state): State<AppState>, request: Request, next: N
                     && ((user.role == "admin" && authenticated.role == Role::Admin)
                         || (user.role == "user" && authenticated.role == Role::User)) => {}
             Ok(_) => {
-                return ApiError(StatusCode::UNAUTHORIZED, "user session is inactive".into())
+                return ApiError(StatusCode::NOT_FOUND, "resource not found".into())
                     .into_response();
             }
             Err(error) => return database_error(error).into_response(),
@@ -2457,6 +2457,7 @@ async fn query(
         .context
         .as_object()
         .is_some_and(|values| !values.is_empty());
+    let cacheable = value.options.get("cursor").is_none();
     let data = if resource
         .spec
         .get("backend")
@@ -2471,21 +2472,8 @@ async fn query(
             .execute(&resource, &artifacts, &value)
             .await
             .map_err(query_error)?
-    } else if let Some(cached) = execute_clickhouse_expression(
-        &state.clickhouse_client,
-        &state.clickhouse_url,
-        &resource,
-        &value,
-    )
-    .await
-    .map_err(query_error)?
-    {
-        state.cache_hits.fetch_add(1, Ordering::Relaxed);
-        cached
-    } else {
-        state.cache_misses.fetch_add(1, Ordering::Relaxed);
-        let _fill_guard = state.cache_fill.lock().await;
-        if let Some(cached) = execute_clickhouse_expression(
+    } else if cacheable
+        && let Some(cached) = execute_clickhouse_expression(
             &state.clickhouse_client,
             &state.clickhouse_url,
             &resource,
@@ -2493,6 +2481,21 @@ async fn query(
         )
         .await
         .map_err(query_error)?
+    {
+        state.cache_hits.fetch_add(1, Ordering::Relaxed);
+        cached
+    } else {
+        state.cache_misses.fetch_add(1, Ordering::Relaxed);
+        let _fill_guard = state.cache_fill.lock().await;
+        if cacheable
+            && let Some(cached) = execute_clickhouse_expression(
+                &state.clickhouse_client,
+                &state.clickhouse_url,
+                &resource,
+                &value,
+            )
+            .await
+            .map_err(query_error)?
         {
             state.cache_hits.fetch_add(1, Ordering::Relaxed);
             return Ok(Json(Envelope { data: cached }));
@@ -2548,6 +2551,7 @@ async fn query_batch(
         ));
     }
     let mut rows = Vec::new();
+    let mut missing_features = Vec::new();
     let mut next_cursor = None;
     let mut total_rows = None;
     for feature in value.features {
@@ -2560,7 +2564,14 @@ async fn query_batch(
             version: value.version.clone(),
             options: value.options.clone(),
         };
-        let response = query(State(state.clone()), headers.clone(), Json(request)).await?;
+        let response = match query(State(state.clone()), headers.clone(), Json(request)).await {
+            Ok(response) => response,
+            Err(ApiError(StatusCode::NOT_FOUND, message)) if message == "query_feature_missing" => {
+                missing_features.push(feature.name);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if next_cursor.is_none() {
             next_cursor = response
                 .0
@@ -2598,6 +2609,12 @@ async fn query_batch(
     }
     if let Some(total) = total_rows {
         meta["total_rows"] = total.into();
+    }
+    if !missing_features.is_empty() {
+        meta["missing_features"] = missing_features
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect();
     }
     let data = serde_json::json!({
         "status": "success",
@@ -2670,8 +2687,29 @@ fn limit_response(mut response: serde_json::Value, query: &ResourceQuery) -> ser
         .get_mut("data")
         .and_then(serde_json::Value::as_array_mut)
     {
-        rows.truncate(limit);
+        let total = rows.len();
+        let offset = query
+            .options
+            .get("cursor")
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+            })
+            .unwrap_or(0) as usize;
+        let start = offset.min(total);
+        let end = start.saturating_add(limit).min(total);
+        *rows = rows[start..end].to_vec();
         response["meta"]["n_rows"] = rows.len().into();
+        response["meta"]["total_rows"] = total.into();
+        if end < total {
+            response["meta"]["next_cursor"] = end.to_string().into();
+        } else if let Some(meta) = response
+            .get_mut("meta")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            meta.remove("next_cursor");
+        }
         response["meta"]["backend"] = "local+clickhouse-cache".into();
     }
     response
@@ -2922,6 +2960,7 @@ async fn audit(
 }
 fn query_error(error: shennong_query::QueryError) -> ApiError {
     let (status, code) = match &error {
+        QueryError::FeatureNotFound => (StatusCode::NOT_FOUND, "query_feature_missing"),
         QueryError::BackendBusy => (StatusCode::TOO_MANY_REQUESTS, "query_backend_busy"),
         QueryError::BackendTimeout => (StatusCode::GATEWAY_TIMEOUT, "query_backend_timeout"),
         QueryError::Http(http) if http.is_timeout() => {

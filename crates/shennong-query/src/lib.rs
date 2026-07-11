@@ -34,6 +34,8 @@ pub enum QueryError {
     Unsupported,
     #[error("resource has no compatible expression artifact")]
     NoArtifact,
+    #[error("expression feature was not found")]
+    FeatureNotFound,
     #[error("expression artifact is malformed")]
     MalformedArtifact,
     #[error(transparent)]
@@ -878,7 +880,7 @@ async fn expression_response_from_blob(
         loop {
             row.clear();
             if reader.read_line(&mut row).await? == 0 {
-                return Err(QueryError::NoArtifact);
+                return Err(QueryError::FeatureNotFound);
             }
             if row
                 .split(['\t', ','])
@@ -908,7 +910,7 @@ async fn expression_response_from_blob(
         .get("features")
         .and_then(|items| items.get(&feature.name))
         .and_then(Value::as_object)
-        .ok_or(QueryError::NoArtifact)?;
+        .ok_or(QueryError::FeatureNotFound)?;
     let offset = feature_index
         .get("offset")
         .and_then(Value::as_u64)
@@ -948,9 +950,9 @@ async fn expression_response_from_blob(
     let mut row_chunk = Vec::new();
     row_reader.read_to_end(&mut row_chunk).await?;
     let row = String::from_utf8(row_chunk).map_err(|_| QueryError::MalformedArtifact)?;
-    let line = row.lines().next().ok_or(QueryError::NoArtifact)?;
+    let line = row.lines().next().ok_or(QueryError::FeatureNotFound)?;
     if line.split(['\t', ',']).next() != Some(feature.name.as_str()) {
-        return Err(QueryError::NoArtifact);
+        return Err(QueryError::FeatureNotFound);
     }
     expression_response(resource, query, &format!("{header}\n{line}\n"))
 }
@@ -1009,7 +1011,7 @@ fn expression_response_from_reader<R: BufRead>(
     let row = loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
-            return Err(QueryError::NoArtifact);
+            return Err(QueryError::FeatureNotFound);
         }
         let row: Vec<_> = line.trim_end().split(delimiter).collect();
         if row.first().is_some_and(|value| *value == feature.name) {
