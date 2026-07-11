@@ -166,7 +166,13 @@ fn expression_response_from_reader<R: BufRead>(
             break row;
         }
     };
-    let data: Vec<_> = columns.iter().skip(1).zip(row.iter().skip(1)).map(|(sample, value)| serde_json::json!({
+    let limit = query
+        .options
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(1_000)
+        .clamp(1, 100_000) as usize;
+    let data: Vec<_> = columns.iter().skip(1).zip(row.iter().skip(1)).take(limit).map(|(sample, value)| serde_json::json!({
         "observation_id": sample,
         "sample_id": sample,
         "feature_id": feature.name,
@@ -255,6 +261,25 @@ mod tests {
             expression_response(&resource, &query, "gene\tS1\tS2\nYTHDF2\t1.2\t3\n").unwrap();
         assert_eq!(response["data"][0]["value"], 1.2);
         assert_eq!(response["meta"]["n_rows"], 2);
+    }
+
+    #[test]
+    fn applies_the_requested_response_limit() {
+        let resource = Resource {
+            id: "toil".into(),
+            kind: "Dataset".into(),
+            metadata: json!({}),
+            spec: json!({}),
+            status: "available".into(),
+            provenance: json!({}),
+            permissions: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let query: ResourceQuery = serde_json::from_value(json!({"resource":"toil","operation":"expression","feature":{"type":"gene","name":"YTHDF2"},"options":{"limit":1}})).unwrap();
+        let response =
+            expression_response(&resource, &query, "gene\tS1\tS2\nYTHDF2\t1.2\t3\n").unwrap();
+        assert_eq!(response["meta"]["n_rows"], 1);
     }
 
     #[test]
