@@ -42,7 +42,7 @@ fi
 
 runuser -u postgres -- pg_ctl -D "$PGDATA" -o '-c listen_addresses=127.0.0.1' -w start
 if ! psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c 'SELECT 1' >/dev/null 2>&1; then
-  gosu postgres createdb -U "$POSTGRES_USER" "$POSTGRES_DB"
+  runuser -u postgres -- createdb -U "$POSTGRES_USER" "$POSTGRES_DB"
 fi
 
 runuser -u postgres -- clickhouse-server --config-file=/etc/clickhouse-server/config.xml &
