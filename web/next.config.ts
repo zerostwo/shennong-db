@@ -5,7 +5,6 @@ const nextConfig: NextConfig = {
   async rewrites() {
     const internal = process.env.SHENNONG_API_INTERNAL_URL;
     return internal ? [
-      { source: "/api/v1/:path*", destination: `${internal}/api/v1/:path*` },
       { source: "/.well-known/:path*", destination: `${internal}/.well-known/:path*` },
       { source: "/health", destination: `${internal}/health` },
       { source: "/healthz", destination: `${internal}/healthz` }
