@@ -6,7 +6,7 @@ source:
   cohort: TCGA TARGET GTEx
 files:
   - id: toil-expression
-    download: https://toil.xenahubs.net/download/TcgaTargetGtex_rsem_gene_tpm.gz
+    download: https://toil-xena-hub.s3.dualstack.us-east-1.amazonaws.com/download/TcgaTargetGtex_rsem_gene_tpm.gz
     filename: TcgaTargetGtex_rsem_gene_tpm.tsv
     format: tsv
     download_size: 1323254426
@@ -21,7 +21,7 @@ files:
       observation_field: sample_id
       measure: log2_tpm_plus_0.001
   - id: toil-phenotype
-    download: https://toil.xenahubs.net/download/TcgaTargetGTEX_phenotype.txt.gz
+    download: https://toil-xena-hub.s3.dualstack.us-east-1.amazonaws.com/download/TcgaTargetGTEX_phenotype.txt.gz
     filename: TcgaTargetGTEX_phenotype.tsv
     format: tsv
     download_size: 135753
@@ -39,7 +39,7 @@ files:
         study: _study
         detailed_category: detailed_category
   - id: toil-category
-    download: https://toil.xenahubs.net/download/TCGA_GTEX_category.txt
+    download: https://toil-xena-hub.s3.dualstack.us-east-1.amazonaws.com/download/TCGA_GTEX_category.txt
     filename: TCGA_GTEX_category.tsv
     format: tsv
     download_size: 740889
@@ -52,7 +52,7 @@ files:
       key: sample
       fields: [TCGA_GTEX_main_category]
   - id: toil-survival
-    download: https://toil.xenahubs.net/download/TCGA_survival_data
+    download: https://toil-xena-hub.s3.dualstack.us-east-1.amazonaws.com/download/TCGA_survival_data
     filename: TCGA_survival_data.tsv
     format: tsv
     download_size: 406381
@@ -66,7 +66,7 @@ files:
       fields: [OS, OS.time, DSS, DSS.time, DFI, DFI.time, PFI, PFI.time]
       time_unit: days
   - id: toil-gencode-v23-gene-map
-    download: https://toil.xenahubs.net/download/probeMap/gencode.v23.annotation.gene.probemap
+    download: https://toil-xena-hub.s3.dualstack.us-east-1.amazonaws.com/download/probeMap/gencode.v23.annotation.gene.probemap
     filename: gencode.v23.annotation.gene.probemap.tsv
     format: tsv
     download_size: 3244244

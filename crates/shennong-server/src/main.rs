@@ -1100,7 +1100,7 @@ fn provider_error(error: shennong_core::ProviderError) -> ApiError {
     } else {
         StatusCode::UNPROCESSABLE_ENTITY
     };
-    tracing::error!(%error, "provider installation failed");
+    tracing::error!(error = ?error, "provider installation failed");
     ApiError(status, "resource provider installation failed".into())
 }
 async fn can_read(

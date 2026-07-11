@@ -9,6 +9,9 @@ services:
       SHENNONG_JWT_SECRET: ${SHENNONG_JWT_SECRET}
       SHENNONG_LOCAL_DATA_ROOT: /data
       SHENNONG_PROVIDER_DIR: /app/providers
+      SHENNONG_DOWNLOAD_PROXY: ${SHENNONG_DOWNLOAD_PROXY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${SHENNONG_DATA_PATH:-./data}:/data
       - shennong_metadata:/var/lib/postgresql/data

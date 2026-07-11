@@ -255,7 +255,13 @@ impl ProviderInstaller {
             fs::remove_file(&partial).await?;
             offset = 0;
         }
-        let client = reqwest::Client::new();
+        let mut client = reqwest::Client::builder();
+        if let Ok(proxy) = std::env::var("SHENNONG_DOWNLOAD_PROXY")
+            && !proxy.is_empty()
+        {
+            client = client.proxy(reqwest::Proxy::all(proxy)?);
+        }
+        let client = client.build()?;
         let mut request = client.get(url);
         if offset > 0 {
             request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));

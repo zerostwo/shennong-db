@@ -37,6 +37,10 @@ SHENNONG_PORT=8000
 SHENNONG_IMAGE=zerostwo/shennong-db:0.1.0
 ```
 
+On a restricted or slow outbound network, optionally set
+`SHENNONG_DOWNLOAD_PROXY=http://host.docker.internal:7890`. Compose maps
+`host.docker.internal` to the Docker host gateway.
+
 Generate each secret with `openssl rand -hex 32`. Start the single service and
 import the bundled Resource metadata:
 
