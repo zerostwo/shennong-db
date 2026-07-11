@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity, Archive, ArrowLeft, BarChart3, Beaker, BookOpen, Boxes, ChevronDown, ChevronLeft,
   ChevronRight, CircleHelp, ClipboardList, Cloud, Database, FileText, FolderKanban, Gauge, GitBranch,
@@ -69,7 +69,9 @@ function AdminFooter() {
 }
 
 export function TopBar({ title, description, search = true, action }: { title?: string; description?: string; search?: boolean; action?: React.ReactNode }) {
-  return <header className="topbar"><div className="topbar-title">{title && <><h1>{title}</h1>{description && <p>{description}</p>}</>}</div>{search && <label className="global-search"><Search /><input placeholder="Ask ShennongDB or search resources..." /><kbd>⌘ K</kbd></label>}<div className="topbar-actions">{action}<Link href="/docs" className="top-link">Docs</Link><Link href="/console/api-access" className="top-link">API</Link><Link href="/support" className="top-link">Support</Link><button className="icon-button" aria-label="Help"><CircleHelp /></button><button className="icon-button" aria-label="Notifications"><Activity /></button></div></header>;
+  const [commandOpen, setCommandOpen] = useState(false);
+  useEffect(() => { const onKey = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setCommandOpen(true); } }; window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey); }, []);
+  return <><header className="topbar"><div className="topbar-title">{title && <><h1>{title}</h1>{description && <p>{description}</p>}</>}</div>{search && <label className="global-search"><Search /><input placeholder="Ask ShennongDB or search resources..." onFocus={() => setCommandOpen(true)} /><kbd>⌘ K</kbd></label>}<div className="topbar-actions">{action}<Link href="/docs" className="top-link">Docs</Link><Link href="/console/api-access" className="top-link">API</Link><Link href="/support" className="top-link">Support</Link><button className="icon-button" aria-label="Help"><CircleHelp /></button><button className="icon-button" aria-label="Notifications"><Activity /></button></div></header>{commandOpen && <div className="modal-scrim" onClick={() => setCommandOpen(false)}><div className="simple-dialog command-dialog" onClick={(event) => event.stopPropagation()}><h2>Command palette</h2><input autoFocus placeholder="Search resources or open a workspace…" /><Link className="outline-button" href="/catalog" onClick={() => setCommandOpen(false)}>Open catalog</Link><Link className="outline-button" href="/console/api-access" onClick={() => setCommandOpen(false)}>Open API access</Link><button className="text-button" onClick={() => setCommandOpen(false)}>Close</button></div></div>}</>;
 }
 
 export function SectionHeader({ title, description, action }: { title: string; description?: string; action?: React.ReactNode }) {
