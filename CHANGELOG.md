@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Bundle SeaweedFS in the ShennongDB image and start it with PostgreSQL and ClickHouse.
+- Persist generated first-run admin and JWT secrets under `/data/.shennong-secrets`.
+
+### Changed
+
+- Reduce the default and production Compose deployments to one service with two bind mounts.
+- Publish release images with an additional `latest` tag.
+
+### Fixed
+
+- Fetch full Git history for the GitHub Actions secret scan so gitleaks can resolve push ranges.
+
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and [Semantic Versioning](https://semver.org/).
 

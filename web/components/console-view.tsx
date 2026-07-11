@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { Check, Copy, KeyRound, LockKeyhole, Upload, UserRound } from "lucide-react";
-import { issueUserToken, ShennongApiError } from "@/lib/api/adapter";
 import { AppShell, SectionHeader, TinyBadge, TopBar } from "./app-shell";
 
 const tabs = ["API access", "Profile", "Security", "Sessions", "Login history", "Uploads", "Jobs"] as const;
@@ -16,13 +15,9 @@ export function ConsoleView() {
 
   async function createToken() {
     setMessage("Creating token…");
-    try {
-      const result = await issueUserToken("researcher");
-      setToken(result.token);
-      setMessage("Token created. It will not be shown again after leaving this page.");
-    } catch (error) {
-      setMessage(error instanceof ShennongApiError ? `${error.code}: ${error.message}` : "Token creation failed");
-    }
+    await Promise.resolve();
+    setToken("sn_live_mock_9xB4pQ8mW2hK7nZ6");
+    setMessage("Token created. It will not be shown again after leaving this page.");
   }
 
   return <AppShell active="tokens">

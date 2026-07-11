@@ -10,6 +10,8 @@ RUN cargo build --release --package shennong-server --package shennong-cli
 
 FROM clickhouse/clickhouse-server:26.4.4.38 AS clickhouse
 
+FROM chrislusf/seaweedfs:3.80 AS seaweedfs
+
 FROM postgres:17-bookworm
 
 ARG VCS_REF=unknown
@@ -29,6 +31,7 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin shennong
 
 COPY --from=clickhouse /usr/bin/clickhouse /usr/bin/clickhouse
 COPY --from=clickhouse /etc/clickhouse-server /etc/clickhouse-server
+COPY --from=seaweedfs /usr/bin/weed /usr/local/bin/weed
 COPY --from=builder /app/target/release/shennong-server /usr/local/bin/shennong-server
 COPY --from=builder /app/target/release/shennong-cli /usr/local/bin/shennong-cli
 COPY providers /app/providers
@@ -48,6 +51,11 @@ RUN chmod 755 /usr/local/bin/shennong-entrypoint \
 ENV SHENNONG_BIND=0.0.0.0:8000 \
     SHENNONG_LOCAL_DATA_ROOT=/data \
     SHENNONG_PROVIDER_DIR=/app/providers \
+    SHENNONG_STORAGE_BACKEND=s3 \
+    SHENNONG_S3_BUCKET=shennong \
+    SHENNONG_S3_ENDPOINT=http://127.0.0.1:8333 \
+    SHENNONG_S3_REGION=us-east-1 \
+    SHENNONG_S3_FORCE_PATH_STYLE=1 \
     SHENNONG_CLICKHOUSE_URL=http://127.0.0.1:8123 \
     SHENNONG_TILEDB_SCRIPT=/app/tiledb_backend.py \
     POSTGRES_USER=shennong \

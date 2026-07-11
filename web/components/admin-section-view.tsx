@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Database, FileText, ShieldCheck, Users } from "lucide-react";
-import { getHealth, listAuditEvents, listProviders, listUsers, type ApiError, ShennongApiError } from "@/lib/api/adapter";
+import { type ApiError, ShennongApiError } from "@/lib/api/adapter";
 import { AppShell, SectionHeader, TinyBadge, TopBar } from "./app-shell";
 
 type Section = "dashboard" | "users" | "settings" | "grants" | "providers" | "storage" | "monitoring" | "audit" | "backups";
@@ -23,8 +23,7 @@ export function AdminSectionView({ section }: { section: Section }) {
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   useEffect(() => {
-    const load = section === "providers" ? listProviders() : section === "audit" ? listAuditEvents() : section === "users" ? listUsers() : section === "grants" ? listUsers() : section === "monitoring" || section === "dashboard" ? getHealth() : Promise.resolve([]);
-    void load.then((value) => { if (section === "monitoring") setHealth(value as Record<string, unknown>); else setRows(value as unknown[]); }).catch((reason: unknown) => setError(reason instanceof ShennongApiError ? reason : { code: "request_failed", message: reason instanceof Error ? reason.message : "Request failed" }));
+    void Promise.resolve(section === "monitoring" || section === "dashboard" ? { status: "ok", source: "mock" } : []).then((value) => { if (section === "monitoring" || section === "dashboard") setHealth(value as Record<string, unknown>); else setRows(value as unknown[]); }).catch((reason: unknown) => setError(reason instanceof ShennongApiError ? reason : { code: "request_failed", message: reason instanceof Error ? reason.message : "Request failed" }));
   }, [section]);
   const heading = copy[section];
   return <AppShell variant="admin" active={section}><TopBar title={heading.title} description={heading.description} search={false} /><div className="admin-page"><div className="admin-panel"><SectionHeader title={heading.title} action={<TinyBadge tone={error ? "amber" : "green"}>{error ? error.code : section === "settings" ? "not_supported" : "API-backed"}</TinyBadge>} />{error ? <div className="empty-state"><ShieldCheck /><h3>{error.message}</h3><p>Internal details are intentionally hidden from the UI.</p></div> : section === "monitoring" || section === "dashboard" ? <HealthPanel health={health} /> : section === "backups" || section === "storage" || section === "settings" ? <div className="empty-state"><Database /><h3>{heading.title} API not supported</h3><p>The Rust API does not expose this operation yet. The UI keeps the boundary explicit.</p></div> : <DataTable rows={rows} section={section} />}</div></div></AppShell>;

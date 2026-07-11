@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 data/
 web/node_modules/
+web/.next/
 web/dist/
 *.tsbuildinfo
 web/vite.config.d.ts
