@@ -14,8 +14,8 @@ use shennong_query::{
     execute_clickhouse_expression, execute_tiledb_expression, resolve_tiledb_gene,
 };
 use shennong_schema::{
-    ArtifactUpsert, Capabilities, RelationUpsert, ResourceInstallRequest, ResourceQuery,
-    ResourceUpsert, TokenIssueRequest, UserUpsert,
+    ArtifactUpsert, Capabilities, RelationUpsert, ResourceInstallRequest, ResourcePermissions,
+    ResourceQuery, ResourceUpsert, TokenIssueRequest, UserUpsert, Visibility,
 };
 use shennong_storage::{LocalObjectStorage, ObjectStorage};
 use std::{
@@ -1029,11 +1029,11 @@ fn validate_resource(value: &ResourceUpsert) -> Result<(), ApiError> {
     if !value.metadata.is_object()
         || !value.spec.is_object()
         || !value.provenance.is_object()
-        || !value.permissions.is_object()
+        || value.permissions.validate().is_err()
     {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "resource metadata, spec, provenance, and permissions must be objects".into(),
+            "resource metadata, spec, provenance, and permissions are invalid".into(),
         ));
     }
     if !matches!(
@@ -1108,12 +1108,17 @@ async fn can_read(
     principal: &Principal,
     resource: &shennong_schema::Resource,
 ) -> Result<bool, ApiError> {
-    if resource
-        .permissions
-        .get("visibility")
-        .and_then(serde_json::Value::as_str)
-        != Some("private")
-    {
+    let permissions = match ResourcePermissions::from_value(&resource.permissions) {
+        Ok(permissions) => permissions,
+        Err(error) => {
+            tracing::warn!(resource_id = %resource.id, %error, "invalid resource permissions denied");
+            return Ok(false);
+        }
+    };
+    if permissions.visibility == Visibility::Public {
+        return Ok(true);
+    }
+    if principal.role == Role::Admin && principal.user_id.is_none() {
         return Ok(true);
     }
     if let Some(user_id) = &principal.user_id {
@@ -1126,16 +1131,23 @@ async fn can_read(
         else {
             return Ok(false);
         };
-        if user.role == "admin" {
+        if principal.role == Role::Admin && user.role == "admin" {
             return Ok(true);
         }
-        return state
+        if principal.role != Role::User || user.role != "user" {
+            return Ok(false);
+        }
+        if !state
             .repository
             .can_read_resource(&resource.id, user_id)
             .await
-            .map_err(database_error);
+            .map_err(database_error)?
+        {
+            return Ok(false);
+        }
+        return Ok(principal.has_scopes(&permissions.read_scopes));
     }
-    Ok(principal.role == Role::Admin)
+    Ok(false)
 }
 async fn audit(
     state: &AppState,
@@ -1200,7 +1212,7 @@ mod tests {
             spec: json!({}),
             status: "available".into(),
             provenance: json!({}),
-            permissions: json!({}),
+            permissions: shennong_schema::ResourcePermissions::default(),
         };
         assert!(validate_resource(&resource).is_err());
         let artifact = ArtifactUpsert {

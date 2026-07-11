@@ -34,7 +34,12 @@ Compose file, starts an isolated stack, and checks:
 
 - `/health` and `/healthz`;
 - public Resource reads;
-- private Resource enumeration protection (`404`);
+- fail-closed Resource permissions: missing visibility is private and invalid
+  visibility/scope payloads return `422`;
+- private Resource enumeration protection (`404`), explicit grants, required
+  scopes, disabled-user denial, and active-admin access;
+- consistent private-resource authorization for lists, details, artifacts,
+  relations, download, query, gene resolution, and agent discovery;
 - authenticated administrator writes;
 - a query bounded to two fixture rows;
 - a local expression fixture inside `/data` and rejection of an Artifact path

@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use shennong_schema::{
     Artifact, ArtifactUpsert, AuditEvent, ProviderFile, ProviderManifest, Relation, RelationUpsert,
-    Resource, ResourceUpsert, User, UserUpsert,
+    Resource, ResourcePermissions, ResourceUpsert, User, UserUpsert,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
@@ -30,6 +30,8 @@ pub enum ProviderError {
     Checksum,
     #[error("provider file definition is invalid")]
     InvalidFile,
+    #[error("provider permissions are invalid")]
+    InvalidPermissions,
     #[error("provider file processing failed: {0}")]
     Process(String),
     #[error(transparent)]
@@ -103,6 +105,8 @@ impl ProviderInstaller {
             .get("permissions")
             .cloned()
             .unwrap_or_else(shennong_schema::default_permissions);
+        let permissions = ResourcePermissions::from_value(&permissions)
+            .map_err(|_| ProviderError::InvalidPermissions)?;
         let mut spec = manifest
             .resource_spec
             .as_object()
@@ -402,7 +406,7 @@ impl ResourceRepository {
         search: Option<&str>,
         include_private: bool,
     ) -> Result<Vec<Resource>, sqlx::Error> {
-        sqlx::query_as("SELECT id, kind, metadata, spec, status, provenance, permissions, created_at, updated_at FROM resources WHERE ($1::text IS NULL OR to_tsvector('simple', id || ' ' || kind || ' ' || metadata::text) @@ websearch_to_tsquery('simple', $1)) AND ($2 OR permissions->>'visibility' != 'private') ORDER BY id")
+        sqlx::query_as("SELECT id, kind, metadata, spec, status, provenance, permissions, created_at, updated_at FROM resources WHERE ($1::text IS NULL OR to_tsvector('simple', id || ' ' || kind || ' ' || metadata::text) @@ websearch_to_tsquery('simple', $1)) AND ($2 OR permissions->>'visibility' = 'public') ORDER BY id")
             .bind(search).bind(include_private).fetch_all(&self.pool).await
     }
 
@@ -413,7 +417,7 @@ impl ResourceRepository {
 
     pub async fn upsert_resource(&self, value: &ResourceUpsert) -> Result<Resource, sqlx::Error> {
         sqlx::query_as("INSERT INTO resources (id, kind, metadata, spec, status, provenance, permissions) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, metadata = EXCLUDED.metadata, spec = EXCLUDED.spec, status = EXCLUDED.status, provenance = EXCLUDED.provenance, permissions = EXCLUDED.permissions, updated_at = NOW() RETURNING id, kind, metadata, spec, status, provenance, permissions, created_at, updated_at")
-            .bind(&value.id).bind(&value.kind).bind(&value.metadata).bind(&value.spec).bind(&value.status).bind(&value.provenance).bind(&value.permissions)
+            .bind(&value.id).bind(&value.kind).bind(&value.metadata).bind(&value.spec).bind(&value.status).bind(&value.provenance).bind(value.permissions.as_value())
             .fetch_one(&self.pool).await
     }
 
@@ -441,7 +445,7 @@ impl ResourceRepository {
         let query = if include_private {
             "SELECT source, target, relation_type, evidence, provenance, created_at FROM relations WHERE source = $1 OR target = $1 ORDER BY relation_type, source, target"
         } else {
-            "SELECT r.source, r.target, r.relation_type, r.evidence, r.provenance, r.created_at FROM relations r JOIN resources o ON o.id = CASE WHEN r.source = $1 THEN r.target ELSE r.source END WHERE (r.source = $1 OR r.target = $1) AND o.permissions->>'visibility' != 'private' ORDER BY r.relation_type, r.source, r.target"
+            "SELECT r.source, r.target, r.relation_type, r.evidence, r.provenance, r.created_at FROM relations r JOIN resources o ON o.id = CASE WHEN r.source = $1 THEN r.target ELSE r.source END WHERE (r.source = $1 OR r.target = $1) AND o.permissions->>'visibility' = 'public' ORDER BY r.relation_type, r.source, r.target"
         };
         sqlx::query_as(query)
             .bind(resource_id)

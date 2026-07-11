@@ -16,6 +16,75 @@ pub struct Resource {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    Public,
+    #[default]
+    Private,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourcePermissions {
+    #[serde(default)]
+    pub visibility: Visibility,
+    #[serde(default = "default_read_scopes")]
+    pub read_scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionError {
+    Malformed,
+    InvalidScope,
+}
+
+impl std::fmt::Display for PermissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Malformed => "permissions must contain a valid visibility and read_scopes array",
+            Self::InvalidScope => "permissions contain an invalid read scope",
+        })
+    }
+}
+
+impl ResourcePermissions {
+    pub fn from_value(value: &Value) -> Result<Self, PermissionError> {
+        let permissions: Self =
+            serde_json::from_value(value.clone()).map_err(|_| PermissionError::Malformed)?;
+        permissions.validate()?;
+        Ok(permissions)
+    }
+
+    pub fn as_value(&self) -> Value {
+        json!({"visibility": self.visibility, "read_scopes": self.read_scopes})
+    }
+
+    pub fn validate(&self) -> Result<(), PermissionError> {
+        if self.read_scopes.is_empty()
+            || self.read_scopes.iter().any(|scope| {
+                scope.is_empty()
+                    || scope.len() > 128
+                    || !scope.chars().all(|character| {
+                        character.is_ascii_alphanumeric()
+                            || matches!(character, '.' | ':' | '-' | '_')
+                    })
+            })
+        {
+            return Err(PermissionError::InvalidScope);
+        }
+        Ok(())
+    }
+}
+
+impl Default for ResourcePermissions {
+    fn default() -> Self {
+        Self {
+            visibility: Visibility::Private,
+            read_scopes: default_read_scopes(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResourceUpsert {
     pub id: String,
@@ -28,8 +97,8 @@ pub struct ResourceUpsert {
     pub status: String,
     #[serde(default)]
     pub provenance: Value,
-    #[serde(default = "default_permissions")]
-    pub permissions: Value,
+    #[serde(default)]
+    pub permissions: ResourcePermissions,
 }
 
 fn available() -> String {
@@ -133,8 +202,12 @@ fn default_token_lifetime() -> u64 {
     86_400
 }
 
-fn default_token_scopes() -> Vec<String> {
+fn default_read_scopes() -> Vec<String> {
     vec!["resource.read".into()]
+}
+
+fn default_token_scopes() -> Vec<String> {
+    default_read_scopes()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -255,5 +328,40 @@ impl Default for Capabilities {
 }
 
 pub fn default_permissions() -> Value {
-    json!({"visibility": "public", "read_scopes": ["resource.read"]})
+    ResourcePermissions::default().as_value()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResourcePermissions, ResourceUpsert, Visibility};
+    use serde_json::json;
+
+    #[test]
+    fn missing_visibility_defaults_to_private() {
+        let resource: ResourceUpsert = serde_json::from_value(json!({
+            "id":"fixture",
+            "kind":"Dataset",
+            "permissions":{"read_scopes":["resource.read"]}
+        }))
+        .unwrap();
+        assert_eq!(resource.permissions.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn permissions_reject_unknown_visibility_and_invalid_scopes() {
+        assert!(
+            ResourcePermissions::from_value(&json!({
+                "visibility":"published",
+                "read_scopes":["resource.read"]
+            }))
+            .is_err()
+        );
+        assert!(
+            ResourcePermissions::from_value(&json!({
+                "visibility":"private",
+                "read_scopes":["not a scope"]
+            }))
+            .is_err()
+        );
+    }
 }

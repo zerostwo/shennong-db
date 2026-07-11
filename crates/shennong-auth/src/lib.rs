@@ -90,12 +90,11 @@ impl Principal {
         }
     }
 
-    pub fn can_read(&self, permissions: &serde_json::Value) -> bool {
-        self.role == Role::Admin
-            || permissions
-                .get("visibility")
-                .and_then(serde_json::Value::as_str)
-                != Some("private")
+    pub fn has_scopes(&self, required: &[String]) -> bool {
+        self.scopes.iter().any(|scope| scope == "*")
+            || required
+                .iter()
+                .all(|scope| self.scopes.iter().any(|candidate| candidate == scope))
     }
 }
 
@@ -103,21 +102,17 @@ impl Principal {
 mod tests {
     use super::{Principal, Role, issue_token};
     use http::HeaderMap;
-    use serde_json::json;
 
     #[test]
-    fn private_resources_are_admin_only_without_a_grant() {
+    fn wildcard_scope_matches_every_required_scope() {
         let guest = Principal::from_headers(&HeaderMap::new(), Some("admin-key"), None);
-        let private = json!({"visibility": "private"});
-        let public = json!({"visibility": "public"});
-        assert!(!guest.can_read(&private));
-        assert!(guest.can_read(&public));
+        assert!(!guest.has_scopes(&["resource.read".into()]));
 
         let mut headers = HeaderMap::new();
         headers.insert("x-shennong-admin-key", "admin-key".parse().unwrap());
         let admin = Principal::from_headers(&headers, Some("admin-key"), None);
         assert_eq!(admin.role, Role::Admin);
-        assert!(admin.can_read(&private));
+        assert!(admin.has_scopes(&["resource.read".into(), "resource.secret".into()]));
     }
 
     #[test]

@@ -183,7 +183,7 @@ Write operations require the bootstrap administrator key:
 curl -X PUT http://127.0.0.1:8000/api/v1/resources/example \
   -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"id":"example","kind":"Dataset","metadata":{},"spec":{},"status":"available","provenance":{},"permissions":{"visibility":"private"}}'
+  -d '{"id":"example","kind":"Dataset","metadata":{},"spec":{},"status":"available","provenance":{},"permissions":{"visibility":"private","read_scopes":["resource.read"]}}'
 ```
 
 ## 5. Users and private Resources
@@ -205,7 +205,11 @@ curl -X PUT http://127.0.0.1:8000/api/v1/resources/private-dataset/grants/analys
   -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY"
 ```
 
-Use the returned token as `Authorization: Bearer TOKEN`. Setting the user's
+Use the returned token as `Authorization: Bearer TOKEN`. Private Resources
+require an active user, an explicit grant, and every scope in
+`permissions.read_scopes`; an admin user can use the `*` scope. Resource
+permissions are fail-closed: omitted `visibility` defaults to `private`, and
+unknown values or invalid scopes are rejected with `422`. Setting the user's
 status to `disabled` revokes access immediately, including already-issued JWTs.
 
 ## 6. Gene identifiers across annotation releases
