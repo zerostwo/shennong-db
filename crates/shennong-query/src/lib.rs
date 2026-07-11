@@ -211,6 +211,11 @@ impl QueryPlanner {
                 .feature
                 .as_ref()
                 .is_none_or(|feature| feature.feature_type != "gene")
+            || !(query.context.is_null()
+                || query
+                    .context
+                    .as_object()
+                    .is_some_and(serde_json::Map::is_empty))
         {
             return Err(QueryError::Unsupported);
         }
@@ -404,10 +409,29 @@ fn attach_embedding(response: &mut Value, input: &str) -> Result<(), QueryError>
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_embedding, expression_response, expression_response_from_file};
+    use super::{
+        QueryPlanner, attach_embedding, expression_response, expression_response_from_file,
+    };
     use chrono::Utc;
     use serde_json::json;
     use shennong_schema::{Resource, ResourceQuery};
+
+    #[test]
+    fn rejects_context_filters_until_annotation_resources_exist() {
+        let resource = Resource {
+            id: "toil".into(),
+            kind: "Dataset".into(),
+            metadata: json!({}),
+            spec: json!({}),
+            status: "available".into(),
+            provenance: json!({}),
+            permissions: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let query: ResourceQuery = serde_json::from_value(json!({"resource":"toil","operation":"expression","feature":{"type":"gene","name":"YTHDF2"},"context":{"disease":"SKCM"}})).unwrap();
+        assert!(QueryPlanner.validate(&resource, &query).is_err());
+    }
 
     #[test]
     fn reads_gene_by_sample_matrix_without_loading_a_backend() {

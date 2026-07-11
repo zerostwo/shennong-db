@@ -411,91 +411,23 @@ Do not hardcode MinIO.
 
 # Query Architecture
 
-The API should expose biological intent.
+The agent-facing path is metadata-first and two-level:
 
-Example:
+    GET /.well-known/shennong-agent.json
+      -> choose candidate Resource
+      -> GET /api/v1/agent/resources/{id}
+      -> inspect fields, dimensions, readiness, Artifacts, and Relations
+      -> POST /api/v1/query only for an operation marked ready
 
-Find YTHDF2 expression in pancreatic cancer from TOIL:
+Toil expression uses its byte-offset index for the first feature lookup and
+stores the resulting sample vector in ClickHouse. PBMC expression reads sparse
+TileDB arrays by gene symbol or Ensembl identifier.
 
-``` json
-{
-"resource":"toil",
-
-"operation":"expression",
-
-"feature":
-{
-"type":"gene",
-"name":"YTHDF2"
-},
-
-"context":
-{
-"disease":"PAAD"
-}
-}
-```
-
-The query planner decides:
-
-    Resource
-
-    ↓
-
-    Query Planner
-
-    ↓
-
-    ClickHouse Adapter
-
-    ↓
-
-    Result
-
-------------------------------------------------------------------------
-
-Example:
-
-PBMC3K CD3D UMAP expression:
-
-``` json
-{
-"resource":"PBMC3K",
-
-"operation":"embedding_expression",
-
-"feature":
-{
-"type":"gene",
-"name":"CD3D"
-},
-
-"embedding":
-{
-"type":"UMAP"
-}
-}
-```
-
-Execution:
-
-    Resource
-
-    ↓
-
-    TileDB/AnnData adapter
-
-    ↓
-
-    expression vector
-
-    +
-
-    embedding coordinates
-
-    ↓
-
-    response
+The installed Toil Resource currently has expression and sample IDs but no
+cancer-project, sample-type, or survival annotations. PBMC matrices currently
+have barcodes and counts but no cell-type annotations. The planner rejects
+context filters until those annotation Resources are installed; it must never
+silently return unfiltered data for a filtered biological question.
 
 ------------------------------------------------------------------------
 

@@ -20,6 +20,7 @@ COPY --from=clickhouse /etc/clickhouse-server /etc/clickhouse-server
 COPY --from=builder /app/target/release/shennong-server /usr/local/bin/shennong-server
 COPY --from=builder /app/target/release/shennong-cli /usr/local/bin/shennong-cli
 COPY providers /app/providers
+COPY seed /app/seed
 COPY docker/entrypoint.sh /usr/local/bin/shennong-entrypoint
 COPY docker/clickhouse-config.xml /etc/clickhouse-server/config.d/shennong.xml
 COPY docker/tiledb_backend.py /app/tiledb_backend.py

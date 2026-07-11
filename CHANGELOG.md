@@ -15,11 +15,16 @@ and [Semantic Versioning](https://semver.org/).
   operations, artifacts, and query examples.
 - Administrator-managed users, roles, status, JWT issuance, and immediate access
   revocation for disabled users.
+- Two-level agent discovery with a small Resource catalog and per-Resource
+  analysis-readiness details.
+- Standard Docker installation, API usage, and measured performance guides.
 
 ### Changed
 
 - Production deployment now uses one Docker image and one Compose service for
   the API, PostgreSQL, ClickHouse, and TileDB.
+- Context filters now fail explicitly when required cohort, clinical, or
+  cell-type annotations are unavailable.
 
 ### Removed
 

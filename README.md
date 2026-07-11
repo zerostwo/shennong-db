@@ -42,13 +42,16 @@ an explicit grant. Disabling a user invalidates their access immediately.
 
 ## Agent discovery
 
-An agent should read `/.well-known/shennong-agent.json` first. This single JSON
-document includes each dataset's purpose, dimensions, fields, identifier type,
-storage backend, supported operations, artifacts, and runnable query examples.
-The agent can therefore choose the right dataset without probing every Resource.
-The manifest marks catalog metadata as untrusted descriptive data so runtimes do
-not treat dataset text as instructions.
+An agent first reads `/.well-known/shennong-agent.json`, which contains only the
+Resource inventory and selection metadata. It then follows the selected
+Resource's `details_url` to retrieve dimensions, fields, identifiers, analysis
+readiness, missing annotation requirements, Artifacts, Relations, and a bounded
+query example. Catalog metadata is marked as untrusted descriptive data.
 
 PBMC 10x HDF5 inputs are materialized as sparse TileDB arrays on first startup.
 Toil expression queries use the local indexed source for the first lookup and
 are stored in ClickHouse for subsequent low-latency queries.
+
+See [docs/guide.md](docs/guide.md) for production installation and complete API
+usage. See [docs/performance.md](docs/performance.md) for measured query latency
+and the current analysis-readiness boundaries.

@@ -6,14 +6,23 @@
       "metadata": {
         "title": "TCGA TARGET GTEx Toil RNA-seq",
         "summary": "Bulk RNA-seq expression matrix spanning TCGA, TARGET, and GTEx samples.",
-        "use_when": "Compare bulk RNA expression across TCGA tumors, TARGET cancers, or GTEx normal tissues.",
+        "use_when": "Retrieve bulk RNA expression by raw TCGA, TARGET, or GTEx sample ID before joining separate cohort or clinical annotations.",
         "organism": "human",
         "data_model": "bulk",
         "assays": ["rna"],
         "feature_identifier": "Ensembl gene ID with version suffix",
         "example_feature": "ENSG00000242268.2",
         "dimensions": {"features": 60498, "samples": 19131},
-        "fields": ["sample_id", "ensembl_gene_id", "log2_tpm_plus_0.001"]
+        "fields": ["sample_id", "ensembl_gene_id", "log2_tpm_plus_0.001"],
+        "analysis_capabilities": {
+          "ready": ["gene_expression_by_sample"],
+          "requires_additional_resources": {
+            "tumor_vs_normal_by_cancer": ["sample_to_cancer_project", "sample_type"],
+            "survival": ["clinical_follow_up", "survival_time", "survival_event"],
+            "gene_symbol_queries": ["gene_symbol_to_ensembl_version"]
+          }
+        },
+        "supported_context": []
       },
       "spec": {
         "version": "2026.07",
@@ -37,7 +46,12 @@
         "feature_identifier": "Ensembl gene ID or gene symbol",
         "example_feature": "CD3D",
         "dimensions": {"features": 54872, "cells": 1215},
-        "fields": ["cell_barcode", "ensembl_gene_id", "gene_symbol", "count"]
+        "fields": ["cell_barcode", "ensembl_gene_id", "gene_symbol", "count"],
+        "analysis_capabilities": {
+          "ready": ["gene_expression_by_cell"],
+          "requires_additional_resources": {"expression_by_cell_type": ["cell_type_annotation"]}
+        },
+        "supported_context": []
       },
       "spec": {"version": "1k", "backend": "tiledb", "array_uri": "/data/tiledb/pbmc-1k", "operations": ["expression", "artifacts"]},
       "status": "available",
@@ -57,7 +71,12 @@
         "feature_identifier": "Ensembl gene ID or gene symbol",
         "example_feature": "CD3D",
         "dimensions": {"features": 54872, "cells": 2753},
-        "fields": ["cell_barcode", "ensembl_gene_id", "gene_symbol", "count"]
+        "fields": ["cell_barcode", "ensembl_gene_id", "gene_symbol", "count"],
+        "analysis_capabilities": {
+          "ready": ["gene_expression_by_cell"],
+          "requires_additional_resources": {"expression_by_cell_type": ["cell_type_annotation"]}
+        },
+        "supported_context": []
       },
       "spec": {"version": "3k", "backend": "tiledb", "array_uri": "/data/tiledb/pbmc-3k", "operations": ["expression", "artifacts"]},
       "status": "available",
@@ -77,7 +96,12 @@
         "feature_identifier": "Ensembl gene ID or gene symbol",
         "example_feature": "CD3D",
         "dimensions": {"features": 54872, "cells": 4719},
-        "fields": ["cell_barcode", "ensembl_gene_id", "gene_symbol", "count"]
+        "fields": ["cell_barcode", "ensembl_gene_id", "gene_symbol", "count"],
+        "analysis_capabilities": {
+          "ready": ["gene_expression_by_cell"],
+          "requires_additional_resources": {"expression_by_cell_type": ["cell_type_annotation"]}
+        },
+        "supported_context": []
       },
       "spec": {"version": "4k", "backend": "tiledb", "array_uri": "/data/tiledb/pbmc-4k", "operations": ["expression", "artifacts"]},
       "status": "available",
