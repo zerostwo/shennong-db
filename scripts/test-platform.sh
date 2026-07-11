@@ -231,6 +231,12 @@ curl --noproxy '*' --fail --silent -H "$json" \
   -d '{"resource":"fixture-public","operation":"expression","feature":{"type":"gene","name":"GENE1"},"options":{"limit":2}}' \
   "$base/api/v1/query" \
   | jq -e '.data.status == "success" and .data.meta.n_rows == 2 and (.data.data | length) == 2' >/dev/null
+curl --noproxy '*' --fail --silent "$base/api/v1/capabilities" \
+  | jq -e '.data.batch_features == true and (.data.query_operations | index("expression_batch"))' >/dev/null
+curl --noproxy '*' --fail --silent -H "$json" \
+  -d '{"resource":"fixture-public","operation":"expression","features":[{"type":"gene","name":"GENE1"},{"type":"gene","name":"GENE2"}],"options":{"limit":2}}' \
+  "$base/api/v1/query/batch" \
+  | jq -e '.data.status == "success" and .data.meta.batch == true and .data.meta.n_rows == 2' >/dev/null
 
 put_tiledb_resource() {
   id=$1

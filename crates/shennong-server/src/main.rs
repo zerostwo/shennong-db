@@ -113,7 +113,7 @@ impl RateLimiter {
 async fn request_limits(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let key = client_key(&request, &state);
     let path = request.uri().path();
-    if path == "/api/v1/query" && !state.query_rate.allow(&key) {
+    if matches!(path, "/api/v1/query" | "/api/v1/query/batch") && !state.query_rate.allow(&key) {
         return ApiError(
             StatusCode::TOO_MANY_REQUESTS,
             "query rate limit exceeded".into(),
@@ -134,7 +134,7 @@ async fn request_limits(State(state): State<AppState>, request: Request, next: N
         )
         .into_response();
     };
-    let query_permit = if path == "/api/v1/query" {
+    let query_permit = if matches!(path, "/api/v1/query" | "/api/v1/query/batch") {
         match state.query_requests.clone().try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
@@ -489,6 +489,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/users/{id}", get(get_user).put(upsert_user))
         .route("/api/v1/users/{id}/tokens", post(issue_user_token))
         .route("/api/v1/query", post(query))
+        .route("/api/v1/query/batch", post(query_batch))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -545,10 +546,19 @@ async fn ready(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
 async fn version() -> Json<serde_json::Value> {
     Json(serde_json::json!({"service":"ShennongDB","version":"0.1.0","api":"v1"}))
 }
-async fn capabilities() -> Json<Envelope<Capabilities>> {
-    Json(Envelope {
-        data: Capabilities::default(),
-    })
+async fn capabilities() -> Json<Envelope<serde_json::Value>> {
+    let mut data = serde_json::to_value(Capabilities::default()).unwrap_or_default();
+    data["batch_features"] = true.into();
+    data["metadata_views"] = false.into();
+    data["axes"] = false.into();
+    data["cursor"] = false.into();
+    data["arrow"] = false.into();
+    data["structured_errors"] = true.into();
+    data["artifact_streaming"] = true.into();
+    if let Some(operations) = data["query_operations"].as_array_mut() {
+        operations.push("expression_batch".into());
+    }
+    Json(Envelope { data })
 }
 
 async fn agent_manifest(
@@ -1550,6 +1560,66 @@ async fn query(
         .map_err(query_error)?;
         limit_response(full, &value)
     };
+    ensure_query_response_size(&data).map_err(query_error)?;
+    Ok(Json(Envelope { data }))
+}
+
+#[derive(serde::Deserialize)]
+struct BatchResourceQuery {
+    resource: String,
+    operation: String,
+    features: Vec<shennong_schema::QueryFeature>,
+    #[serde(default)]
+    context: serde_json::Value,
+    version: Option<String>,
+    #[serde(default)]
+    options: serde_json::Value,
+}
+
+async fn query_batch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<BatchResourceQuery>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    if value.features.is_empty() || value.features.len() > 100 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "batch query requires 1..100 features".into(),
+        ));
+    }
+    let mut rows = Vec::new();
+    for feature in value.features {
+        let request = ResourceQuery {
+            resource: value.resource.clone(),
+            operation: value.operation.clone(),
+            feature: Some(feature.clone()),
+            context: value.context.clone(),
+            embedding: None,
+            version: value.version.clone(),
+            options: value.options.clone(),
+        };
+        let response = query(State(state.clone()), headers.clone(), Json(request)).await?;
+        if let Some(values) = response
+            .0
+            .data
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+        {
+            for value in values {
+                let mut row = value.clone();
+                if row.get("feature").is_none() {
+                    row["feature"] = feature.name.clone().into();
+                }
+                rows.push(row);
+            }
+        }
+    }
+    let n_rows = rows.len();
+    let data = serde_json::json!({
+        "status": "success",
+        "data": rows,
+        "meta": {"batch": true, "n_rows": n_rows}
+    });
     ensure_query_response_size(&data).map_err(query_error)?;
     Ok(Json(Envelope { data }))
 }
