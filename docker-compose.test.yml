@@ -12,6 +12,11 @@ services:
       SHENNONG_PROVIDER_DIR: /app/providers
       SHENNONG_DOWNLOAD_CONCURRENCY: "1"
       SHENNONG_DOWNLOAD_TIMEOUT_SECS: "30"
+      SHENNONG_TILEDB_SCRIPT: /data/fixtures/tiledb-test.py
+      SHENNONG_TILEDB_MAX_CONCURRENCY: "1"
+      SHENNONG_TILEDB_TIMEOUT_SECS: "1"
+      SHENNONG_TILEDB_MAX_STDOUT_BYTES: "1024"
+      SHENNONG_TILEDB_MAX_STDERR_BYTES: "1024"
     volumes:
       - test_data:/data
       - test_metadata:/var/lib/postgresql/data

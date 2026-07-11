@@ -183,6 +183,14 @@ return `416` for invalid ranges. Set `SHENNONG_DOWNLOAD_CONCURRENCY` and
 `SHENNONG_DOWNLOAD_TIMEOUT_SECS` to bound simultaneous downloads and a stalled
 file read.
 
+TileDB subprocesses use `SHENNONG_TILEDB_MAX_CONCURRENCY`,
+`SHENNONG_TILEDB_TIMEOUT_SECS`, `SHENNONG_TILEDB_MAX_STDOUT_BYTES`, and
+`SHENNONG_TILEDB_MAX_STDERR_BYTES`. ClickHouse uses one shared client with the
+`SHENNONG_CLICKHOUSE_*` timeout and idle-connection settings.
+
+Queries accept at most 10,000 rows, a 256-byte gene feature name, 20 context
+fields with 256-byte string values, and a 10 MiB serialized response.
+
 Write operations require the bootstrap administrator key:
 
 ```bash

@@ -9,6 +9,7 @@ admin='X-Shennong-Admin-Key: integration-test-admin-key'
 json='Content-Type: application/json'
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/shennong-test.XXXXXX")
 slow_pid=
+query_pid=
 
 run_compose() {
   # ponytail: word splitting lets callers use COMPOSE_COMMAND='sudo docker compose'.
@@ -21,6 +22,10 @@ cleanup() {
   if [ -n "$slow_pid" ]; then
     kill "$slow_pid" 2>/dev/null || true
     wait "$slow_pid" 2>/dev/null || true
+  fi
+  if [ -n "$query_pid" ]; then
+    kill "$query_pid" 2>/dev/null || true
+    wait "$query_pid" 2>/dev/null || true
   fi
   rm -rf "$tmpdir"
   if [ "$status" -ne 0 ]; then
@@ -193,5 +198,51 @@ curl --noproxy '*' --fail --silent -H "$json" \
   -d '{"resource":"fixture-public","operation":"expression","feature":{"type":"gene","name":"GENE1"},"options":{"limit":2}}' \
   "$base/api/v1/query" \
   | jq -e '.data.status == "success" and .data.meta.n_rows == 2 and (.data.data | length) == 2' >/dev/null
+
+put_tiledb_resource() {
+  id=$1
+  uri=$2
+  curl --noproxy '*' --fail --silent -X PUT -H "$admin" -H "$json" \
+    -d "{\"id\":\"$id\",\"kind\":\"Dataset\",\"metadata\":{},\"spec\":{\"backend\":\"tiledb\",\"array_uri\":\"$uri\",\"operations\":[\"expression\"]},\"status\":\"available\",\"provenance\":{},\"permissions\":{\"visibility\":\"public\",\"read_scopes\":[\"resource.read\"]}}" \
+    "$base/api/v1/resources/$id" >/dev/null
+}
+
+query_tiledb() {
+  id=$1
+  shift
+  curl --noproxy '*' --silent -H "$json" \
+    -d "{\"resource\":\"$id\",\"operation\":\"expression\",\"feature\":{\"type\":\"gene\",\"name\":\"YTHDF2\"}}" \
+    "$@" "$base/api/v1/query"
+}
+
+assert_backend_error() {
+  id=$1
+  status=$2
+  code=$3
+  actual=$(query_tiledb "$id" -o "$tmpdir/$id.json" -w '%{http_code}')
+  [ "$actual" = "$status" ]
+  jq -e --arg code "$code" '.code == $code and (.request_id | type == "string")' "$tmpdir/$id.json" >/dev/null
+  ! rg -q '/data|Traceback|python' "$tmpdir/$id.json"
+}
+
+put_tiledb_resource fixture-tiledb-normal normal
+put_tiledb_resource fixture-tiledb-sleep sleep
+put_tiledb_resource fixture-tiledb-exit exit
+put_tiledb_resource fixture-tiledb-stdout stdout
+put_tiledb_resource fixture-tiledb-stderr stderr
+query_tiledb fixture-tiledb-normal --fail | jq -e '.data.status == "success"' >/dev/null
+curl --noproxy '*' --fail --silent "$base/api/v1/genes/resolve?q=YTHDF2&resources=fixture-tiledb-normal" \
+  | jq -e '.data.status == "missing"' >/dev/null
+assert_backend_error fixture-tiledb-sleep 504 query_backend_timeout
+assert_backend_error fixture-tiledb-exit 422 query_backend_failed
+assert_backend_error fixture-tiledb-stdout 422 query_backend_failed
+assert_backend_error fixture-tiledb-stderr 422 query_backend_failed
+
+query_tiledb fixture-tiledb-sleep -o "$tmpdir/tiledb-slow.json" &
+query_pid=$!
+sleep 0.2
+[ "$(query_tiledb fixture-tiledb-normal -o /dev/null -w '%{http_code}')" = 429 ]
+wait "$query_pid" 2>/dev/null || true
+query_pid=
 
 echo 'production hardening baseline: all checks passed'

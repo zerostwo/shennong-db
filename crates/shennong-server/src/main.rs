@@ -13,8 +13,9 @@ use serde::Serialize;
 use shennong_auth::{Principal, Role, issue_token};
 use shennong_core::{ProviderInstaller, ResourceRepository};
 use shennong_query::{
-    FileExpressionAdapter, QueryAdapter, QueryPlanner, cache_clickhouse_expression,
-    execute_clickhouse_expression, execute_tiledb_expression, resolve_tiledb_gene,
+    FileExpressionAdapter, MAX_QUERY_RESPONSE_BYTES, QueryAdapter, QueryError, QueryPlanner,
+    TiledbExecutor, cache_clickhouse_expression, execute_clickhouse_expression,
+    execute_tiledb_expression, resolve_tiledb_gene,
 };
 use shennong_schema::{
     ArtifactUpsert, Capabilities, RelationUpsert, ResourceInstallRequest, ResourcePermissions,
@@ -42,7 +43,9 @@ struct AppState {
     admin_key: Option<String>,
     jwt_secret: Option<String>,
     clickhouse_url: String,
+    clickhouse_client: reqwest::Client,
     tiledb_script: String,
+    tiledb: TiledbExecutor,
     data_root: PathBuf,
     downloads: Arc<Semaphore>,
     download_timeout: Duration,
@@ -89,7 +92,16 @@ struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(serde_json::json!({"error": self.1}))).into_response()
+        let code = self.1.clone();
+        (
+            self.0,
+            Json(serde_json::json!({
+                "error": code,
+                "code": code,
+                "request_id": uuid::Uuid::new_v4(),
+            })),
+        )
+            .into_response()
     }
 }
 
@@ -119,6 +131,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|value: &u64| *value > 0)
             .unwrap_or(300),
     );
+    let clickhouse_connect_timeout = Duration::from_secs(
+        env::var("SHENNONG_CLICKHOUSE_CONNECT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value: &u64| *value > 0)
+            .unwrap_or(3),
+    );
+    let clickhouse_timeout = Duration::from_secs(
+        env::var("SHENNONG_CLICKHOUSE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value: &u64| *value > 0)
+            .unwrap_or(15),
+    );
+    let clickhouse_max_idle = env::var("SHENNONG_CLICKHOUSE_MAX_IDLE_PER_HOST")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &usize| *value > 0)
+        .unwrap_or(8);
+    let tiledb_timeout = Duration::from_secs(
+        env::var("SHENNONG_TILEDB_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value: &u64| *value > 0)
+            .unwrap_or(30),
+    );
+    let tiledb_concurrency = env::var("SHENNONG_TILEDB_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &usize| *value > 0)
+        .unwrap_or(4);
+    let tiledb_max_stdout = env::var("SHENNONG_TILEDB_MAX_STDOUT_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &usize| *value > 0)
+        .unwrap_or(MAX_QUERY_RESPONSE_BYTES);
+    let tiledb_max_stderr = env::var("SHENNONG_TILEDB_MAX_STDERR_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &usize| *value > 0)
+        .unwrap_or(64 * 1024);
     let storage = Arc::new(LocalObjectStorage::new(&data_root));
     let state = AppState {
         repository: Arc::new(repository),
@@ -132,8 +185,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_secret: env::var("SHENNONG_JWT_SECRET").ok(),
         clickhouse_url: env::var("SHENNONG_CLICKHOUSE_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8123".into()),
+        clickhouse_client: reqwest::Client::builder()
+            .connect_timeout(clickhouse_connect_timeout)
+            .timeout(clickhouse_timeout)
+            .pool_max_idle_per_host(clickhouse_max_idle)
+            .build()?,
         tiledb_script: env::var("SHENNONG_TILEDB_SCRIPT")
             .unwrap_or_else(|_| "/app/tiledb_backend.py".into()),
+        tiledb: TiledbExecutor::new(
+            env::var("SHENNONG_TILEDB_PYTHON").unwrap_or_else(|_| "/opt/tiledb/bin/python".into()),
+            tiledb_concurrency,
+            tiledb_timeout,
+            tiledb_max_stdout,
+            tiledb_max_stderr,
+        ),
         data_root,
         downloads: Arc::new(Semaphore::new(download_concurrency)),
         download_timeout,
@@ -194,7 +259,8 @@ async fn ready(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
             StatusCode::SERVICE_UNAVAILABLE,
             "metadata store is unavailable".into(),
         ))
-    } else if reqwest::Client::new()
+    } else if state
+        .clickhouse_client
         .get(&state.clickhouse_url)
         .query(&[("query", "SELECT 1")])
         .send()
@@ -380,7 +446,7 @@ async fn resolve_gene(
             .and_then(serde_json::Value::as_str)
             == Some("tiledb")
         {
-            resolve_tiledb_gene(&state.tiledb_script, &resource, &query.q)
+            resolve_tiledb_gene(&state.tiledb, &state.tiledb_script, &resource, &query.q)
                 .await
                 .map_err(query_error)?
                 .get("matches")
@@ -1165,7 +1231,7 @@ async fn query(
         .and_then(serde_json::Value::as_str)
         == Some("tiledb")
     {
-        execute_tiledb_expression(&state.tiledb_script, &resource, &value)
+        execute_tiledb_expression(&state.tiledb, &state.tiledb_script, &resource, &value)
             .await
             .map_err(query_error)?
     } else if has_context || value.operation == "survival_expression" {
@@ -1173,10 +1239,14 @@ async fn query(
             .execute(&resource, &artifacts, &value)
             .await
             .map_err(query_error)?
-    } else if let Some(cached) =
-        execute_clickhouse_expression(&state.clickhouse_url, &resource, &value)
-            .await
-            .map_err(query_error)?
+    } else if let Some(cached) = execute_clickhouse_expression(
+        &state.clickhouse_client,
+        &state.clickhouse_url,
+        &resource,
+        &value,
+    )
+    .await
+    .map_err(query_error)?
     {
         cached
     } else {
@@ -1186,11 +1256,18 @@ async fn query(
             .execute(&resource, &artifacts, &cache_query)
             .await
             .map_err(query_error)?;
-        cache_clickhouse_expression(&state.clickhouse_url, &resource, &cache_query, &full)
-            .await
-            .map_err(query_error)?;
+        cache_clickhouse_expression(
+            &state.clickhouse_client,
+            &state.clickhouse_url,
+            &resource,
+            &cache_query,
+            &full,
+        )
+        .await
+        .map_err(query_error)?;
         limit_response(full, &value)
     };
+    ensure_query_response_size(&data).map_err(query_error)?;
     Ok(Json(Envelope { data }))
 }
 
@@ -1200,7 +1277,7 @@ fn limit_response(mut response: serde_json::Value, query: &ResourceQuery) -> ser
         .get("limit")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1_000)
-        .clamp(1, 100_000) as usize;
+        .clamp(1, shennong_query::MAX_QUERY_ROWS) as usize;
     if let Some(rows) = response
         .get_mut("data")
         .and_then(serde_json::Value::as_array_mut)
@@ -1393,17 +1470,35 @@ async fn audit(
         .map_err(database_error)
 }
 fn query_error(error: shennong_query::QueryError) -> ApiError {
-    tracing::error!(%error, "query execution failed");
-    ApiError(StatusCode::UNPROCESSABLE_ENTITY, error.to_string())
+    let (status, code) = match &error {
+        QueryError::BackendBusy => (StatusCode::TOO_MANY_REQUESTS, "query_backend_busy"),
+        QueryError::BackendTimeout => (StatusCode::GATEWAY_TIMEOUT, "query_backend_timeout"),
+        QueryError::Http(http) if http.is_timeout() => {
+            (StatusCode::GATEWAY_TIMEOUT, "query_backend_timeout")
+        }
+        QueryError::ResponseTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "query_response_too_large"),
+        _ => (StatusCode::UNPROCESSABLE_ENTITY, "query_backend_failed"),
+    };
+    tracing::error!(error = ?error, code, "query execution failed");
+    ApiError(status, code.into())
+}
+
+fn ensure_query_response_size(value: &serde_json::Value) -> Result<(), QueryError> {
+    if serde_json::to_vec(value).map_err(QueryError::Json)?.len() > MAX_QUERY_RESPONSE_BYTES {
+        return Err(QueryError::ResponseTooLarge);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ByteRange, agent_catalog_entry, parse_single_range, safe_download_name, valid_identifier,
-        validate_artifact, validate_resource,
+        ByteRange, agent_catalog_entry, ensure_query_response_size, parse_single_range,
+        query_error, safe_download_name, valid_identifier, validate_artifact, validate_resource,
     };
+    use axum::{body::to_bytes, response::IntoResponse};
     use serde_json::json;
+    use shennong_query::QueryError;
     use shennong_schema::{ArtifactUpsert, Resource, ResourceUpsert};
     use std::path::Path;
 
@@ -1486,5 +1581,27 @@ mod tests {
             safe_download_name(Path::new("/data/a bad\"name.tsv")),
             "a_bad_name.tsv"
         );
+    }
+
+    #[tokio::test]
+    async fn query_errors_are_stable_and_do_not_leak_backend_details() {
+        let response = query_error(QueryError::Io(std::io::Error::other(
+            "/data/private Traceback python command",
+        )))
+        .into_response();
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["code"], "query_backend_failed");
+        assert!(value["request_id"].is_string());
+        assert!(!body.windows(5).any(|window| window == b"/data"));
+    }
+
+    #[test]
+    fn query_responses_have_a_serialized_size_limit() {
+        let value = json!({"data": ["x".repeat(shennong_query::MAX_QUERY_RESPONSE_BYTES)]});
+        assert!(matches!(
+            ensure_query_response_size(&value),
+            Err(QueryError::ResponseTooLarge)
+        ));
     }
 }

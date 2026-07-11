@@ -6,9 +6,20 @@ use std::{
     fs::File,
     io::{BufRead, BufReader, Cursor, Seek, SeekFrom},
     path::Path,
-    process::Command,
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
 };
 use thiserror::Error;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::{Child, Command},
+    sync::Semaphore,
+};
+
+pub const MAX_QUERY_ROWS: u64 = 10_000;
+pub const MAX_QUERY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+const TILED_B_IO_CHUNK_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Error)]
 pub enum QueryError {
@@ -26,11 +37,47 @@ pub enum QueryError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Http(#[from] reqwest::Error),
-    #[error("query backend is unavailable: {0}")]
-    BackendUnavailable(String),
+    #[error("query backend is unavailable")]
+    BackendUnavailable,
+    #[error("query backend timed out")]
+    BackendTimeout,
+    #[error("query backend is busy")]
+    BackendBusy,
+    #[error("query backend output exceeded its configured limit")]
+    BackendOutputTooLarge,
+    #[error("query response exceeded its configured limit")]
+    ResponseTooLarge,
+}
+
+#[derive(Clone)]
+pub struct TiledbExecutor {
+    python: String,
+    semaphore: Arc<Semaphore>,
+    timeout: Duration,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+}
+
+impl TiledbExecutor {
+    pub fn new(
+        python: impl Into<String>,
+        max_concurrency: usize,
+        timeout: Duration,
+        max_stdout_bytes: usize,
+        max_stderr_bytes: usize,
+    ) -> Self {
+        Self {
+            python: python.into(),
+            semaphore: Arc::new(Semaphore::new(max_concurrency.max(1))),
+            timeout,
+            max_stdout_bytes: max_stdout_bytes.max(1),
+            max_stderr_bytes: max_stderr_bytes.max(1),
+        }
+    }
 }
 
 pub async fn execute_tiledb_expression(
+    executor: &TiledbExecutor,
     script: &str,
     resource: &Resource,
     query: &ResourceQuery,
@@ -46,9 +93,11 @@ pub async fn execute_tiledb_expression(
         .get("limit")
         .and_then(Value::as_u64)
         .unwrap_or(1_000)
-        .clamp(1, 100_000);
-    let output = Command::new("/opt/tiledb/bin/python")
-        .args([
+        .clamp(1, MAX_QUERY_ROWS);
+    let limit = limit.to_string();
+    let output = run_tiledb(
+        executor,
+        [
             script,
             "query",
             "--uri",
@@ -56,15 +105,11 @@ pub async fn execute_tiledb_expression(
             "--feature",
             &feature.name,
             "--limit",
-            &limit.to_string(),
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err(QueryError::BackendUnavailable(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    let mut response: Value = serde_json::from_slice(&output.stdout)?;
+            &limit,
+        ],
+    )
+    .await?;
+    let mut response: Value = serde_json::from_slice(&output)?;
     response["meta"]["dataset"] = resource.id.clone().into();
     response["meta"]["version"] = resource
         .spec
@@ -75,6 +120,7 @@ pub async fn execute_tiledb_expression(
 }
 
 pub async fn resolve_tiledb_gene(
+    executor: &TiledbExecutor,
     script: &str,
     resource: &Resource,
     feature: &str,
@@ -84,18 +130,17 @@ pub async fn resolve_tiledb_gene(
         .get("array_uri")
         .and_then(Value::as_str)
         .ok_or(QueryError::Unsupported)?;
-    let output = Command::new("/opt/tiledb/bin/python")
-        .args([script, "resolve", "--uri", uri, "--feature", feature])
-        .output()?;
-    if !output.status.success() {
-        return Err(QueryError::BackendUnavailable(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-    Ok(serde_json::from_slice(&output.stdout)?)
+    Ok(serde_json::from_slice(
+        &run_tiledb(
+            executor,
+            [script, "resolve", "--uri", uri, "--feature", feature],
+        )
+        .await?,
+    )?)
 }
 
 pub async fn execute_clickhouse_expression(
+    client: &reqwest::Client,
     endpoint: &str,
     resource: &Resource,
     query: &ResourceQuery,
@@ -111,21 +156,23 @@ pub async fn execute_clickhouse_expression(
         .get("limit")
         .and_then(Value::as_u64)
         .unwrap_or(1_000)
-        .clamp(1, 100_000);
+        .clamp(1, MAX_QUERY_ROWS);
     let statement = format!(
         "SELECT sample_id, anyLast(value) AS value FROM shennong.expression_cache WHERE dataset = '{}' AND version = '{}' AND feature = '{}' GROUP BY sample_id ORDER BY sample_id LIMIT {limit} FORMAT JSON",
         quote(&resource.id),
         quote(version),
         quote(&feature.name),
     );
-    let payload: Value = reqwest::Client::new()
-        .get(endpoint)
-        .query(&[("query", statement)])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let payload = read_bounded_json(
+        client
+            .get(endpoint)
+            .query(&[("query", statement)])
+            .send()
+            .await?
+            .error_for_status()?,
+        MAX_QUERY_RESPONSE_BYTES,
+    )
+    .await?;
     let rows = payload
         .get("data")
         .and_then(Value::as_array)
@@ -162,6 +209,7 @@ pub async fn execute_clickhouse_expression(
 }
 
 pub async fn cache_clickhouse_expression(
+    client: &reqwest::Client,
     endpoint: &str,
     resource: &Resource,
     query: &ResourceQuery,
@@ -195,7 +243,10 @@ pub async fn cache_clickhouse_expression(
     if lines.is_empty() {
         return Ok(());
     }
-    reqwest::Client::new()
+    if lines.len() > MAX_QUERY_RESPONSE_BYTES {
+        return Err(QueryError::ResponseTooLarge);
+    }
+    client
         .post(endpoint)
         .query(&[(
             "query",
@@ -206,6 +257,93 @@ pub async fn cache_clickhouse_expression(
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+async fn run_tiledb<'a>(
+    executor: &TiledbExecutor,
+    arguments: impl IntoIterator<Item = &'a str>,
+) -> Result<Vec<u8>, QueryError> {
+    let _permit = executor
+        .semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| QueryError::BackendBusy)?;
+    let mut child = Command::new(&executor.python)
+        .args(arguments)
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().ok_or(QueryError::BackendUnavailable)?;
+    let stderr = child.stderr.take().ok_or(QueryError::BackendUnavailable)?;
+    let result = tokio::time::timeout(executor.timeout, async {
+        let (stdout, _stderr, status) = tokio::try_join!(
+            read_capped(stdout, executor.max_stdout_bytes),
+            read_capped(stderr, executor.max_stderr_bytes),
+            async { child.wait().await.map_err(QueryError::Io) },
+        )?;
+        if !status.success() {
+            return Err(QueryError::BackendUnavailable);
+        }
+        Ok(stdout)
+    })
+    .await;
+    match result {
+        Ok(Ok(stdout)) => Ok(stdout),
+        Ok(Err(error)) => {
+            stop_child(&mut child).await;
+            Err(error)
+        }
+        Err(_) => {
+            stop_child(&mut child).await;
+            Err(QueryError::BackendTimeout)
+        }
+    }
+}
+
+async fn stop_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+}
+
+async fn read_capped<R: AsyncRead + Unpin>(
+    mut reader: R,
+    max_bytes: usize,
+) -> Result<Vec<u8>, QueryError> {
+    let mut output = Vec::new();
+    let mut buffer = [0; TILED_B_IO_CHUNK_BYTES];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            return Ok(output);
+        }
+        if output.len().saturating_add(count) > max_bytes {
+            return Err(QueryError::BackendOutputTooLarge);
+        }
+        output.extend_from_slice(&buffer[..count]);
+    }
+}
+
+async fn read_bounded_json(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Value, QueryError> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > max_bytes as u64)
+    {
+        return Err(QueryError::ResponseTooLarge);
+    }
+    let mut output = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if output.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(QueryError::ResponseTooLarge);
+        }
+        output.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&output)?)
 }
 
 fn quote(value: &str) -> String {
@@ -244,14 +382,23 @@ impl QueryPlanner {
             .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
             .unwrap_or_default();
         if !operations.contains(&query.operation.as_str())
+            || query.feature.as_ref().is_none_or(|feature| {
+                feature.feature_type != "gene"
+                    || feature.name.is_empty()
+                    || feature.name.len() > 256
+            })
             || query
-                .feature
-                .as_ref()
-                .is_none_or(|feature| feature.feature_type != "gene")
+                .options
+                .get("limit")
+                .and_then(Value::as_u64)
+                .is_some_and(|limit| limit > MAX_QUERY_ROWS)
             || context.is_some_and(|values| {
-                values
-                    .keys()
-                    .any(|key| !supported_context.contains(&key.as_str()))
+                values.len() > 20
+                    || values.iter().any(|(key, value)| {
+                        key.len() > 64
+                            || !supported_context.contains(&key.as_str())
+                            || !valid_context_value(value)
+                    })
             })
         {
             return Err(QueryError::Unsupported);
@@ -259,6 +406,16 @@ impl QueryPlanner {
         let _ = resource;
         Ok(())
     }
+}
+
+fn valid_context_value(value: &Value) -> bool {
+    value.as_str().is_some_and(|value| value.len() <= 256)
+        || value.as_array().is_some_and(|values| {
+            values.len() <= 20
+                && values
+                    .iter()
+                    .all(|value| value.as_str().is_some_and(|value| value.len() <= 256))
+        })
 }
 
 pub struct FileExpressionAdapter {
@@ -296,7 +453,7 @@ impl QueryAdapter for FileExpressionAdapter {
             .map(|uri| self.storage.resolve(uri))
             .transpose()?;
         let mut scan_query = query.clone();
-        scan_query.options = serde_json::json!({"limit": 100000});
+        scan_query.options = serde_json::json!({"limit": MAX_QUERY_ROWS});
         let mut response =
             expression_response_from_file(resource, &scan_query, &path, index.as_deref())?;
         if query
@@ -428,7 +585,7 @@ fn truncate_response(response: &mut Value, query: &ResourceQuery) {
         .get("limit")
         .and_then(Value::as_u64)
         .unwrap_or(1_000)
-        .clamp(1, 100_000) as usize;
+        .clamp(1, MAX_QUERY_ROWS) as usize;
     if let Some(rows) = response.get_mut("data").and_then(Value::as_array_mut) {
         rows.truncate(limit);
         response["meta"]["n_rows"] = rows.len().into();
@@ -500,7 +657,7 @@ fn expression_response_from_reader<R: BufRead>(
         .get("limit")
         .and_then(Value::as_u64)
         .unwrap_or(1_000)
-        .clamp(1, 100_000) as usize;
+        .clamp(1, MAX_QUERY_ROWS) as usize;
     let data: Vec<_> = columns.iter().skip(1).zip(row.iter().skip(1)).take(limit).map(|(sample, value)| serde_json::json!({
         "observation_id": sample,
         "sample_id": sample,
@@ -568,12 +725,58 @@ fn attach_embedding(response: &mut Value, input: &str) -> Result<(), QueryError>
 #[cfg(test)]
 mod tests {
     use super::{
-        QueryPlanner, attach_embedding, expression_response, expression_response_from_file,
-        join_metadata,
+        MAX_QUERY_ROWS, QueryError, QueryPlanner, TiledbExecutor, attach_embedding,
+        execute_clickhouse_expression, execute_tiledb_expression, expression_response,
+        expression_response_from_file, join_metadata,
     };
     use chrono::Utc;
     use serde_json::json;
     use shennong_schema::{Resource, ResourceQuery};
+    use std::{fs, path::PathBuf, time::Duration};
+
+    fn tiledb_resource(uri: &str) -> Resource {
+        Resource {
+            id: "pbmc".into(),
+            kind: "Dataset".into(),
+            metadata: json!({}),
+            spec: json!({"backend":"tiledb","array_uri":uri,"operations":["expression"]}),
+            status: "available".into(),
+            provenance: json!({}),
+            permissions: json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn tiledb_query() -> ResourceQuery {
+        serde_json::from_value(json!({
+            "resource":"pbmc",
+            "operation":"expression",
+            "feature":{"type":"gene","name":"YTHDF2"}
+        }))
+        .unwrap()
+    }
+
+    fn tiledb_script() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "shennong-tiledb-test-{}-{}.sh",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::write(
+            &path,
+            r#"case "$3" in
+normal) printf '{"data":[],"meta":{}}' ;;
+sleep) sleep 1; touch "$0.completed"; printf '{"data":[],"meta":{}}' ;;
+exit) printf 'Traceback: /data/private\n' >&2; exit 3 ;;
+stdout) printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' ;;
+stderr) printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; exit 4 ;;
+esac
+"#,
+        )
+        .unwrap();
+        path
+    }
 
     #[test]
     fn rejects_context_filters_until_annotation_resources_exist() {
@@ -682,5 +885,115 @@ mod tests {
             expression_response_from_file(&resource, &query, &matrix, Some(&index)).unwrap();
         assert_eq!(response["data"][0]["value"], 2.0);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tilesdb_executor_bounds_process_failures_and_output() {
+        let script = tiledb_script();
+        let marker = PathBuf::from(format!("{}.completed", script.display()));
+        let executor = TiledbExecutor::new("/bin/sh", 1, Duration::from_millis(50), 32, 32);
+        let query = tiledb_query();
+        assert!(
+            execute_tiledb_expression(
+                &executor,
+                script.to_str().unwrap(),
+                &tiledb_resource("normal"),
+                &query
+            )
+            .await
+            .is_ok()
+        );
+        assert!(matches!(
+            execute_tiledb_expression(
+                &executor,
+                script.to_str().unwrap(),
+                &tiledb_resource("sleep"),
+                &query
+            )
+            .await,
+            Err(QueryError::BackendTimeout)
+        ));
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(!marker.exists());
+        for uri in ["exit", "stdout", "stderr"] {
+            let error = execute_tiledb_expression(
+                &executor,
+                script.to_str().unwrap(),
+                &tiledb_resource(uri),
+                &query,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                QueryError::BackendUnavailable | QueryError::BackendOutputTooLarge
+            ));
+        }
+        fs::remove_file(script).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tilesdb_executor_rejects_excess_concurrency() {
+        let script = tiledb_script();
+        let executor = TiledbExecutor::new("/bin/sh", 1, Duration::from_secs(2), 1024, 1024);
+        let first_executor = executor.clone();
+        let first_script = script.clone();
+        let first = tokio::spawn(async move {
+            execute_tiledb_expression(
+                &first_executor,
+                first_script.to_str().unwrap(),
+                &tiledb_resource("sleep"),
+                &tiledb_query(),
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(matches!(
+            execute_tiledb_expression(
+                &executor,
+                script.to_str().unwrap(),
+                &tiledb_resource("normal"),
+                &tiledb_query()
+            )
+            .await,
+            Err(QueryError::BackendBusy)
+        ));
+        assert!(first.await.unwrap().is_ok());
+        fs::remove_file(script).unwrap();
+    }
+
+    #[tokio::test]
+    async fn clickhouse_client_timeout_is_propagated() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(20))
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        assert!(matches!(
+            execute_clickhouse_expression(&client, &format!("http://{address}"), &tiledb_resource("normal"), &tiledb_query()).await,
+            Err(QueryError::Http(error)) if error.is_timeout()
+        ));
+    }
+
+    #[test]
+    fn rejects_unbounded_query_inputs() {
+        let mut resource = tiledb_resource("normal");
+        resource.spec = json!({"operations":["expression"]});
+        resource.metadata = json!({"supported_context":["sample_type"]});
+        let mut query = tiledb_query();
+        query.feature.as_mut().unwrap().name = "x".repeat(257);
+        assert!(QueryPlanner.validate(&resource, &query).is_err());
+        query.feature.as_mut().unwrap().name = "YTHDF2".into();
+        query.options = json!({"limit": MAX_QUERY_ROWS + 1});
+        assert!(QueryPlanner.validate(&resource, &query).is_err());
+        query.options = json!({});
+        query.context = json!({"sample_type":"x".repeat(257)});
+        assert!(QueryPlanner.validate(&resource, &query).is_err());
     }
 }
