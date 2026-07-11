@@ -2,15 +2,15 @@
 
 ## Production measurements
 
-Measured on 2026-07-11 against `http://192.168.3.10:18080` with a response
-limit of 100 rows. These are single-request latency measurements, not throughput
-or concurrency guarantees.
+Measured on 2026-07-11 against `http://192.168.3.10:18080` after installing the
+complete built-in Toil provider. These are warm single-request latency
+measurements, not throughput or concurrency guarantees.
 
 | Request | Backend path | Observed latency |
 |---|---|---:|
-| First Toil YTHDF2 request | indexed TSV, then ClickHouse fill for 19,131 samples | 512 ms |
-| Repeated Toil YTHDF2 request | ClickHouse | 5-6 ms steady state |
-| PBMC3K YTHDF2 request | TileDB sparse array | 123-168 ms, 133 ms median |
+| Toil YTHDF2, SKCM primary tumor, 102 rows | indexed TSV plus phenotype join | 379 ms |
+| Toil YTHDF2, SKCM survival, 470 rows | indexed TSV plus phenotype and survival joins | 370 ms |
+| PBMC3K YTHDF2, 360 non-zero cells | TileDB sparse array | 139 ms |
 
 The Toil query used `ENSG00000198492.14`. The PBMC3K query used the `YTHDF2`
 symbol and resolved to `ENSG00000198492.16`.
@@ -26,22 +26,22 @@ Run the same bounded checks with:
 | Analysis request | Current status | Reason |
 |---|---|---|
 | Retrieve YTHDF2 expression for raw Toil sample IDs | Ready | expression matrix and row index are installed |
-| Compare YTHDF2 tumor vs adjacent normal within selected cancers | Not ready | cancer-project and sample-type annotations are not installed |
-| Run survival analysis | Not ready | clinical follow-up, survival time, and event data are not installed |
+| Compare YTHDF2 tumor vs adjacent normal within selected cancers | Ready | Toil phenotype provides disease and sample type |
+| Join TCGA expression to OS, DSS, DFI, and PFI | Ready | Toil survival metadata is installed |
 | Retrieve YTHDF2 counts for individual PBMC3K cells | Ready | sparse expression matrix and barcodes are installed |
 | Summarize YTHDF2 by PBMC3K cell type | Not ready | cell-type annotations are not installed |
 
-The API rejects non-empty `context` filters while these annotations are absent.
-Returning an explicit error is safer than returning an unfiltered expression
-vector that an agent could misinterpret.
+The API accepts only context fields declared by the selected Resource. PBMC3K
+still has no cell-type labels, so it supports per-cell expression but does not
+pretend that a cell-type summary is available.
 
 ## What is needed for melanoma CAR-T target discovery
 
 A defensible workflow needs Resources for:
 
 1. melanoma single-cell expression with cell-type and malignant-cell labels;
-2. TCGA-SKCM sample, clinical, survival, and tumor/normal metadata;
-3. GTEx tissue annotations for normal-tissue safety screening;
+2. the installed Toil TCGA-SKCM expression, phenotype, and survival data;
+3. the installed Toil GTEx tissue expression for normal-tissue safety screening;
 4. OpenTargets evidence and target tractability;
 5. optional surface-protein or cell-surface annotation evidence.
 

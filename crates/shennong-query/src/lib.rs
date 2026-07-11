@@ -74,6 +74,27 @@ pub async fn execute_tiledb_expression(
     Ok(response)
 }
 
+pub async fn resolve_tiledb_gene(
+    script: &str,
+    resource: &Resource,
+    feature: &str,
+) -> Result<Value, QueryError> {
+    let uri = resource
+        .spec
+        .get("array_uri")
+        .and_then(Value::as_str)
+        .ok_or(QueryError::Unsupported)?;
+    let output = Command::new("/opt/tiledb/bin/python")
+        .args([script, "resolve", "--uri", uri, "--feature", feature])
+        .output()?;
+    if !output.status.success() {
+        return Err(QueryError::BackendUnavailable(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
 pub async fn execute_clickhouse_expression(
     endpoint: &str,
     resource: &Resource,
@@ -205,17 +226,33 @@ pub struct QueryPlanner;
 
 impl QueryPlanner {
     pub fn validate(&self, resource: &Resource, query: &ResourceQuery) -> Result<(), QueryError> {
-        let supported = ["expression", "embedding_expression"];
-        if !supported.contains(&query.operation.as_str())
+        let operations = resource
+            .spec
+            .get("operations")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            .unwrap_or_else(|| vec!["expression", "embedding_expression"]);
+        let context = if query.context.is_null() {
+            None
+        } else {
+            Some(query.context.as_object().ok_or(QueryError::Unsupported)?)
+        };
+        let supported_context = resource
+            .metadata
+            .get("supported_context")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if !operations.contains(&query.operation.as_str())
             || query
                 .feature
                 .as_ref()
                 .is_none_or(|feature| feature.feature_type != "gene")
-            || !(query.context.is_null()
-                || query
-                    .context
-                    .as_object()
-                    .is_some_and(serde_json::Map::is_empty))
+            || context.is_some_and(|values| {
+                values
+                    .keys()
+                    .any(|key| !supported_context.contains(&key.as_str()))
+            })
         {
             return Err(QueryError::Unsupported);
         }
@@ -247,6 +284,8 @@ impl QueryAdapter for FileExpressionAdapter {
             .find(|artifact| {
                 artifact.storage_backend == "local"
                     && matches!(artifact.format.as_str(), "csv" | "tsv" | "txt")
+                    && artifact.schema_json.get("role").and_then(Value::as_str)
+                        == Some("expression")
             })
             .ok_or(QueryError::NoArtifact)?;
         let path = self.storage.resolve(&artifact.uri)?;
@@ -256,7 +295,43 @@ impl QueryAdapter for FileExpressionAdapter {
             .and_then(Value::as_str)
             .map(|uri| self.storage.resolve(uri))
             .transpose()?;
-        let mut response = expression_response_from_file(resource, query, &path, index.as_deref())?;
+        let mut scan_query = query.clone();
+        scan_query.options = serde_json::json!({"limit": 100000});
+        let mut response =
+            expression_response_from_file(resource, &scan_query, &path, index.as_deref())?;
+        if query
+            .context
+            .as_object()
+            .is_some_and(|values| !values.is_empty())
+        {
+            let metadata = artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.schema_json.get("role").and_then(Value::as_str)
+                        == Some("sample_metadata")
+                })
+                .ok_or(QueryError::NoArtifact)?;
+            let input =
+                String::from_utf8_lossy(&self.storage.read(&metadata.uri).await?).into_owned();
+            join_metadata(
+                &mut response,
+                &input,
+                Some(&query.context),
+                metadata.schema_json.get("context_fields"),
+            )?;
+        }
+        if query.operation == "survival_expression" {
+            let survival = artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.schema_json.get("role").and_then(Value::as_str)
+                        == Some("survival_metadata")
+                })
+                .ok_or(QueryError::NoArtifact)?;
+            let input =
+                String::from_utf8_lossy(&self.storage.read(&survival.uri).await?).into_owned();
+            join_metadata(&mut response, &input, None, None)?;
+        }
         if query.operation == "embedding_expression" {
             let embedding = artifacts
                 .iter()
@@ -273,7 +348,90 @@ impl QueryAdapter for FileExpressionAdapter {
                 String::from_utf8_lossy(&self.storage.read(&embedding.uri).await?).into_owned();
             attach_embedding(&mut response, &input)?;
         }
+        truncate_response(&mut response, query);
         Ok(response)
+    }
+}
+
+fn join_metadata(
+    response: &mut Value,
+    input: &str,
+    context: Option<&Value>,
+    context_fields: Option<&Value>,
+) -> Result<(), QueryError> {
+    let mut lines = input.lines();
+    let columns: Vec<_> = lines
+        .next()
+        .ok_or(QueryError::MalformedArtifact)?
+        .split('\t')
+        .collect();
+    let mappings = context_fields
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let rows: std::collections::HashMap<_, _> = lines
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .filter_map(|values| {
+            let sample = values.first()?.to_string();
+            let metadata = columns
+                .iter()
+                .zip(values)
+                .map(|(column, value)| ((*column).to_string(), value.to_string()))
+                .collect::<std::collections::HashMap<_, _>>();
+            Some((sample, metadata))
+        })
+        .collect();
+    let data = response
+        .get_mut("data")
+        .and_then(Value::as_array_mut)
+        .ok_or(QueryError::MalformedArtifact)?;
+    data.retain_mut(|row| {
+        let Some(sample) = row.get("sample_id").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(metadata) = rows.get(sample) else {
+            return false;
+        };
+        let matches = context.and_then(Value::as_object).is_none_or(|filters| {
+            filters.iter().all(|(key, expected)| {
+                let field = mappings.get(key).and_then(Value::as_str).unwrap_or(key);
+                let Some(actual) = metadata.get(field) else {
+                    return false;
+                };
+                expected.as_str().is_some_and(|value| value == actual)
+                    || expected.as_array().is_some_and(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|value| value == actual)
+                    })
+            })
+        });
+        if matches && let Some(object) = row.as_object_mut() {
+            object.extend(
+                metadata
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "sample")
+                    .map(|(key, value)| (key.clone(), value.clone().into())),
+            );
+        }
+        matches
+    });
+    response["meta"]["n_rows"] = data.len().into();
+    response["meta"]["backend"] = "local+metadata".into();
+    Ok(())
+}
+
+fn truncate_response(response: &mut Value, query: &ResourceQuery) {
+    let limit = query
+        .options
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(1_000)
+        .clamp(1, 100_000) as usize;
+    if let Some(rows) = response.get_mut("data").and_then(Value::as_array_mut) {
+        rows.truncate(limit);
+        response["meta"]["n_rows"] = rows.len().into();
     }
 }
 
@@ -411,6 +569,7 @@ fn attach_embedding(response: &mut Value, input: &str) -> Result<(), QueryError>
 mod tests {
     use super::{
         QueryPlanner, attach_embedding, expression_response, expression_response_from_file,
+        join_metadata,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -431,6 +590,24 @@ mod tests {
         };
         let query: ResourceQuery = serde_json::from_value(json!({"resource":"toil","operation":"expression","feature":{"type":"gene","name":"YTHDF2"},"context":{"disease":"SKCM"}})).unwrap();
         assert!(QueryPlanner.validate(&resource, &query).is_err());
+    }
+
+    #[test]
+    fn filters_expression_with_declared_sample_metadata() {
+        let mut response = json!({"data":[
+            {"sample_id":"S1","value":1.0},
+            {"sample_id":"S2","value":2.0}
+        ],"meta":{}});
+        join_metadata(
+            &mut response,
+            "sample\t_sample_type\nS1\tPrimary Tumor\nS2\tSolid Tissue Normal\n",
+            Some(&json!({"sample_type":"Primary Tumor"})),
+            Some(&json!({"sample_type":"_sample_type"})),
+        )
+        .unwrap();
+        assert_eq!(response["meta"]["n_rows"], 1);
+        assert_eq!(response["data"][0]["sample_id"], "S1");
+        assert_eq!(response["data"][0]["_sample_type"], "Primary Tumor");
     }
 
     #[test]

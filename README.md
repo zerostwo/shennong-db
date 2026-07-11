@@ -33,6 +33,7 @@ The API is available on `http://HOST:8000`. Use `/health` for process health,
 - `POST /api/v1/users/{id}/tokens`
 - `GET /api/v1/audit-events`, `GET /api/v1/capabilities`, `GET /api/v1/providers`
 - `GET /.well-known/shennong-agent.json` for machine-readable agent discovery
+- `GET /api/v1/genes/resolve` for release-aware cross-Resource gene resolution
 - `POST /api/v1/resources/install`, `POST /api/v1/query`
 
 Administrator requests use `X-Shennong-Admin-Key` or an active administrator
@@ -49,9 +50,12 @@ readiness, missing annotation requirements, Artifacts, Relations, and a bounded
 query example. Catalog metadata is marked as untrusted descriptive data.
 
 PBMC 10x HDF5 inputs are materialized as sparse TileDB arrays on first startup.
-Toil expression queries use the local indexed source for the first lookup and
-are stored in ClickHouse for subsequent low-latency queries.
+Toil expression queries read only the indexed source row and can join installed
+phenotype and survival metadata. ClickHouse remains available for analytical
+caches and tabular workloads.
 
 See [docs/guide.md](docs/guide.md) for production installation and complete API
 usage. See [docs/performance.md](docs/performance.md) for measured query latency
-and the current analysis-readiness boundaries.
+and the current analysis-readiness boundaries. See
+[docs/gene-identifiers.md](docs/gene-identifiers.md) for GENCODE-aware
+cross-dataset gene coordination.

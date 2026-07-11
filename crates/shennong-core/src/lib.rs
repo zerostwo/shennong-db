@@ -1,13 +1,17 @@
 use sha2::{Digest, Sha256};
 use shennong_schema::{
-    Artifact, ArtifactUpsert, AuditEvent, ProviderManifest, Relation, RelationUpsert, Resource,
-    ResourceUpsert, User, UserUpsert,
+    Artifact, ArtifactUpsert, AuditEvent, ProviderFile, ProviderManifest, Relation, RelationUpsert,
+    Resource, ResourceUpsert, User, UserUpsert,
 };
-use shennong_storage::{LocalObjectStorage, ObjectStorage, StorageError};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, BufReader, Read},
+    path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
+};
 use thiserror::Error;
-use tokio::fs;
+use tokio::{fs, io::AsyncWriteExt};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -20,21 +24,27 @@ pub enum ProviderError {
     UnsupportedSource,
     #[error("provider download exceeds its configured size limit")]
     TooLarge,
+    #[error("provider file size verification failed")]
+    Size,
     #[error("provider checksum verification failed")]
     Checksum,
+    #[error("provider file definition is invalid")]
+    InvalidFile,
+    #[error("provider file processing failed: {0}")]
+    Process(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Http(#[from] reqwest::Error),
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Http(#[from] reqwest::Error),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
 
 pub struct ProviderInstaller {
     provider_dir: PathBuf,
-    storage: LocalObjectStorage,
+    data_root: PathBuf,
     max_download_bytes: usize,
 }
 
@@ -46,7 +56,7 @@ impl ProviderInstaller {
     ) -> Self {
         Self {
             provider_dir: provider_dir.into(),
-            storage: LocalObjectStorage::new(data_root),
+            data_root: data_root.into(),
             max_download_bytes,
         }
     }
@@ -64,35 +74,13 @@ impl ProviderInstaller {
             return Err(ProviderError::NotFound);
         }
         let manifest = self.load(name).await?;
-        let bytes = self.download(&manifest).await?;
-        if let Some(expected) = &manifest.checksum {
-            let actual = format!("{:x}", Sha256::digest(&bytes));
-            if actual
-                != expected
-                    .strip_prefix("sha256:")
-                    .unwrap_or(expected)
-                    .to_lowercase()
-            {
-                return Err(ProviderError::Checksum);
-            }
+        if manifest.files.is_empty() {
+            return Err(ProviderError::InvalidFile);
         }
-        let filename = manifest
-            .download
-            .rsplit('/')
-            .next()
-            .and_then(|value| value.split('?').next())
-            .filter(|value| !value.is_empty())
-            .unwrap_or("resource.data");
-        let uri = self
-            .storage
-            .write(
-                &format!(
-                    "resources/{}/{}/{}",
-                    manifest.name, manifest.version, filename
-                ),
-                &bytes,
-            )
-            .await?;
+        let mut files = Vec::with_capacity(manifest.files.len());
+        for file in &manifest.files {
+            files.push((file, self.prepare_file(&manifest, file).await?));
+        }
         let mut metadata = serde_json::Map::new();
         metadata.insert("name".into(), manifest.name.clone().into());
         metadata.insert("source".into(), manifest.source.clone());
@@ -115,22 +103,45 @@ impl ProviderInstaller {
             .get("permissions")
             .cloned()
             .unwrap_or_else(shennong_schema::default_permissions);
-        let resource = repository.upsert_resource(&ResourceUpsert {
-            id: manifest.name.clone(), kind, metadata: metadata.into(),
-            spec: serde_json::json!({"version": manifest.version, "storage": manifest.storage}),
-            status: "available".into(), provenance: serde_json::json!({"source": manifest.source, "version": manifest.version}), permissions,
-        }).await?;
-        let format = Path::new(filename)
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or("binary")
-            .to_string();
-        repository.upsert_artifact(&ArtifactUpsert {
-            id: format!("provider-{}-{}-data", manifest.name, manifest.version), resource_id: resource.id.clone(), uri,
-            format, size: Some(bytes.len() as i64), checksum: manifest.checksum,
-            storage_backend: manifest.storage.get("backend").and_then(serde_json::Value::as_str).unwrap_or("local").to_string(),
-            schema_json: manifest.resource_schema, provenance: serde_json::json!({"source": manifest.source, "version": manifest.version}),
-        }).await?;
+        let mut spec = manifest
+            .resource_spec
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        spec.insert("version".into(), manifest.version.clone().into());
+        let resource = repository
+            .upsert_resource(&ResourceUpsert {
+                id: manifest.name.clone(),
+                kind,
+                metadata: metadata.into(),
+                spec: spec.into(),
+                status: "available".into(),
+                provenance: serde_json::json!({"source": manifest.source, "version": manifest.version}),
+                permissions,
+            })
+            .await?;
+        for (file, path) in files {
+            let mut schema = file.schema.as_object().cloned().unwrap_or_default();
+            if file.index.as_deref() == Some("gene_matrix") {
+                schema.insert(
+                    "index_uri".into(),
+                    format!("{}.idx.json", path.display()).into(),
+                );
+            }
+            repository
+                .upsert_artifact(&ArtifactUpsert {
+                    id: file.id.clone(),
+                    resource_id: resource.id.clone(),
+                    uri: path.display().to_string(),
+                    format: file.format.clone(),
+                    size: Some(file.size as i64),
+                    checksum: file.checksum.clone(),
+                    storage_backend: "local".into(),
+                    schema_json: schema.into(),
+                    provenance: serde_json::json!({"source": manifest.source, "version": manifest.version, "download": file.download}),
+                })
+                .await?;
+        }
         Ok(resource)
     }
 
@@ -164,27 +175,201 @@ impl ProviderInstaller {
         Err(ProviderError::NotFound)
     }
 
-    async fn download(&self, manifest: &ProviderManifest) -> Result<Vec<u8>, ProviderError> {
-        if manifest.download.starts_with("http://") || manifest.download.starts_with("https://") {
-            let response = reqwest::get(&manifest.download).await?.error_for_status()?;
-            if response
-                .content_length()
-                .is_some_and(|size| size > self.max_download_bytes as u64)
-            {
-                return Err(ProviderError::TooLarge);
-            }
-            let data = response.bytes().await?.to_vec();
-            if data.len() > self.max_download_bytes {
-                return Err(ProviderError::TooLarge);
-            }
-            return Ok(data);
+    async fn prepare_file(
+        &self,
+        manifest: &ProviderManifest,
+        file: &ProviderFile,
+    ) -> Result<PathBuf, ProviderError> {
+        if file.id.is_empty()
+            || file.download_size > self.max_download_bytes as u64
+            || Path::new(&file.filename)
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(ProviderError::InvalidFile);
         }
-        let data = fs::read(&manifest.download).await?;
-        if data.len() > self.max_download_bytes {
-            return Err(ProviderError::TooLarge);
+        let directory = self
+            .data_root
+            .join("resources")
+            .join(&manifest.name)
+            .join(&manifest.version);
+        fs::create_dir_all(&directory).await?;
+        let destination = directory.join(&file.filename);
+        if fs::metadata(&destination)
+            .await
+            .is_ok_and(|metadata| metadata.len() == file.size)
+        {
+            self.ensure_index(file, &destination).await?;
+            return Ok(destination);
         }
-        Ok(data)
+        let source = if file.compression.as_deref() == Some("gzip") {
+            PathBuf::from(format!("{}.gz", destination.display()))
+        } else {
+            destination.clone()
+        };
+        self.download_to(&file.download, &source, file.download_size)
+            .await?;
+        if let Some(expected) = &file.checksum
+            && hash_file(&source)?
+                != expected
+                    .strip_prefix("sha256:")
+                    .unwrap_or(expected)
+                    .to_lowercase()
+        {
+            return Err(ProviderError::Checksum);
+        }
+        if file.compression.as_deref() == Some("gzip") {
+            decompress_gzip(source.clone(), destination.clone()).await?;
+            fs::remove_file(source).await?;
+        } else if file.compression.is_some() {
+            return Err(ProviderError::UnsupportedSource);
+        }
+        if fs::metadata(&destination).await?.len() != file.size {
+            return Err(ProviderError::Size);
+        }
+        self.ensure_index(file, &destination).await?;
+        Ok(destination)
     }
+
+    async fn download_to(
+        &self,
+        url: &str,
+        destination: &Path,
+        expected_size: u64,
+    ) -> Result<(), ProviderError> {
+        if !url.starts_with("https://") {
+            return Err(ProviderError::UnsupportedSource);
+        }
+        if fs::metadata(destination)
+            .await
+            .is_ok_and(|metadata| metadata.len() == expected_size)
+        {
+            return Ok(());
+        }
+        let partial = PathBuf::from(format!("{}.part", destination.display()));
+        let mut offset = fs::metadata(&partial)
+            .await
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if offset > expected_size {
+            fs::remove_file(&partial).await?;
+            offset = 0;
+        }
+        let mut client = reqwest::Client::builder();
+        if let Ok(proxy) = std::env::var("SHENNONG_DOWNLOAD_PROXY")
+            && !proxy.is_empty()
+        {
+            client = client.proxy(reqwest::Proxy::all(proxy)?);
+        }
+        let client = client.build()?;
+        let mut request = client.get(url);
+        if offset > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        }
+        let mut response = request.send().await?.error_for_status()?;
+        let append = offset > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        if !append {
+            offset = 0;
+        }
+        let mut output = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(append)
+            .truncate(!append)
+            .open(&partial)
+            .await?;
+        let mut total = offset;
+        while let Some(chunk) = response.chunk().await? {
+            total += chunk.len() as u64;
+            if total > expected_size || total > self.max_download_bytes as u64 {
+                return Err(ProviderError::TooLarge);
+            }
+            output.write_all(&chunk).await?;
+        }
+        output.flush().await?;
+        if total != expected_size {
+            return Err(ProviderError::Size);
+        }
+        fs::rename(partial, destination).await?;
+        Ok(())
+    }
+
+    async fn ensure_index(
+        &self,
+        file: &ProviderFile,
+        destination: &Path,
+    ) -> Result<(), ProviderError> {
+        if file.index.as_deref() != Some("gene_matrix") {
+            return Ok(());
+        }
+        let index = PathBuf::from(format!("{}.idx.json", destination.display()));
+        if index.is_file() {
+            return Ok(());
+        }
+        let source = destination.to_path_buf();
+        tokio::task::spawn_blocking(move || build_gene_index(&source, &index))
+            .await
+            .map_err(|error| ProviderError::Process(error.to_string()))??;
+        Ok(())
+    }
+}
+
+fn hash_file(path: &Path) -> Result<String, ProviderError> {
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+async fn decompress_gzip(source: PathBuf, destination: PathBuf) -> Result<(), ProviderError> {
+    tokio::task::spawn_blocking(move || {
+        let partial = PathBuf::from(format!("{}.part", destination.display()));
+        let output = std::fs::File::create(&partial)?;
+        let status = Command::new("gzip")
+            .args(["-dc"])
+            .arg(&source)
+            .stdout(Stdio::from(output))
+            .status()?;
+        if !status.success() {
+            return Err(ProviderError::Process("gzip returned an error".into()));
+        }
+        std::fs::rename(partial, destination)?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| ProviderError::Process(error.to_string()))?
+}
+
+fn build_gene_index(source: &Path, destination: &Path) -> Result<(), ProviderError> {
+    let mut reader = BufReader::new(std::fs::File::open(source)?);
+    let mut line = String::new();
+    let mut offset = reader.read_line(&mut line)? as u64;
+    let mut offsets = BTreeMap::new();
+    loop {
+        line.clear();
+        let count = reader.read_line(&mut line)?;
+        if count == 0 {
+            break;
+        }
+        if let Some(feature) = line.split('\t').next() {
+            offsets.insert(feature.to_string(), offset);
+        }
+        offset += count as u64;
+    }
+    let partial = PathBuf::from(format!("{}.part", destination.display()));
+    serde_json::to_writer(
+        std::fs::File::create(&partial)?,
+        &serde_json::json!({"offsets": offsets}),
+    )?;
+    std::fs::rename(partial, destination)?;
+    Ok(())
 }
 
 pub struct ResourceRepository {
@@ -340,7 +525,7 @@ impl ResourceRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::ProviderInstaller;
+    use super::{ProviderInstaller, build_gene_index};
     use std::env::temp_dir;
     use tokio::fs;
     use uuid::Uuid;
@@ -351,7 +536,7 @@ mod tests {
         fs::create_dir_all(&directory).await.unwrap();
         fs::write(
             directory.join("toil.yaml"),
-            "name: toil\nversion: 1\nsource: Xena\ndownload: /tmp/toil.tsv\nresource_schema: {}\nstorage: {}\n",
+            "name: toil\nversion: 1\nsource: Xena\nfiles:\n  - id: expression\n    download: https://example.org/toil.tsv\n    filename: toil.tsv\n    format: tsv\n    download_size: 1\n    size: 1\n    checksum: null\n    compression: null\n    index: null\nresource_schema: {}\nresource_spec: {}\nstorage: {}\n",
         )
         .await
         .unwrap();
@@ -362,5 +547,20 @@ mod tests {
         fs::remove_dir_all(&directory).await.unwrap();
         assert_eq!(providers[0].name, "toil");
         assert_eq!(providers[0].version, "1");
+    }
+
+    #[test]
+    fn builds_gene_matrix_byte_offsets() {
+        let directory = temp_dir().join(format!("shennong-index-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let matrix = directory.join("matrix.tsv");
+        let index = directory.join("matrix.tsv.idx.json");
+        std::fs::write(&matrix, "sample\tS1\nENSG1.1\t1\nENSG2.4\t2\n").unwrap();
+        build_gene_index(&matrix, &index).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
+        assert_eq!(value["offsets"]["ENSG1.1"], 10);
+        assert_eq!(value["offsets"]["ENSG2.4"], 20);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

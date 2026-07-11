@@ -1726,7 +1726,6 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "shennong-schema",
- "shennong-storage",
  "sqlx",
  "thiserror",
  "tokio",
