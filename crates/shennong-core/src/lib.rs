@@ -377,6 +377,17 @@ impl ProviderInstaller {
             fs::create_dir_all(parent).await?;
         }
         fs::rename(staging, final_directory).await?;
+        match self
+            .run_materializer(&manifest.storage, &resource, &final_directory, &artifacts)
+            .await
+        {
+            Ok(Some(derived)) => artifacts.push(derived),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = fs::remove_dir_all(&final_directory).await;
+                return Err(error);
+            }
+        }
         let result = repository
             .publish_ingestion(&job.id, &resource, &artifacts)
             .await
@@ -469,6 +480,107 @@ impl ProviderInstaller {
             fetched_at,
             index_path,
         })
+    }
+
+    async fn run_materializer(
+        &self,
+        storage: &serde_json::Value,
+        resource: &ResourceUpsert,
+        final_directory: &Path,
+        artifacts: &[ArtifactUpsert],
+    ) -> Result<Option<ArtifactUpsert>, ProviderError> {
+        let Some(materializer) = storage.get("materializer").and_then(serde_json::Value::as_object)
+        else {
+            return Ok(None);
+        };
+        let command = materializer
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ProviderError::InvalidFile)?;
+        let source_file = materializer
+            .get("source_file")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ProviderError::InvalidFile)?;
+        let target = materializer
+            .get("target")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ProviderError::InvalidFile)?;
+        let source = final_directory.join(source_file);
+        let target = final_directory.join(target);
+        if Path::new(source_file).components().any(|part| !matches!(part, Component::Normal(_)))
+            || Path::new(target.strip_prefix(final_directory).unwrap_or(&target))
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(ProviderError::InvalidFile);
+        }
+        let python = materializer
+            .get("python")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("python3");
+        let output = timeout(
+            self.download_timeout,
+            Command::new(python)
+                .arg(command)
+                .args(["ingest", "--source"])
+                .arg(&source)
+                .args(["--uri"])
+                .arg(&target)
+                .output(),
+        )
+        .await
+        .map_err(|_| ProviderError::Timeout)??;
+        if !output.status.success() {
+            return Err(ProviderError::Process("materializer failed".into()));
+        }
+        if !fs::try_exists(&target).await? {
+            return Err(ProviderError::MissingArtifact);
+        }
+        let source_artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.uri.ends_with(source_file))
+            .ok_or(ProviderError::MissingArtifact)?;
+        let id = materializer
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("materialized");
+        Ok(Some(ArtifactUpsert {
+            id: format!("{}-{id}", resource.id),
+            resource_id: resource.id.clone(),
+            uri: target.display().to_string(),
+            format: materializer
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tiledb")
+                .into(),
+            size: None,
+            checksum: None,
+            storage_backend: materializer
+                .get("storage_backend")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tiledb")
+                .into(),
+            data_class: "derived".into(),
+            immutable: true,
+            content_sha256: None,
+            source_uri: Some(source_artifact.uri.clone()),
+            derived_from: serde_json::json!([source_artifact.id]),
+            pipeline_version: materializer
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            retention_policy: Some("rebuildable".into()),
+            storage_uri: Some(target.display().to_string()),
+            schema_json: materializer
+                .get("schema")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({"role":"materialized"})),
+            provenance: serde_json::json!({
+                "materializer": command,
+                "version": materializer.get("version"),
+                "derived_from": source_artifact.id,
+            }),
+        }))
     }
 
     fn validate_file(&self, file: &ProviderFile) -> Result<(), ProviderError> {
