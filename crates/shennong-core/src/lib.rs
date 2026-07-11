@@ -310,8 +310,10 @@ impl ProviderInstaller {
                 }),
             });
             if let Some(index_path) = prepared.index_path {
-                let index_path =
-                    final_directory.join(index_path.strip_prefix(staging).unwrap_or(&index_path));
+                let relative = index_path.strip_prefix(staging).unwrap_or(&index_path);
+                let staged_index = staging.join(relative);
+                let index_path = final_directory.join(relative);
+                let index_checksum = hash_file(&staged_index)?;
                 artifacts.push(ArtifactUpsert {
                     id: format!("{}-index", file.id),
                     resource_id: resource.id.clone(),
@@ -320,18 +322,18 @@ impl ProviderInstaller {
                     size: Some(
                         self.storage
                             .head(
-                                &ArtifactUri::parse(&index_path.to_string_lossy())
+                                &ArtifactUri::parse(&staged_index.to_string_lossy())
                                     .map_err(|_| ProviderError::MissingArtifact)?,
                             )
                             .await
                             .map_err(|_| ProviderError::MissingArtifact)?
                             .size as i64,
                     ),
-                    checksum: Some(hash_file(&index_path)?),
+                    checksum: Some(index_checksum.clone()),
                     storage_backend: "local".into(),
                     data_class: "derived".into(),
                     immutable: true,
-                    content_sha256: Some(hash_file(&index_path)?),
+                    content_sha256: Some(index_checksum),
                     source_uri: Some(path.display().to_string()),
                     derived_from: serde_json::json!([file.id]),
                     pipeline_version: Some("gene-index-v1".into()),
@@ -835,10 +837,6 @@ fn build_gene_index_with_checksum(
     Ok(())
 }
 
-fn build_gene_index(source: &Path, destination: &Path) -> Result<(), ProviderError> {
-    build_gene_index_with_checksum(source, destination, "")
-}
-
 async fn upsert_resource_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     value: &ResourceUpsert,
@@ -1255,7 +1253,7 @@ impl ResourceRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderError, ProviderInstaller, build_gene_index, decompress_gzip, ensure_disk_space,
+        ProviderError, ProviderInstaller, build_gene_index_with_checksum, decompress_gzip, ensure_disk_space,
         validate_checksum, verify_checksum,
     };
     use sha2::{Digest, Sha256};
@@ -1289,11 +1287,14 @@ mod tests {
         let matrix = directory.join("matrix.tsv");
         let index = directory.join("matrix.tsv.idx.json");
         std::fs::write(&matrix, "sample\tS1\nENSG1.1\t1\nENSG2.4\t2\n").unwrap();
-        build_gene_index(&matrix, &index).unwrap();
+        build_gene_index_with_checksum(&matrix, &index, "abc").unwrap();
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&index).unwrap()).unwrap();
-        assert_eq!(value["offsets"]["ENSG1.1"], 10);
-        assert_eq!(value["offsets"]["ENSG2.4"], 20);
+        assert_eq!(value["schema_version"], 2);
+        assert_eq!(value["matrix_sha256"], "abc");
+        assert_eq!(value["features"]["ENSG1.1"]["offset"], 10);
+        assert_eq!(value["features"]["ENSG1.1"]["length"], 10);
+        assert_eq!(value["features"]["ENSG2.4"]["offset"], 20);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
