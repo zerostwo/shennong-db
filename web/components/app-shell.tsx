@@ -5,25 +5,22 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { getSession, signOut } from "@/lib/api/adapter";
 import {
-  Activity, Archive, ArrowLeft, BarChart3, Beaker, BookOpen, Boxes, ChevronDown, ChevronLeft,
-  ChevronRight, CircleHelp, ClipboardList, Cloud, Database, FileText, FolderKanban, Gauge, GitBranch,
-  KeyRound, LayoutDashboard, ListFilter, LogOut, Menu, MoreHorizontal, PackageOpen, PanelLeft, Plus, Search,
-  Settings, ShieldCheck, SlidersHorizontal, Tags, Users, X
+  Activity, ArrowLeft, Beaker, BookOpen, Boxes, ChevronDown, ChevronLeft,
+  ChevronRight, CircleHelp, ClipboardList, Cloud, Gauge, KeyRound, LayoutDashboard, ListFilter,
+  LogOut, Menu, MoreHorizontal, PanelLeft, Plus, Search, ShieldCheck, Users, X
 } from "lucide-react";
 
 type ShellProps = { active: string; variant?: "public" | "admin"; children: React.ReactNode };
 
 const publicGroups = [
-  { label: "CATALOG", items: [["Catalog", "/catalog", Boxes], ["Collections", "/catalog/collections", FolderKanban], ["Tags", "/catalog/tags", Tags], ["Schemas", "/catalog/schemas", FileText], ["Relations", "/catalog/relations", GitBranch]] },
-  { label: "DATA OPS", items: [["Ingest", "/console/uploads/new", PackageOpen], ["Jobs", "/console/jobs", ClipboardList], ["Storage", "/admin/storage", Database], ["Monitoring", "/admin/monitoring", Gauge]] },
-  { label: "GOVERNANCE", items: [["Access", "/admin/grants", ShieldCheck], ["Audit Logs", "/admin/audit", ClipboardList], ["Policies", "/admin/settings", SlidersHorizontal], ["Tokens", "/console/api-access", KeyRound]] },
+  { label: "CATALOG", items: [["Catalog", "/catalog", Boxes]] },
+  { label: "ACCOUNT", items: [["API Tokens", "/console/api-access", KeyRound]] },
   { label: "SUPPORT", items: [["Docs", "/docs", BookOpen], ["Support", "/support", CircleHelp]] }
 ] as const;
 
 const adminItems = [
-  ["Dashboard", "/admin/dashboard", LayoutDashboard], ["Resources", "/catalog", Boxes], ["Data Management", "/admin/storage", Database],
-  ["Query & Workloads", "/admin/monitoring", BarChart3], ["Users & Access", "/admin/users", Users], ["Audit Logs", "/admin/audit", ClipboardList],
-  ["System Settings", "/admin/settings", Settings], ["Backups", "/admin/backups", Archive], ["Alerts", "/admin/monitoring", Activity], ["Integrations", "/admin/providers", Cloud]
+  ["Dashboard", "/admin/dashboard", LayoutDashboard], ["Resources", "/catalog", Boxes], ["Monitoring", "/admin/monitoring", Gauge],
+  ["Users", "/admin/users", Users], ["Audit Logs", "/admin/audit", ClipboardList], ["Providers", "/admin/providers", Cloud]
 ] as const;
 
 export function AppShell({ variant = "public", children }: ShellProps) {
