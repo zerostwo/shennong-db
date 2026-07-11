@@ -24,7 +24,7 @@ LABEL org.opencontainers.image.source="https://github.com/zerostwo/shennong-db" 
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes gzip python3 python3-venv wget \
     && python3 -m venv /opt/tiledb \
-    && /opt/tiledb/bin/pip install --no-cache-dir --retries 10 --timeout 120 setuptools==80.9.0 h5py==3.16.0 numpy==2.3.5 tiledb==0.36.1 \
+    && /opt/tiledb/bin/pip install --no-cache-dir --retries 10 --timeout 120 setuptools==83.0.0 h5py==3.16.0 numpy==2.3.5 tiledb==0.36.1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin shennong
