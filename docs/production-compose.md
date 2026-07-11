@@ -11,6 +11,7 @@ Create secret files before starting:
 mkdir -m 700 secrets
 openssl rand -hex 32 > secrets/admin_api_key
 openssl rand -hex 32 > secrets/jwt_secret
+touch secrets/jwt_secret_previous
 openssl rand -hex 32 > secrets/postgres_password
 openssl rand -hex 32 > secrets/clickhouse_password
 printf 'postgres://shennong:%s@postgres:5432/shennong\n' "$(cat secrets/postgres_password)" > secrets/database_url

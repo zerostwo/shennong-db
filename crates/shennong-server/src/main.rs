@@ -58,6 +58,7 @@ struct AppState {
     storage: Arc<dyn BlobStore>,
     admin_key: Option<String>,
     jwt_secret: Option<String>,
+    jwt_previous: Option<String>,
     clickhouse_url: String,
     clickhouse_client: reqwest::Client,
     tiledb_script: String,
@@ -484,6 +485,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage,
         admin_key,
         jwt_secret,
+        jwt_previous: env_secret("SHENNONG_JWT_SECRET_PREVIOUS"),
         clickhouse_url: env_secret("SHENNONG_CLICKHOUSE_URL")
             .unwrap_or_else(|| "http://127.0.0.1:8123".into()),
         clickhouse_client: reqwest::Client::builder()
@@ -1618,10 +1620,11 @@ async fn resolve_local_gene(
 }
 
 fn principal(headers: &HeaderMap, state: &AppState) -> Principal {
-    Principal::from_headers(
+    Principal::from_headers_with_previous(
         headers,
         state.admin_key.as_deref(),
         state.jwt_secret.as_deref(),
+        state.jwt_previous.as_deref(),
     )
 }
 async fn admin(headers: &HeaderMap, state: &AppState) -> Result<Principal, ApiError> {

@@ -176,6 +176,15 @@ impl Principal {
         admin_key: Option<&str>,
         jwt_secret: Option<&str>,
     ) -> Self {
+        Self::from_headers_with_previous(headers, admin_key, jwt_secret, None)
+    }
+
+    pub fn from_headers_with_previous(
+        headers: &HeaderMap,
+        admin_key: Option<&str>,
+        jwt_secret: Option<&str>,
+        previous_secret: Option<&str>,
+    ) -> Self {
         let is_admin = admin_key.is_some_and(|expected| {
             headers
                 .get("x-shennong-admin-key")
@@ -204,23 +213,25 @@ impl Principal {
                             .find_map(|cookie| cookie.strip_prefix("shennong_session="))
                     })
             });
-        if let (Some(token), Some(secret)) = (token, jwt_secret) {
+        if let Some(token) = token {
             let mut validation = Validation::new(Algorithm::HS256);
             validation.validate_exp = true;
             validation.leeway = 30;
             validation.set_issuer(&[TOKEN_ISSUER]);
             validation.set_audience(&[TOKEN_AUDIENCE]);
-            if let Ok(data) = decode::<Claims>(
-                token,
-                &DecodingKey::from_secret(secret.as_bytes()),
-                &validation,
-            ) {
-                return Self {
-                    role: data.claims.role,
-                    user_id: Some(data.claims.sub),
-                    scopes: data.claims.scopes,
-                    token_hash: Some(token_fingerprint(token)),
-                };
+            for secret in [jwt_secret, previous_secret].into_iter().flatten() {
+                if let Ok(data) = decode::<Claims>(
+                    token,
+                    &DecodingKey::from_secret(secret.as_bytes()),
+                    &validation,
+                ) {
+                    return Self {
+                        role: data.claims.role,
+                        user_id: Some(data.claims.sub),
+                        scopes: data.claims.scopes,
+                        token_hash: Some(token_fingerprint(token)),
+                    };
+                }
             }
         }
         Self {
@@ -246,7 +257,10 @@ pub fn token_fingerprint(token: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Principal, Role, hash_password, issue_token, verify_password};
+    use super::{
+        Claims, Principal, Role, TOKEN_AUDIENCE, TOKEN_ISSUER, hash_password, issue_token,
+        verify_password,
+    };
     use http::HeaderMap;
 
     #[test]
@@ -283,5 +297,32 @@ mod tests {
         let encoded = hash_password("a-long-password");
         assert!(verify_password("a-long-password", &encoded));
         assert!(!verify_password("wrong-password", &encoded));
+    }
+
+    #[test]
+    fn issuer_audience_and_expiration_are_required() {
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &Claims {
+                sub: "user".into(),
+                role: Role::User,
+                _exp: 1,
+                scopes: vec!["resource.read".into()],
+                iat: 1,
+                jti: "jti".into(),
+                iss: TOKEN_ISSUER.into(),
+                aud: "wrong-audience".into(),
+                nbf: None,
+            },
+            &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        assert_eq!(
+            Principal::from_headers(&headers, None, Some("secret")).role,
+            Role::Guest
+        );
+        assert_eq!(TOKEN_AUDIENCE, "shennong-api");
     }
 }

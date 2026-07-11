@@ -26,6 +26,7 @@ services:
       SHENNONG_DATABASE_URL_FILE: /run/secrets/database_url
       SHENNONG_ADMIN_API_KEY_FILE: /run/secrets/admin_api_key
       SHENNONG_JWT_SECRET_FILE: /run/secrets/jwt_secret
+      SHENNONG_JWT_SECRET_PREVIOUS_FILE: /run/secrets/jwt_secret_previous
       SHENNONG_LOCAL_DATA_ROOT: /data
       SHENNONG_STORAGE_BACKEND: s3
       SHENNONG_S3_BUCKET: ${SHENNONG_S3_BUCKET:-shennong}
@@ -45,6 +46,7 @@ services:
       - database_url
       - admin_api_key
       - jwt_secret
+      - jwt_secret_previous
       - clickhouse_url
     volumes:
       - ${SHENNONG_DATA_PATH:-./data}:/data
@@ -169,6 +171,8 @@ secrets:
     file: ${SHENNONG_SECRET_DIR:-./secrets}/admin_api_key
   jwt_secret:
     file: ${SHENNONG_SECRET_DIR:-./secrets}/jwt_secret
+  jwt_secret_previous:
+    file: ${SHENNONG_SECRET_DIR:-./secrets}/jwt_secret_previous
   postgres_password:
     file: ${SHENNONG_SECRET_DIR:-./secrets}/postgres_password
   clickhouse_password:
