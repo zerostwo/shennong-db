@@ -1,0 +1,14 @@
+[package]
+name = "shennong-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+shennong-schema = { path = "../shennong-schema" }
+shennong-storage = { path = "../shennong-storage" }

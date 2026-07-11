@@ -1,51 +1,34 @@
 # Changelog
 
-This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
+This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - 2026-07-11
 
 ### Added
-- Added SQLite-backed users, API tokens, administrator/user/guest roles, dataset grants, and audit events.
-- Added public/private dataset visibility enforcement across catalog, manifests, downloads, and queries.
-- Added versioned asset manifests for matrices, metadata, embeddings, references, indexes, annotations, databases, and tables.
-- Added upload format detection and automatic Xena gzip decompression with row-offset indexing.
+
+- Rust Resource, Artifact, Relation, access-grant, audit, provider, and query APIs.
+- PostgreSQL metadata, local artifact storage, and Docker Hub publishing.
+- Embedded TileDB sparse arrays and gene-expression queries for PBMC datasets.
+- An internal ClickHouse cache for bulk Toil expression queries.
+- Machine-readable agent discovery with dataset dimensions, fields, identifiers,
+  operations, artifacts, and query examples.
+- Administrator-managed users, roles, status, JWT issuance, and immediate access
+  revocation for disabled users.
+- Two-level agent discovery with a small Resource catalog and per-Resource
+  analysis-readiness details.
+- Standard Docker installation, API usage, and measured performance guides.
 
 ### Changed
-- Reduced Docker Compose to one container with only a persistent data path and published port.
-- Defined ShennongDB as a bioinformatics storage/read service with a format-neutral asset-role convention.
-- Replaced the PostgreSQL metadata registry with persistent embedded SQLite for single-container deployment.
+
+- Production deployment now uses one Docker image and one Compose service for
+  the API, PostgreSQL, ClickHouse, and TileDB.
+- Context filters now fail explicitly when required cohort, clinical, or
+  cell-type annotations are unavailable.
 
 ### Removed
-- Removed legacy typed query routes and old compatibility contracts.
-- Removed agent, compute, generic job/artifact, organization, project, and membership APIs and code.
-- Removed obsolete WebUI/agent specifications; WebUI redesign is intentionally deferred.
 
-## [0.1.0] - 2026-07-09
+- Removed the early Python/SQLite runtime, migration tooling, compatibility APIs,
+  duplicate deployment files, and obsolete documentation.
 
-### Added
-- Implemented core FastAPI service entrypoint and API lifecycle routes.
-- Added dataset registry and dataset/version management endpoints.
-- Added ingestion validation and dataset registration flows, including upload validation.
-- Added semantic query API:
-  - `POST /query`
-  - `POST /compute`
-  - async job/ artifact endpoints (`/jobs`, `/artifacts`)
-- Added catalog metadata APIs for dataset schema, capabilities, fields, and field values.
-- Added legacy compatibility query routes (`/expression/query`, `/survival/query`, `/singlecell/query`, `/spatial/query`, `/eqtl/query`) and `/datasets`.
-- Added AI-agent tools route set (`/agent`, `/tools`).
-- Added cursor-based bounded pagination for query responses.
-- Added Redis-backed cache path for expression-style queries.
-- Added admin APIs for bootstrap, access management, and audit logs.
-- Added R client package scaffold under `clients/r/ShennongData`.
-- Added initial pytest API suite in `tests/test_api.py`.
-- Added deployment and service bootstrap assets (`Dockerfile`, `docker-compose.yml`, docs).
-
-### Changed
-- Normalized API surface to the SPEC-v2 semantic structure while keeping legacy compatibility.
-- Upgraded response shape conventions to include `status` and `meta` envelopes for query-like flows.
-
-### Fixed
-- Baseline stabilization of dataset/route wiring, registry validation checks, and bounded response behavior.
-
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.1.0

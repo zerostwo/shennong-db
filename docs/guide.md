@@ -1,0 +1,189 @@
+# ShennongDB Docker and API Guide
+
+## 1. Production installation
+
+Requirements:
+
+- Linux with Docker Engine and Docker Compose v2
+- one host port for the HTTP API
+- enough disk for the source datasets, TileDB arrays, ClickHouse cache, and PostgreSQL metadata
+
+Create the deployment directory and data layout:
+
+```bash
+sudo mkdir -p /srv/shennong-db/data/{toil,pbmc}
+cd /srv/shennong-db
+curl -fsSLO https://raw.githubusercontent.com/zerostwo/shennong-db/main/docker-compose.yml
+```
+
+Place the supported source files at these exact paths:
+
+```text
+/srv/shennong-db/data/toil/TcgaTargetGtex_rsem_gene_tpm.tsv
+/srv/shennong-db/data/toil/TcgaTargetGtex_rsem_gene_tpm.tsv.idx.json
+/srv/shennong-db/data/pbmc/pbmc1k_filtered_feature_bc_matrix.h5
+/srv/shennong-db/data/pbmc/pbmc3k_filtered_feature_bc_matrix.h5
+/srv/shennong-db/data/pbmc/pbmc4k_filtered_feature_bc_matrix.h5
+```
+
+Create `/srv/shennong-db/.env`:
+
+```dotenv
+SHENNONG_ADMIN_API_KEY=replace-with-openssl-rand-hex-32
+SHENNONG_JWT_SECRET=replace-with-a-different-openssl-rand-hex-32
+SHENNONG_DATA_PATH=/srv/shennong-db/data
+SHENNONG_BIND_ADDRESS=127.0.0.1
+SHENNONG_PORT=8000
+SHENNONG_IMAGE=zerostwo/shennong-db:0.1.0
+```
+
+Generate each secret with `openssl rand -hex 32`. Start the single service and
+import the bundled Resource metadata:
+
+```bash
+docker compose pull
+docker compose up -d
+docker compose exec shennong-db shennong-cli import /app/seed/toil-pbmc.json
+curl -fsS http://127.0.0.1:8000/healthz
+```
+
+The one container starts PostgreSQL, internal-only ClickHouse, embedded TileDB,
+and the HTTP API. On first startup it creates TileDB arrays under
+`$SHENNONG_DATA_PATH/tiledb`. ClickHouse data is stored under
+`$SHENNONG_DATA_PATH/clickhouse`.
+
+Upgrade with:
+
+```bash
+cd /srv/shennong-db
+docker compose pull
+docker compose up -d --force-recreate
+docker compose exec shennong-db shennong-cli import /app/seed/toil-pbmc.json
+```
+
+Back up both metadata and analytical data:
+
+```bash
+docker compose exec -T shennong-db pg_dump -U shennong shennong > shennong-metadata.sql
+rsync -a /srv/shennong-db/data/ /backup/shennong-db-data/
+```
+
+## 2. Agent discovery
+
+Discovery is deliberately two-level.
+
+First, read the small catalog:
+
+```bash
+curl -sS http://127.0.0.1:8000/.well-known/shennong-agent.json | jq
+```
+
+Each entry contains only selection metadata and a `details_url`. After choosing
+a candidate Resource, retrieve its complete metadata, dimensions, fields,
+analysis readiness, missing annotation requirements, Artifacts, Relations, and
+query example:
+
+```bash
+curl -sS http://127.0.0.1:8000/api/v1/agent/resources/toil | jq
+curl -sS http://127.0.0.1:8000/api/v1/agent/resources/pbmc-3k | jq
+```
+
+An agent must plan only operations listed under
+`metadata.analysis_capabilities.ready`. Items under
+`requires_additional_resources` identify the exact missing Resources needed for
+the requested analysis.
+
+For a melanoma CAR-T target task, the current catalog correctly reports only
+Toil and PBMC expression Resources. A complete plan additionally requires a
+melanoma single-cell Resource, TCGA sample and clinical annotations, GTEx tissue
+annotations, and an OpenTargets Resource. ShennongDB does not advertise data
+that has not been installed.
+
+## 3. Expression queries
+
+Toil accepts the versioned Ensembl identifier present in the matrix:
+
+```bash
+curl -sS http://127.0.0.1:8000/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "resource":"toil",
+    "operation":"expression",
+    "feature":{"type":"gene","name":"ENSG00000198492.14"},
+    "options":{"limit":100}
+  }' | jq
+```
+
+The first Toil request reads the indexed row and fills ClickHouse. Later
+requests use ClickHouse.
+
+PBMC accepts a gene symbol or Ensembl identifier and reads the sparse TileDB
+array:
+
+```bash
+curl -sS http://127.0.0.1:8000/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "resource":"pbmc-3k",
+    "operation":"expression",
+    "feature":{"type":"gene","name":"YTHDF2"},
+    "options":{"limit":100}
+  }' | jq
+```
+
+Context filters are rejected until the selected Resource declares the required
+annotations. This prevents an agent from mistaking unfiltered results for a
+cancer cohort, tumor/normal comparison, survival analysis, or cell-type result.
+
+## 4. Resources, Artifacts, and Relations
+
+```bash
+curl -sS http://127.0.0.1:8000/api/v1/resources | jq
+curl -sS http://127.0.0.1:8000/api/v1/resources/toil/artifacts | jq
+curl -sS http://127.0.0.1:8000/api/v1/resources/pbmc-3k/relations | jq
+curl -o matrix.h5 http://127.0.0.1:8000/api/v1/resources/pbmc-3k/artifacts/pbmc-3k-matrix/download
+```
+
+Write operations require the bootstrap administrator key:
+
+```bash
+curl -X PUT http://127.0.0.1:8000/api/v1/resources/example \
+  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"example","kind":"Dataset","metadata":{},"spec":{},"status":"available","provenance":{},"permissions":{"visibility":"private"}}'
+```
+
+## 5. Users and private Resources
+
+Create a user and issue a JWT:
+
+```bash
+curl -X PUT http://127.0.0.1:8000/api/v1/users/analyst \
+  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"analyst","display_name":"Analyst","email":"analyst@example.org","role":"user","status":"active"}'
+
+curl -X POST http://127.0.0.1:8000/api/v1/users/analyst/tokens \
+  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"expires_in":86400}'
+
+curl -X PUT http://127.0.0.1:8000/api/v1/resources/private-dataset/grants/analyst \
+  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY"
+```
+
+Use the returned token as `Authorization: Bearer TOKEN`. Setting the user's
+status to `disabled` revokes access immediately, including already-issued JWTs.
+
+## 6. Operations
+
+```bash
+docker compose ps
+docker compose logs --tail=200 shennong-db
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/healthz
+curl -fsS http://127.0.0.1:8000/version
+```
+
+`/healthz` succeeds only when PostgreSQL and ClickHouse are ready. TileDB is
+reported as embedded because it has no separate daemon.

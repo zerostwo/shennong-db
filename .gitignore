@@ -10,5 +10,6 @@ web/dist/
 *.tsbuildinfo
 web/vite.config.d.ts
 web/vite.config.js
+/target/
 *.Rcheck/
 *.tar.gz

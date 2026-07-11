@@ -1,0 +1,22 @@
+[package]
+name = "shennong-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+http.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+shennong-auth = { path = "../shennong-auth" }
+shennong-core = { path = "../shennong-core" }
+shennong-query = { path = "../shennong-query" }
+shennong-schema = { path = "../shennong-schema" }
+shennong-storage = { path = "../shennong-storage" }
