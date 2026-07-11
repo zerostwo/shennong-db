@@ -3,6 +3,7 @@ use shennong_schema::{
     Artifact, ArtifactUpsert, AuditEvent, ProviderFile, ProviderManifest, Relation, RelationUpsert,
     Resource, ResourcePermissions, ResourceUpsert, User, UserUpsert,
 };
+use shennong_storage::{ArtifactUri, BlobStore, LocalObjectStorage};
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use std::{
     collections::BTreeMap,
@@ -83,6 +84,7 @@ pub struct ProviderInstaller {
     max_download_bytes: usize,
     download_timeout: Duration,
     allow_unverified: bool,
+    storage: std::sync::Arc<dyn BlobStore>,
 }
 
 struct PreparedFile {
@@ -100,13 +102,15 @@ impl ProviderInstaller {
         data_root: impl Into<PathBuf>,
         max_download_bytes: usize,
     ) -> Self {
+        let data_root = data_root.into();
         Self {
             provider_dir: provider_dir.into(),
-            data_root: data_root.into(),
+            data_root: data_root.clone(),
             max_download_bytes,
             download_timeout: env_duration("SHENNONG_DOWNLOAD_TIMEOUT_SECS", 300),
             allow_unverified: std::env::var("SHENNONG_PROVIDER_ALLOW_UNVERIFIED")
                 .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
+            storage: std::sync::Arc::new(LocalObjectStorage::new(data_root)),
         }
     }
 
@@ -289,7 +293,16 @@ impl ProviderInstaller {
                     resource_id: resource.id.clone(),
                     uri: index_path.display().to_string(),
                     format: "json".into(),
-                    size: Some(fs::metadata(&index_path).await?.len() as i64),
+                    size: Some(
+                        self.storage
+                            .head(
+                                &ArtifactUri::parse(&index_path.to_string_lossy())
+                                    .map_err(|_| ProviderError::MissingArtifact)?,
+                            )
+                            .await
+                            .map_err(|_| ProviderError::MissingArtifact)?
+                            .size as i64,
+                    ),
                     checksum: Some(hash_file(&index_path)?),
                     storage_backend: "local".into(),
                     schema_json: serde_json::json!({"role": "gene_index", "artifact_id": file.id}),

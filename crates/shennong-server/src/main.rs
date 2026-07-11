@@ -36,7 +36,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     sync::{OwnedSemaphorePermit, Semaphore},
 };
 use tower_http::{
@@ -482,6 +482,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/.well-known/shennong-agent.json", get(agent_manifest))
         .route("/api/v1/agent-manifest", get(agent_manifest))
         .route("/api/v1/agent/resources/{id}", get(agent_resource))
+        .route("/api/v1/agent/resources/{id}/axes/{axis}", get(agent_axis))
+        .route("/api/v1/agent/resources/{id}/metadata", get(agent_metadata))
         .route("/api/v1/genes/resolve", get(resolve_gene))
         .route("/api/v1/users", get(list_users))
         .route("/api/v1/users/{id}", get(get_user).put(upsert_user))
@@ -547,8 +549,8 @@ async fn version() -> Json<serde_json::Value> {
 async fn capabilities() -> Json<Envelope<serde_json::Value>> {
     let mut data = serde_json::to_value(Capabilities::default()).unwrap_or_default();
     data["batch_features"] = true.into();
-    data["metadata_views"] = false.into();
-    data["axes"] = false.into();
+    data["metadata_views"] = true.into();
+    data["axes"] = true.into();
     data["cursor"] = true.into();
     data["arrow"] = false.into();
     data["structured_errors"] = true.into();
@@ -671,6 +673,263 @@ async fn agent_resource(
             "body": {"resource": id, "operation": "expression", "feature": {"type": "gene", "name": example_feature}, "options": {"limit": 100}}
         }
     })))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AxisRequest {
+    limit: Option<usize>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MetadataRequest {
+    fields: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<usize>,
+}
+
+async fn agent_axis(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, axis)): Path<(String, String)>,
+    Query(request): Query<AxisRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let resource = state
+        .repository
+        .get_resource(&id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    if !can_read(&state, &principal(&headers, &state), &resource).await? {
+        return Err(not_found());
+    }
+    let axis = match axis.as_str() {
+        "feature" | "features" => "feature",
+        "observation" | "observations" | "sample" | "samples" | "cell" | "cells" => "observation",
+        _ => {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unsupported axis".into(),
+            ));
+        }
+    };
+    let size = resource
+        .metadata
+        .get("dimensions")
+        .and_then(|value| value.as_object())
+        .and_then(|dimensions| {
+            [
+                if axis == "feature" {
+                    "features"
+                } else {
+                    "observations"
+                },
+                if axis == "feature" {
+                    "feature"
+                } else {
+                    "samples"
+                },
+                if axis == "feature" { "genes" } else { "cells" },
+            ]
+            .iter()
+            .find_map(|key| dimensions.get(*key).and_then(serde_json::Value::as_u64))
+        });
+    let artifacts = state
+        .repository
+        .list_artifacts(&id)
+        .await
+        .map_err(database_error)?;
+    let artifact = artifacts.iter().find(|artifact| {
+        artifact
+            .schema_json
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            == Some("expression")
+    });
+    let mut ids = artifact.and_then(|artifact| {
+        let key = if axis == "feature" {
+            "feature_ids"
+        } else {
+            "observation_ids"
+        };
+        artifact
+            .schema_json
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+    });
+    if ids.is_none()
+        && let Some(artifact) = artifact.filter(|artifact| {
+            artifact.storage_backend == "local"
+                && matches!(artifact.format.as_str(), "csv" | "tsv" | "txt")
+                && artifact.size.is_some_and(|size| size <= 16 * 1024 * 1024)
+        })
+    {
+        let uri = ArtifactUri::parse(&artifact.uri).map_err(|_| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "axis metadata unavailable".into(),
+            )
+        })?;
+        let mut lines = BufReader::new(state.storage.get_stream(&uri).await.map_err(|_| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "axis metadata unavailable".into(),
+            )
+        })?)
+        .lines();
+        let header = lines
+            .next_line()
+            .await
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "axis metadata unavailable".into(),
+                )
+            })?
+            .unwrap_or_default();
+        let delimiter = if header.contains('\t') { '\t' } else { ',' };
+        ids = Some(if axis == "feature" {
+            let mut values = Vec::new();
+            while let Some(line) = lines.next_line().await.map_err(|_| {
+                ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "axis metadata unavailable".into(),
+                )
+            })? {
+                if let Some(value) = line.split(delimiter).next() {
+                    values.push(value.to_owned());
+                }
+            }
+            values
+        } else {
+            header.split(delimiter).skip(1).map(str::to_owned).collect()
+        });
+    }
+    let ids_available = ids.is_some();
+    let mut ids = ids.unwrap_or_default();
+    if let Some(limit) = request.limit {
+        ids.truncate(limit.min(100_000));
+    }
+    Ok(Json(Envelope {
+        data: serde_json::json!({
+            "axis": axis,
+            "size": size,
+            "ids": if ids_available { serde_json::Value::Array(ids.into_iter().map(serde_json::Value::String).collect()) } else { serde_json::Value::Null },
+            "ids_available": ids_available
+        }),
+    }))
+}
+
+async fn agent_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(request): Query<MetadataRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let resource = state
+        .repository
+        .get_resource(&id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    if !can_read(&state, &principal(&headers, &state), &resource).await? {
+        return Err(not_found());
+    }
+    let artifacts = state
+        .repository
+        .list_artifacts(&id)
+        .await
+        .map_err(database_error)?;
+    let Some(artifact) = artifacts.iter().find(|artifact| {
+        matches!(
+            artifact
+                .schema_json
+                .get("role")
+                .and_then(serde_json::Value::as_str),
+            Some("sample_metadata" | "observation_metadata")
+        )
+    }) else {
+        return Ok(Json(Envelope {
+            data: serde_json::json!({"data": [], "meta": {"n_rows": 0, "total_rows": 0}}),
+        }));
+    };
+    if artifact.storage_backend != "local"
+        || artifact.size.is_some_and(|size| size > 64 * 1024 * 1024)
+    {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "metadata view is unavailable for this Artifact".into(),
+        ));
+    }
+    let uri = ArtifactUri::parse(&artifact.uri).map_err(|_| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "metadata view unavailable".into(),
+        )
+    })?;
+    let mut lines = BufReader::new(state.storage.get_stream(&uri).await.map_err(|_| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "metadata view unavailable".into(),
+        )
+    })?)
+    .lines();
+    let header = lines
+        .next_line()
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "metadata view unavailable".into(),
+            )
+        })?
+        .unwrap_or_default();
+    let delimiter = if header.contains('\t') { '\t' } else { ',' };
+    let columns: Vec<_> = header.split(delimiter).collect();
+    let selected = request
+        .fields
+        .as_deref()
+        .map(|value| value.split(',').collect::<Vec<_>>());
+    let mut rows = Vec::new();
+    while let Some(line) = lines.next_line().await.map_err(|_| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "metadata view unavailable".into(),
+        )
+    })? {
+        let values: Vec<_> = line.split(delimiter).collect();
+        let mut row = serde_json::Map::new();
+        for (column, value) in columns.iter().zip(values.iter()) {
+            if selected
+                .as_ref()
+                .is_none_or(|fields| fields.contains(column))
+            {
+                row.insert(
+                    (*column).to_owned(),
+                    serde_json::Value::String((*value).to_owned()),
+                );
+            }
+        }
+        rows.push(serde_json::Value::Object(row));
+    }
+    let total = rows.len();
+    let start = request.cursor.unwrap_or(0).min(total);
+    let limit = request.limit.unwrap_or(1_000).clamp(1, 100_000);
+    let end = start.saturating_add(limit).min(total);
+    let page = rows[start..end].to_vec();
+    let mut meta = serde_json::json!({"n_rows": page.len(), "total_rows": total});
+    if end < total {
+        meta["next_cursor"] = end.to_string().into();
+    }
+    Ok(Json(Envelope {
+        data: serde_json::json!({"data": page, "meta": meta}),
+    }))
 }
 
 async fn resolve_gene(

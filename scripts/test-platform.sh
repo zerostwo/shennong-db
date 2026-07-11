@@ -120,6 +120,12 @@ curl --noproxy '*' --fail --silent -H "$admin" -H "$json" \
 curl --noproxy '*' --fail --silent -H "$admin" -H "$json" \
   -d '{"id":"fixture-private-gene-map","resource_id":"fixture-private","uri":"/data/fixtures/gene-map.tsv","format":"tsv","size":22,"checksum":null,"storage_backend":"local","schema":{"role":"gene_mapping"},"provenance":{}}' \
   "$base/api/v1/resources/fixture-private/artifacts" >/dev/null
+curl --noproxy '*' --fail --silent "$base/api/v1/agent/resources/fixture-public/axes/observation" \
+  | jq -e '.data.ids_available == true and (.data.ids | index("S1"))' >/dev/null
+curl --noproxy '*' --fail --silent "$base/api/v1/agent/resources/fixture-public/axes/feature" \
+  | jq -e '.data.ids_available == true and (.data.ids | index("GENE1"))' >/dev/null
+curl --noproxy '*' --fail --silent "$base/api/v1/agent/resources/fixture-public/metadata" \
+  | jq -e '.data.meta.n_rows == 0' >/dev/null
 curl --noproxy '*' --fail --silent -X POST -H "$admin" -H "$json" \
   -d '{"source":"fixture-private","target":"fixture-public","type":"derived_from","evidence":{},"provenance":{}}' \
   "$base/api/v1/resources/fixture-private/relations" >/dev/null

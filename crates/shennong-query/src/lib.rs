@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use shennong_schema::{Artifact, Resource, ResourceQuery};
-use shennong_storage::{ArtifactUri, BlobStore, ByteRange, LocalObjectStorage};
+use shennong_storage::{ArtifactUri, BlobStore, ByteRange};
 #[cfg(test)]
 use std::{
     fs::File,
@@ -444,12 +444,17 @@ fn valid_context_value(value: &Value) -> bool {
 }
 
 pub struct FileExpressionAdapter {
-    storage: LocalObjectStorage,
+    storage: Arc<dyn BlobStore>,
 }
 
 impl FileExpressionAdapter {
-    pub fn new(storage: LocalObjectStorage) -> Self {
-        Self { storage }
+    pub fn new<S>(storage: S) -> Self
+    where
+        S: BlobStore + 'static,
+    {
+        Self {
+            storage: Arc::new(storage),
+        }
     }
 }
 
@@ -480,7 +485,7 @@ impl QueryAdapter for FileExpressionAdapter {
         let mut scan_query = query.clone();
         scan_query.options = serde_json::json!({"limit": MAX_QUERY_ROWS});
         let mut response = expression_response_from_blob(
-            &self.storage,
+            self.storage.as_ref(),
             resource,
             &scan_query,
             &artifact_uri,
@@ -499,13 +504,14 @@ impl QueryAdapter for FileExpressionAdapter {
                         == Some("sample_metadata")
                 })
                 .ok_or(QueryError::NoArtifact)?;
-            let input = read_text(&self.storage, &metadata.uri).await?;
-            join_metadata(
+            join_metadata_from_blob(
+                self.storage.as_ref(),
                 &mut response,
-                &input,
+                &metadata.uri,
                 Some(&query.context),
                 metadata.schema_json.get("context_fields"),
-            )?;
+            )
+            .await?;
         }
         if query.operation == "survival_expression" {
             let survival = artifacts
@@ -515,8 +521,14 @@ impl QueryAdapter for FileExpressionAdapter {
                         == Some("survival_metadata")
                 })
                 .ok_or(QueryError::NoArtifact)?;
-            let input = read_text(&self.storage, &survival.uri).await?;
-            join_metadata(&mut response, &input, None, None)?;
+            join_metadata_from_blob(
+                self.storage.as_ref(),
+                &mut response,
+                &survival.uri,
+                None,
+                None,
+            )
+            .await?;
         }
         if query.operation == "embedding_expression" {
             let embedding = artifacts
@@ -530,42 +542,24 @@ impl QueryAdapter for FileExpressionAdapter {
                             .is_some_and(|role| role.starts_with("embedding"))
                 })
                 .ok_or(QueryError::NoArtifact)?;
-            let input = read_text(&self.storage, &embedding.uri).await?;
-            attach_embedding(&mut response, &input)?;
+            attach_embedding_from_blob(self.storage.as_ref(), &mut response, &embedding.uri)
+                .await?;
         }
         truncate_response(&mut response, query);
         Ok(response)
     }
 }
 
-fn join_metadata(
+fn apply_metadata(
     response: &mut Value,
-    input: &str,
+    rows: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
     context: Option<&Value>,
     context_fields: Option<&Value>,
 ) -> Result<(), QueryError> {
-    let mut lines = input.lines();
-    let columns: Vec<_> = lines
-        .next()
-        .ok_or(QueryError::MalformedArtifact)?
-        .split('\t')
-        .collect();
     let mappings = context_fields
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let rows: std::collections::HashMap<_, _> = lines
-        .map(|line| line.split('\t').collect::<Vec<_>>())
-        .filter_map(|values| {
-            let sample = values.first()?.to_string();
-            let metadata = columns
-                .iter()
-                .zip(values)
-                .map(|(column, value)| ((*column).to_string(), value.to_string()))
-                .collect::<std::collections::HashMap<_, _>>();
-            Some((sample, metadata))
-        })
-        .collect();
     let data = response
         .get_mut("data")
         .and_then(Value::as_array_mut)
@@ -607,6 +601,67 @@ fn join_metadata(
     Ok(())
 }
 
+#[cfg(test)]
+fn join_metadata(
+    response: &mut Value,
+    input: &str,
+    context: Option<&Value>,
+    context_fields: Option<&Value>,
+) -> Result<(), QueryError> {
+    let mut lines = input.lines();
+    let columns: Vec<String> = lines
+        .next()
+        .ok_or(QueryError::MalformedArtifact)?
+        .split('\t')
+        .map(str::to_owned)
+        .collect();
+    let rows = lines
+        .filter_map(|line| {
+            let values: Vec<_> = line.split('\t').collect();
+            let sample = values.first()?.to_string();
+            let metadata = columns
+                .iter()
+                .zip(values)
+                .map(|(column, value)| (column.clone(), value.to_string()))
+                .collect();
+            Some((sample, metadata))
+        })
+        .collect();
+    apply_metadata(response, &rows, context, context_fields)
+}
+
+async fn join_metadata_from_blob(
+    storage: &dyn BlobStore,
+    response: &mut Value,
+    uri: &str,
+    context: Option<&Value>,
+    context_fields: Option<&Value>,
+) -> Result<(), QueryError> {
+    let uri = ArtifactUri::parse(uri)?;
+    let mut lines = AsyncBufReader::new(storage.get_stream(&uri).await?).lines();
+    let columns: Vec<String> = lines
+        .next_line()
+        .await?
+        .ok_or(QueryError::MalformedArtifact)?
+        .split('\t')
+        .map(str::to_owned)
+        .collect();
+    let mut rows = std::collections::HashMap::new();
+    while let Some(line) = lines.next_line().await? {
+        let values: Vec<_> = line.split('\t').collect();
+        let Some(sample) = values.first().map(|value| (*value).to_owned()) else {
+            continue;
+        };
+        let metadata = columns
+            .iter()
+            .zip(values)
+            .map(|(column, value)| (column.clone(), value.to_string()))
+            .collect();
+        rows.insert(sample, metadata);
+    }
+    apply_metadata(response, &rows, context, context_fields)
+}
+
 fn truncate_response(response: &mut Value, query: &ResourceQuery) {
     let limit = query
         .options
@@ -639,16 +694,21 @@ fn truncate_response(response: &mut Value, query: &ResourceQuery) {
     }
 }
 
-async fn read_text(storage: &LocalObjectStorage, uri: &str) -> Result<String, QueryError> {
-    let uri = ArtifactUri::parse(uri)?;
-    let mut reader = storage.get_stream(&uri).await?;
-    let mut value = String::new();
-    reader.read_to_string(&mut value).await?;
+async fn read_small_text(storage: &dyn BlobStore, uri: &ArtifactUri) -> Result<String, QueryError> {
+    const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+    let reader = storage.get_stream(uri).await?;
+    let mut value = Vec::new();
+    let mut limited = reader.take(MAX_METADATA_BYTES + 1);
+    limited.read_to_end(&mut value).await?;
+    if value.len() as u64 > MAX_METADATA_BYTES {
+        return Err(QueryError::ResponseTooLarge);
+    }
+    let value = String::from_utf8(value).map_err(|_| QueryError::MalformedArtifact)?;
     Ok(value)
 }
 
 async fn expression_response_from_blob(
-    storage: &LocalObjectStorage,
+    storage: &dyn BlobStore,
     resource: &Resource,
     query: &ResourceQuery,
     artifact_uri: &ArtifactUri,
@@ -680,7 +740,7 @@ async fn expression_response_from_blob(
             }
         }
     };
-    let index = read_text(storage, &index_uri.to_string()).await?;
+    let index = read_small_text(storage, index_uri).await?;
     let offsets: Value = serde_json::from_str(&index)?;
     let feature = query.feature.as_ref().ok_or(QueryError::Unsupported)?;
     let offset = offsets
@@ -817,6 +877,7 @@ fn expression_response_from_reader<R: BufRead>(
     }))
 }
 
+#[cfg(test)]
 fn attach_embedding(response: &mut Value, input: &str) -> Result<(), QueryError> {
     let mut lines = input.lines();
     let header = lines.next().ok_or(QueryError::MalformedArtifact)?;
@@ -851,6 +912,56 @@ fn attach_embedding(response: &mut Value, input: &str) -> Result<(), QueryError>
                         .parse::<f64>()
                         .ok()
                         .map_or_else(|| Value::String((*value).to_string()), Value::from);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn attach_embedding_from_blob(
+    storage: &dyn BlobStore,
+    response: &mut Value,
+    uri: &str,
+) -> Result<(), QueryError> {
+    let uri = ArtifactUri::parse(uri)?;
+    let mut lines = AsyncBufReader::new(storage.get_stream(&uri).await?).lines();
+    let header = lines
+        .next_line()
+        .await?
+        .ok_or(QueryError::MalformedArtifact)?;
+    let delimiter = if header.contains('\t') { '\t' } else { ',' };
+    let columns: Vec<_> = header.split(delimiter).map(str::to_owned).collect();
+    let id_index = columns
+        .iter()
+        .position(|column| matches!(column.as_str(), "observation_id" | "sample_id" | "cell_id"))
+        .ok_or(QueryError::MalformedArtifact)?;
+    let mut rows = std::collections::HashMap::new();
+    while let Some(line) = lines.next_line().await? {
+        let values: Vec<_> = line.split(delimiter).map(str::to_owned).collect();
+        let Some(id) = values.get(id_index) else {
+            continue;
+        };
+        rows.insert(id.clone(), values);
+    }
+    for row in response
+        .get_mut("data")
+        .and_then(Value::as_array_mut)
+        .ok_or(QueryError::MalformedArtifact)?
+    {
+        let id = row
+            .get("observation_id")
+            .and_then(Value::as_str)
+            .ok_or(QueryError::MalformedArtifact)?;
+        if let Some(values) = rows.get(id) {
+            for (index, column) in columns.iter().enumerate() {
+                if index != id_index
+                    && let Some(value) = values.get(index)
+                {
+                    row[column] = value
+                        .parse::<f64>()
+                        .ok()
+                        .map_or_else(|| Value::String(value.clone()), Value::from);
                 }
             }
         }

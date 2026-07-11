@@ -16,3 +16,4 @@ thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 shennong-schema = { path = "../shennong-schema" }
+shennong-storage = { path = "../shennong-storage" }
