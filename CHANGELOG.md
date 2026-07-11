@@ -3,6 +3,17 @@
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Streaming S3-compatible storage with Range GET, multipart upload, presigning,
+  SeaweedFS profile, and immutable production release workflows.
+- Artifact lifecycle metadata, content-addressed raw objects, lineage, bounded
+  ClickHouse cache controls, persistent TileDB worker, and backup/restore tools.
+- Revocable scoped tokens, secret-file loading, key rotation, Prometheus cache
+  metrics, production service separation, SBOM, signing, and provenance checks.
+
 ## [0.1.0] - 2026-07-11
 
 ### Added

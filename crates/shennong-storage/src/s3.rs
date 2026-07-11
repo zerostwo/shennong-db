@@ -589,17 +589,89 @@ fn sign_request(request: &mut Request, config: &S3Config) -> Result<(), StorageE
 
 #[cfg(test)]
 mod tests {
-    use super::{S3Config, percent_encode};
+    use super::{S3Config, S3ObjectStorage, percent_encode};
+    use crate::{ArtifactUri, BlobStore, ByteRange};
+    use std::time::Duration;
     #[test]
     fn encodes_unicode_keys_for_sigv4() {
         assert_eq!(
-            percent_encode("黑色素瘤/data".as_bytes()),
-            "%E9%BB%91%E8%89%B2%E7%B4%A0%E7%98%A4%2Fdata"
+            percent_encode("café/data".as_bytes()),
+            "caf%C3%A9%2Fdata"
         );
     }
     #[test]
     fn config_does_not_require_credentials_until_auth() {
         let config = S3Config::from_env("bucket").unwrap();
         assert!(config.access_key.is_none() || config.secret_key.is_some());
+    }
+
+    #[tokio::test]
+    async fn range_get_uses_streaming_http_range() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let size = tokio::io::AsyncReadExt::read(&mut socket, &mut request)
+                .await
+                .unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.to_ascii_lowercase().contains("range: bytes=1-3"));
+            tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\n\r\nbcd",
+            )
+            .await
+            .unwrap();
+        });
+        let config = S3Config {
+            endpoint: format!("http://{address}").parse().unwrap(),
+            region: "us-east-1".into(),
+            force_path_style: true,
+            bucket: "bucket".into(),
+            access_key: None,
+            secret_key: None,
+            session_token: None,
+            connect_timeout: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(2),
+            max_retries: 0,
+            multipart_part_size: 5 * 1024 * 1024,
+            presign_ttl: Duration::from_secs(60),
+        };
+        let storage = S3ObjectStorage::new(config).unwrap();
+        let uri = ArtifactUri::parse("s3://bucket/unicode/café.tsv").unwrap();
+        let mut reader = storage
+            .get_range(&uri, ByteRange::new(1, 3).unwrap())
+            .await
+            .unwrap();
+        let mut output = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut output)
+            .await
+            .unwrap();
+        assert_eq!(output, b"bcd");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn presign_supports_path_style_unicode_keys() {
+        let config = S3Config {
+            endpoint: "https://storage.example.test".parse().unwrap(),
+            region: "us-east-1".into(),
+            force_path_style: true,
+            bucket: "bucket".into(),
+            access_key: Some("access".into()),
+            secret_key: Some("secret".into()),
+            session_token: None,
+            connect_timeout: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(2),
+            max_retries: 0,
+            multipart_part_size: 5 * 1024 * 1024,
+            presign_ttl: Duration::from_secs(60),
+        };
+        let storage = S3ObjectStorage::new(config).unwrap();
+        let key = crate::ObjectKey::new("unicode/café.tsv").unwrap();
+        let url = storage.presign_get_url(&key).unwrap();
+        assert!(url.contains("/bucket/unicode/caf%C3%A9.tsv"));
+        assert!(url.contains("X-Amz-Signature="));
     }
 }
