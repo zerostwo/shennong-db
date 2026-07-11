@@ -7,6 +7,8 @@ compose="${COMPOSE_COMMAND:-docker compose}"
 file="docker-compose.test.yml"
 admin='X-Shennong-Admin-Key: integration-test-admin-key'
 json='Content-Type: application/json'
+tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/shennong-test.XXXXXX")
+slow_pid=
 
 run_compose() {
   # ponytail: word splitting lets callers use COMPOSE_COMMAND='sudo docker compose'.
@@ -16,6 +18,11 @@ run_compose() {
 cleanup() {
   status=$?
   trap - EXIT INT TERM
+  if [ -n "$slow_pid" ]; then
+    kill "$slow_pid" 2>/dev/null || true
+    wait "$slow_pid" 2>/dev/null || true
+  fi
+  rm -rf "$tmpdir"
   if [ "$status" -ne 0 ]; then
     run_compose logs --no-color || true
   fi
@@ -78,6 +85,52 @@ curl --noproxy '*' --fail --silent -H "$admin" -H "$json" \
 curl --noproxy '*' --fail --silent -X POST -H "$admin" -H "$json" \
   -d '{"source":"fixture-private","target":"fixture-public","type":"derived_from","evidence":{},"provenance":{}}' \
   "$base/api/v1/resources/fixture-private/relations" >/dev/null
+
+download="$base/api/v1/resources/fixture-public/artifacts/fixture-expression/download"
+curl --noproxy '*' --fail --silent -D "$tmpdir/full.headers" -o "$tmpdir/full.tsv" "$download"
+cmp tests/fixtures/expression.tsv "$tmpdir/full.tsv"
+tr -d '\r' < "$tmpdir/full.headers" | grep -qi '^accept-ranges: bytes$'
+tr -d '\r' < "$tmpdir/full.headers" | grep -qi '^content-length: 29$'
+tr -d '\r' < "$tmpdir/full.headers" | grep -qi '^content-disposition: attachment; filename="expression.tsv"$'
+
+assert_range() {
+  range=$1
+  skip=$2
+  count=$3
+  curl --noproxy '*' --fail --silent -D "$tmpdir/range.headers" -r "$range" -o "$tmpdir/range.tsv" "$download"
+  dd if=tests/fixtures/expression.tsv of="$tmpdir/expected.tsv" bs=1 skip="$skip" count="$count" 2>/dev/null
+  cmp "$tmpdir/expected.tsv" "$tmpdir/range.tsv"
+  tr -d '\r' < "$tmpdir/range.headers" | grep -q '^HTTP/1.1 206 Partial Content$'
+  tr -d '\r' < "$tmpdir/range.headers" | grep -qi "^content-range: bytes $skip-$((skip + count - 1))/29$"
+}
+
+assert_range 0-5 0 6
+assert_range 9-14 9 6
+assert_range 25- 25 4
+[ "$(curl --noproxy '*' --silent -D "$tmpdir/invalid-range.headers" -o /dev/null -w '%{http_code}' -H 'Range: bytes=99-100' "$download")" = 416 ]
+tr -d '\r' < "$tmpdir/invalid-range.headers" | grep -qi '^content-range: bytes \*/29$'
+
+run_compose exec -T shennong-db truncate -s 67108865 /data/large-range.bin
+curl --noproxy '*' --fail --silent -H "$admin" -H "$json" \
+  -d '{"id":"fixture-large","resource_id":"fixture-public","uri":"/data/large-range.bin","format":"bin","size":67108865,"checksum":null,"storage_backend":"local","schema":{"role":"raw"},"provenance":{}}' \
+  "$base/api/v1/resources/fixture-public/artifacts" >/dev/null
+large_download="$base/api/v1/resources/fixture-public/artifacts/fixture-large/download"
+curl --noproxy '*' --fail --silent -r 1048576-1048639 -o "$tmpdir/large-range.bin" "$large_download"
+[ "$(wc -c < "$tmpdir/large-range.bin" | tr -d ' ')" = 64 ]
+
+curl --noproxy '*' --fail --silent --limit-rate 1K -D "$tmpdir/slow.headers" -o "$tmpdir/slow.bin" "$large_download" &
+slow_pid=$!
+attempt=0
+until [ -s "$tmpdir/slow.headers" ]; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 50 ] || exit 1
+  sleep 1
+done
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$large_download")" = 429 ]
+kill "$slow_pid"
+wait "$slow_pid" 2>/dev/null || true
+slow_pid=
+curl --noproxy '*' --fail --silent "$base/healthz" | jq -e '.status == "ok"' >/dev/null
 
 [ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/fixture-public/artifacts/fixture-outside-root/download")" = 404 ]
 [ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/fixture-private/artifacts")" = 404 ]

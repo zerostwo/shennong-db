@@ -1,8 +1,11 @@
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{
+        HeaderMap, StatusCode,
+        header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, RANGE},
+    },
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
@@ -19,10 +22,14 @@ use shennong_schema::{
 };
 use shennong_storage::{LocalObjectStorage, ObjectStorage};
 use std::{
-    env,
-    path::PathBuf,
+    env, io,
+    path::{Path as FilePath, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt, SeekFrom},
+    sync::{OwnedSemaphorePermit, Semaphore},
 };
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
@@ -37,6 +44,29 @@ struct AppState {
     clickhouse_url: String,
     tiledb_script: String,
     data_root: PathBuf,
+    downloads: Arc<Semaphore>,
+    download_timeout: Duration,
+}
+
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+
+struct DownloadStreamState {
+    file: tokio::fs::File,
+    remaining: u64,
+    timeout: Duration,
+    _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ByteRange {
+    start: u64,
+    end: u64,
+}
+
+impl ByteRange {
+    fn len(self) -> u64 {
+        self.end - self.start + 1
+    }
 }
 
 #[derive(Serialize)]
@@ -77,6 +107,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(50 * 1024 * 1024 * 1024);
+    let download_concurrency = env::var("SHENNONG_DOWNLOAD_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value: &usize| *value > 0)
+        .unwrap_or(8);
+    let download_timeout = Duration::from_secs(
+        env::var("SHENNONG_DOWNLOAD_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value: &u64| *value > 0)
+            .unwrap_or(300),
+    );
     let storage = Arc::new(LocalObjectStorage::new(&data_root));
     let state = AppState {
         repository: Arc::new(repository),
@@ -93,6 +135,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tiledb_script: env::var("SHENNONG_TILEDB_SCRIPT")
             .unwrap_or_else(|_| "/app/tiledb_backend.py".into()),
         data_root,
+        downloads: Arc::new(Semaphore::new(download_concurrency)),
+        download_timeout,
     };
     let app = Router::new()
         .route("/health", get(health))
@@ -615,17 +659,195 @@ async fn download_artifact(
     if !path.starts_with(root) {
         return Err(not_found());
     }
-    let data = tokio::fs::read(path).await.map_err(|_| not_found())?;
-    Response::builder()
-        .status(StatusCode::OK)
+    let permit = state.downloads.clone().try_acquire_owned().map_err(|_| {
+        ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many active downloads".into(),
+        )
+    })?;
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|_| not_found())?;
+    let metadata = file.metadata().await.map_err(|_| not_found())?;
+    if !metadata.is_file() {
+        return Err(not_found());
+    }
+    let size = metadata.len();
+    let range = match headers.get(RANGE) {
+        Some(value) => match value
+            .to_str()
+            .map_err(|_| ())
+            .and_then(|value| parse_single_range(value, size))
+        {
+            Ok(range) => Some(range),
+            Err(()) => return range_not_satisfiable(size),
+        },
+        None => None,
+    };
+    let range = range.unwrap_or(ByteRange {
+        start: 0,
+        end: size.saturating_sub(1),
+    });
+    let length = if size == 0 { 0 } else { range.len() };
+    if length > 0 {
+        file.seek(SeekFrom::Start(range.start))
+            .await
+            .map_err(|_| not_found())?;
+    }
+    let filename = safe_download_name(&path);
+    let mut response = Response::builder()
+        .status(if headers.contains_key(RANGE) {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
         .header("content-type", "application/octet-stream")
-        .body(Body::from(data))
+        .header(ACCEPT_RANGES, "bytes")
+        .header(CONTENT_LENGTH, length)
+        .header(
+            CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        );
+    if headers.contains_key(RANGE) {
+        response = response.header(
+            CONTENT_RANGE,
+            format!("bytes {}-{}/{}", range.start, range.end, size),
+        );
+    }
+    response
+        .body(Body::from_stream(stream_local_file(
+            file,
+            length,
+            permit,
+            state.download_timeout,
+        )))
         .map_err(|_| {
             ApiError(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "artifact response failed".into(),
             )
         })
+}
+
+fn stream_local_file(
+    file: tokio::fs::File,
+    remaining: u64,
+    permit: OwnedSemaphorePermit,
+    timeout: Duration,
+) -> impl futures_util::Stream<Item = Result<Bytes, io::Error>> {
+    futures_util::stream::unfold(
+        DownloadStreamState {
+            file,
+            remaining,
+            timeout,
+            _permit: permit,
+        },
+        |mut state| async move {
+            if state.remaining == 0 {
+                return None;
+            }
+            let mut buffer = vec![0; state.remaining.min(DOWNLOAD_CHUNK_BYTES as u64) as usize];
+            match tokio::time::timeout(state.timeout, state.file.read(&mut buffer)).await {
+                Ok(Ok(0)) => {
+                    state.remaining = 0;
+                    Some((
+                        Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "artifact changed while downloading",
+                        )),
+                        state,
+                    ))
+                }
+                Ok(Ok(read)) => {
+                    state.remaining -= read as u64;
+                    buffer.truncate(read);
+                    Some((Ok(Bytes::from(buffer)), state))
+                }
+                Ok(Err(error)) => {
+                    state.remaining = 0;
+                    Some((Err(error), state))
+                }
+                Err(_) => {
+                    state.remaining = 0;
+                    Some((
+                        Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "artifact download timed out",
+                        )),
+                        state,
+                    ))
+                }
+            }
+        },
+    )
+}
+
+fn parse_single_range(value: &str, size: u64) -> Result<ByteRange, ()> {
+    let value = value.strip_prefix("bytes=").ok_or(())?;
+    if value.contains(',') || size == 0 {
+        return Err(());
+    }
+    let (start, end) = value.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        let suffix = end.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        return Ok(ByteRange {
+            start: size.saturating_sub(suffix),
+            end: size - 1,
+        });
+    }
+    let start = start.parse::<u64>().map_err(|_| ())?;
+    if start >= size {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        end.parse::<u64>().map_err(|_| ())?.min(size - 1)
+    };
+    if end < start {
+        return Err(());
+    }
+    Ok(ByteRange { start, end })
+}
+
+fn range_not_satisfiable(size: u64) -> Result<Response, ApiError> {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(ACCEPT_RANGES, "bytes")
+        .header(CONTENT_RANGE, format!("bytes */{size}"))
+        .header(CONTENT_LENGTH, "0")
+        .body(Body::empty())
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "artifact response failed".into(),
+            )
+        })
+}
+
+fn safe_download_name(path: &FilePath) -> String {
+    let name: String = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("artifact")
+        .chars()
+        .take(128)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        "artifact".into()
+    } else {
+        name
+    }
 }
 
 async fn list_relations(
@@ -1177,9 +1399,13 @@ fn query_error(error: shennong_query::QueryError) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_catalog_entry, valid_identifier, validate_artifact, validate_resource};
+    use super::{
+        ByteRange, agent_catalog_entry, parse_single_range, safe_download_name, valid_identifier,
+        validate_artifact, validate_resource,
+    };
     use serde_json::json;
     use shennong_schema::{ArtifactUpsert, Resource, ResourceUpsert};
+    use std::path::Path;
 
     #[test]
     fn agent_catalog_is_first_level_only() {
@@ -1227,5 +1453,38 @@ mod tests {
             provenance: json!({}),
         };
         assert!(validate_artifact(&artifact).is_err());
+    }
+
+    #[test]
+    fn parses_single_byte_ranges_and_rejects_invalid_ones() {
+        assert_eq!(
+            parse_single_range("bytes=0-5", 29),
+            Ok(ByteRange { start: 0, end: 5 })
+        );
+        assert_eq!(
+            parse_single_range("bytes=10-99", 29),
+            Ok(ByteRange { start: 10, end: 28 })
+        );
+        assert_eq!(
+            parse_single_range("bytes=-4", 29),
+            Ok(ByteRange { start: 25, end: 28 })
+        );
+        for value in [
+            "items=0-1",
+            "bytes=",
+            "bytes=8-2",
+            "bytes=29-",
+            "bytes=0-1,2-3",
+        ] {
+            assert!(parse_single_range(value, 29).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn download_filename_is_header_safe() {
+        assert_eq!(
+            safe_download_name(Path::new("/data/a bad\"name.tsv")),
+            "a_bad_name.tsv"
+        );
     }
 }

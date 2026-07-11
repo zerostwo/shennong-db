@@ -175,7 +175,13 @@ curl -sS http://127.0.0.1:8000/api/v1/resources | jq
 curl -sS http://127.0.0.1:8000/api/v1/resources/toil/artifacts | jq
 curl -sS http://127.0.0.1:8000/api/v1/resources/pbmc-3k/relations | jq
 curl -o matrix.h5 http://127.0.0.1:8000/api/v1/resources/pbmc-3k/artifacts/pbmc-3k-matrix/download
+curl -r 0-1048575 -o matrix.part http://127.0.0.1:8000/api/v1/resources/pbmc-3k/artifacts/pbmc-3k-matrix/download
 ```
+
+Artifact downloads are streamed, support one `Range: bytes=...` request, and
+return `416` for invalid ranges. Set `SHENNONG_DOWNLOAD_CONCURRENCY` and
+`SHENNONG_DOWNLOAD_TIMEOUT_SECS` to bound simultaneous downloads and a stalled
+file read.
 
 Write operations require the bootstrap administrator key:
 

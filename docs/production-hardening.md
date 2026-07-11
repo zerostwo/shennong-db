@@ -40,6 +40,8 @@ Compose file, starts an isolated stack, and checks:
   scopes, disabled-user denial, and active-admin access;
 - consistent private-resource authorization for lists, details, artifacts,
   relations, download, query, gene resolution, and agent discovery;
+- streamed Artifact downloads with full and HTTP Range response checks,
+  invalid-range rejection, a large sparse-file probe, and concurrency limiting;
 - authenticated administrator writes;
 - a query bounded to two fixture rows;
 - a local expression fixture inside `/data` and rejection of an Artifact path

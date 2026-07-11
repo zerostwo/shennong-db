@@ -10,6 +10,8 @@ services:
       SHENNONG_LOCAL_DATA_ROOT: /data
       SHENNONG_PROVIDER_DIR: /app/providers
       SHENNONG_DOWNLOAD_PROXY: ${SHENNONG_DOWNLOAD_PROXY:-}
+      SHENNONG_DOWNLOAD_CONCURRENCY: ${SHENNONG_DOWNLOAD_CONCURRENCY:-8}
+      SHENNONG_DOWNLOAD_TIMEOUT_SECS: ${SHENNONG_DOWNLOAD_TIMEOUT_SECS:-300}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
