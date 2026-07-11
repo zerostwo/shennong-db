@@ -1253,8 +1253,8 @@ impl ResourceRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderError, ProviderInstaller, build_gene_index_with_checksum, decompress_gzip, ensure_disk_space,
-        validate_checksum, verify_checksum,
+        ProviderError, ProviderInstaller, build_gene_index_with_checksum, decompress_gzip,
+        ensure_disk_space, validate_checksum, verify_checksum,
     };
     use sha2::{Digest, Sha256};
     use std::env::temp_dir;

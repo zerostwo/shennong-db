@@ -2,23 +2,24 @@ use async_trait::async_trait;
 use serde_json::Value;
 use shennong_schema::{Artifact, Resource, ResourceQuery};
 use shennong_storage::{ArtifactUri, BlobStore, ByteRange};
+use std::{
+    collections::HashMap,
+    io::{BufRead, BufReader, Cursor},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 #[cfg(test)]
 use std::{
     fs::File,
     io::{Seek, SeekFrom},
     path::Path,
 };
-use std::{
-    io::{BufRead, BufReader, Cursor},
-    process::Stdio,
-    sync::Arc,
-    time::Duration,
-};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader as AsyncBufReader},
     process::{Child, Command},
-    sync::Semaphore,
+    sync::{RwLock, Semaphore},
 };
 
 pub const MAX_QUERY_ROWS: u64 = 10_000;
@@ -26,6 +27,7 @@ pub const MAX_QUERY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const TILED_B_IO_CHUNK_BYTES: usize = 8 * 1024;
 const MAX_METADATA_ROWS: usize = 1_000_000;
 const MAX_METADATA_LINE_BYTES: usize = 1024 * 1024;
+const MAX_METADATA_CACHE_ENTRIES: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum QueryError {
@@ -447,6 +449,7 @@ fn valid_context_value(value: &Value) -> bool {
 
 pub struct FileExpressionAdapter {
     storage: Arc<dyn BlobStore>,
+    text_cache: Arc<RwLock<HashMap<String, Arc<String>>>>,
 }
 
 impl FileExpressionAdapter {
@@ -456,6 +459,7 @@ impl FileExpressionAdapter {
     {
         Self {
             storage: Arc::new(storage),
+            text_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -517,6 +521,7 @@ impl QueryAdapter for FileExpressionAdapter {
                 metadata.storage_uri.as_deref().unwrap_or(&metadata.uri),
                 Some(&query.context),
                 metadata.schema_json.get("context_fields"),
+                &self.text_cache,
             )
             .await?;
         }
@@ -534,6 +539,7 @@ impl QueryAdapter for FileExpressionAdapter {
                 survival.storage_uri.as_deref().unwrap_or(&survival.uri),
                 None,
                 None,
+                &self.text_cache,
             )
             .await?;
         }
@@ -612,7 +618,6 @@ fn apply_metadata(
     Ok(())
 }
 
-#[cfg(test)]
 fn join_metadata(
     response: &mut Value,
     input: &str,
@@ -647,33 +652,30 @@ async fn join_metadata_from_blob(
     uri: &str,
     context: Option<&Value>,
     context_fields: Option<&Value>,
+    cache: &Arc<RwLock<HashMap<String, Arc<String>>>>,
 ) -> Result<(), QueryError> {
-    let uri = ArtifactUri::parse(uri)?;
-    let mut lines = AsyncBufReader::new(storage.get_stream(&uri).await?).lines();
-    let columns: Vec<String> = lines
-        .next_line()
-        .await?
-        .ok_or(QueryError::MalformedArtifact)?
-        .split('\t')
-        .map(str::to_owned)
-        .collect();
-    let mut rows = std::collections::HashMap::new();
-    while let Some(line) = lines.next_line().await? {
-        if line.len() > MAX_METADATA_LINE_BYTES || rows.len() >= MAX_METADATA_ROWS {
-            return Err(QueryError::ResponseTooLarge);
-        }
-        let values: Vec<_> = line.split('\t').collect();
-        let Some(sample) = values.first().map(|value| (*value).to_owned()) else {
-            continue;
-        };
-        let metadata = columns
-            .iter()
-            .zip(values)
-            .map(|(column, value)| (column.clone(), value.to_string()))
-            .collect();
-        rows.insert(sample, metadata);
+    let input = cached_text(storage, uri, cache).await?;
+    join_metadata(response, &input, context, context_fields)
+}
+
+async fn cached_text(
+    storage: &dyn BlobStore,
+    uri: &str,
+    cache: &Arc<RwLock<HashMap<String, Arc<String>>>>,
+) -> Result<Arc<String>, QueryError> {
+    if let Some(value) = cache.read().await.get(uri).cloned() {
+        return Ok(value);
     }
-    apply_metadata(response, &rows, context, context_fields)
+    let parsed = ArtifactUri::parse(uri)?;
+    let value = Arc::new(read_small_text(storage, &parsed).await?);
+    let mut values = cache.write().await;
+    if values.len() >= MAX_METADATA_CACHE_ENTRIES
+        && let Some(key) = values.keys().next().cloned()
+    {
+        values.remove(&key);
+    }
+    values.insert(uri.to_owned(), value.clone());
+    Ok(value)
 }
 
 fn truncate_response(response: &mut Value, query: &ResourceQuery) {
