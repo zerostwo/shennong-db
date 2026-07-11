@@ -20,7 +20,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
       - name: Audit dependencies
-        run: cargo install cargo-audit --locked && cargo audit
+        # jsonwebtoken records optional RSA crates in Cargo.lock, but its default
+        # features are disabled and `cargo tree -i rsa` has no enabled path.
+        run: cargo install cargo-audit --locked && cargo audit --ignore RUSTSEC-2023-0071
       - name: License and policy scan
         run: cargo install cargo-deny --locked && cargo deny check
 
