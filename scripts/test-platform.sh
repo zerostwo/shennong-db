@@ -237,6 +237,10 @@ curl --noproxy '*' --fail --silent -H "$json" \
   -d '{"resource":"fixture-public","operation":"expression","features":[{"type":"gene","name":"GENE1"},{"type":"gene","name":"GENE2"}],"options":{"limit":2}}' \
   "$base/api/v1/query/batch" \
   | jq -e '.data.status == "success" and .data.meta.batch == true and .data.meta.n_rows == 2' >/dev/null
+curl --noproxy '*' --fail --silent -H "$json" \
+  -d '{"resource":"fixture-public","operation":"expression","feature":{"type":"gene","name":"GENE1"},"options":{"limit":1,"cursor":"1"}}' \
+  "$base/api/v1/query" \
+  | jq -e '.data.status == "success" and .data.data[0].observation_id == "S2" and .data.meta.total_rows == 3 and .data.meta.next_cursor == "2"' >/dev/null
 
 put_tiledb_resource() {
   id=$1

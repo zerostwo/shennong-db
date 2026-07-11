@@ -26,7 +26,7 @@ use shennong_schema::{
     ArtifactUpsert, Capabilities, RelationUpsert, ResourceInstallRequest, ResourcePermissions,
     ResourceQuery, ResourceUpsert, TokenIssueRequest, UserUpsert, Visibility,
 };
-use shennong_storage::{LocalObjectStorage, ObjectStorage};
+use shennong_storage::{ArtifactUri, BlobStore, LocalObjectStorage};
 use std::{
     collections::HashMap,
     env, io,
@@ -551,7 +551,7 @@ async fn capabilities() -> Json<Envelope<serde_json::Value>> {
     data["batch_features"] = true.into();
     data["metadata_views"] = false.into();
     data["axes"] = false.into();
-    data["cursor"] = false.into();
+    data["cursor"] = true.into();
     data["arrow"] = false.into();
     data["structured_errors"] = true.into();
     data["artifact_streaming"] = true.into();
@@ -776,7 +776,22 @@ async fn resolve_local_gene(
     }) else {
         return Ok(Vec::new());
     };
-    let input = state.storage.read(&mapping.uri).await.map_err(|error| {
+    let uri = ArtifactUri::parse(&mapping.uri).map_err(|error| {
+        tracing::error!(%error, "gene map read failed");
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "gene map is unavailable".into(),
+        )
+    })?;
+    let mut reader = state.storage.get_stream(&uri).await.map_err(|error| {
+        tracing::error!(%error, "gene map read failed");
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "gene map is unavailable".into(),
+        )
+    })?;
+    let mut input = String::new();
+    reader.read_to_string(&mut input).await.map_err(|error| {
         tracing::error!(%error, "gene map read failed");
         ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -784,7 +799,7 @@ async fn resolve_local_gene(
         )
     })?;
     let query_value = query.to_lowercase();
-    Ok(String::from_utf8_lossy(&input)
+    Ok(input
         .lines()
         .skip(1)
         .filter_map(|line| {

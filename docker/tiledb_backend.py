@@ -55,7 +55,7 @@ def ingest(source, uri):
     return describe(uri)
 
 
-def query(uri, feature, limit):
+def query(uri, feature, limit, offset=0):
     with tiledb.open(uri, "r") as array:
         feature_ids = json.loads(array.meta["feature_ids"])
         feature_names = json.loads(array.meta["feature_names"])
@@ -70,7 +70,7 @@ def query(uri, feature, limit):
         result = array.query(attrs=["value"], coords=True).multi_index[feature_index, slice(None)]
     order = np.argsort(result["cell"])
     rows = []
-    for index in order[:limit]:
+    for index in order[offset:offset + limit]:
         cell = int(result["cell"][index])
         rows.append({
             "observation_id": barcodes[cell],
@@ -87,6 +87,8 @@ def query(uri, feature, limit):
         "meta": {
             "backend": "tiledb",
             "n_rows": len(rows),
+            "total_rows": len(order),
+            **({"next_cursor": str(offset + limit)} if offset + limit < len(order) else {}),
             "feature_id": feature_ids[feature_index],
             "feature_symbol": feature_names[feature_index],
             "columns": ["cell_id", "feature_id", "feature_symbol", "value"],
@@ -121,6 +123,7 @@ def main():
     query_parser.add_argument("--uri", required=True)
     query_parser.add_argument("--feature", required=True)
     query_parser.add_argument("--limit", type=int, default=1000)
+    query_parser.add_argument("--offset", type=int, default=0)
     resolve_parser = commands.add_parser("resolve")
     resolve_parser.add_argument("--uri", required=True)
     resolve_parser.add_argument("--feature", required=True)
@@ -130,7 +133,7 @@ def main():
     if arguments.command == "ingest":
         output = ingest(arguments.source, arguments.uri)
     elif arguments.command == "query":
-        output = query(arguments.uri, arguments.feature, max(1, min(arguments.limit, 100000)))
+        output = query(arguments.uri, arguments.feature, max(1, min(arguments.limit, 100000)), max(0, arguments.offset))
     elif arguments.command == "resolve":
         output = resolve(arguments.uri, arguments.feature)
     else:

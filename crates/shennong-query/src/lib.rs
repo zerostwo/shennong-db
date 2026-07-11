@@ -1,18 +1,22 @@
 use async_trait::async_trait;
 use serde_json::Value;
 use shennong_schema::{Artifact, Resource, ResourceQuery};
-use shennong_storage::{LocalObjectStorage, ObjectStorage};
+use shennong_storage::{ArtifactUri, BlobStore, ByteRange, LocalObjectStorage};
+#[cfg(test)]
 use std::{
     fs::File,
-    io::{BufRead, BufReader, Cursor, Seek, SeekFrom},
+    io::{Seek, SeekFrom},
     path::Path,
+};
+use std::{
+    io::{BufRead, BufReader, Cursor},
     process::Stdio,
     sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader as AsyncBufReader},
     process::{Child, Command},
     sync::Semaphore,
 };
@@ -94,7 +98,17 @@ pub async fn execute_tiledb_expression(
         .and_then(Value::as_u64)
         .unwrap_or(1_000)
         .clamp(1, MAX_QUERY_ROWS);
+    let offset = query
+        .options
+        .get("cursor")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
+        .unwrap_or(0);
     let limit = limit.to_string();
+    let offset = offset.to_string();
     let output = run_tiledb(
         executor,
         [
@@ -106,6 +120,8 @@ pub async fn execute_tiledb_expression(
             &feature.name,
             "--limit",
             &limit,
+            "--offset",
+            &offset,
         ],
     )
     .await?;
@@ -157,8 +173,17 @@ pub async fn execute_clickhouse_expression(
         .and_then(Value::as_u64)
         .unwrap_or(1_000)
         .clamp(1, MAX_QUERY_ROWS);
+    let offset = query
+        .options
+        .get("cursor")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
+        .unwrap_or(0);
     let statement = format!(
-        "SELECT sample_id, anyLast(value) AS value FROM shennong.expression_cache WHERE dataset = '{}' AND version = '{}' AND feature = '{}' GROUP BY sample_id ORDER BY sample_id LIMIT {limit} FORMAT JSON",
+        "SELECT sample_id, anyLast(value) AS value FROM shennong.expression_cache WHERE dataset = '{}' AND version = '{}' AND feature = '{}' GROUP BY sample_id ORDER BY sample_id LIMIT {limit} OFFSET {offset} FORMAT JSON",
         quote(&resource.id),
         quote(version),
         quote(&feature.name),
@@ -445,17 +470,23 @@ impl QueryAdapter for FileExpressionAdapter {
                         == Some("expression")
             })
             .ok_or(QueryError::NoArtifact)?;
-        let path = self.storage.resolve(&artifact.uri)?;
-        let index = artifact
+        let artifact_uri = ArtifactUri::parse(&artifact.uri)?;
+        let index_uri = artifact
             .schema_json
             .get("index_uri")
             .and_then(Value::as_str)
-            .map(|uri| self.storage.resolve(uri))
+            .map(ArtifactUri::parse)
             .transpose()?;
         let mut scan_query = query.clone();
         scan_query.options = serde_json::json!({"limit": MAX_QUERY_ROWS});
-        let mut response =
-            expression_response_from_file(resource, &scan_query, &path, index.as_deref())?;
+        let mut response = expression_response_from_blob(
+            &self.storage,
+            resource,
+            &scan_query,
+            &artifact_uri,
+            index_uri.as_ref(),
+        )
+        .await?;
         if query
             .context
             .as_object()
@@ -468,8 +499,7 @@ impl QueryAdapter for FileExpressionAdapter {
                         == Some("sample_metadata")
                 })
                 .ok_or(QueryError::NoArtifact)?;
-            let input =
-                String::from_utf8_lossy(&self.storage.read(&metadata.uri).await?).into_owned();
+            let input = read_text(&self.storage, &metadata.uri).await?;
             join_metadata(
                 &mut response,
                 &input,
@@ -485,8 +515,7 @@ impl QueryAdapter for FileExpressionAdapter {
                         == Some("survival_metadata")
                 })
                 .ok_or(QueryError::NoArtifact)?;
-            let input =
-                String::from_utf8_lossy(&self.storage.read(&survival.uri).await?).into_owned();
+            let input = read_text(&self.storage, &survival.uri).await?;
             join_metadata(&mut response, &input, None, None)?;
         }
         if query.operation == "embedding_expression" {
@@ -501,8 +530,7 @@ impl QueryAdapter for FileExpressionAdapter {
                             .is_some_and(|role| role.starts_with("embedding"))
                 })
                 .ok_or(QueryError::NoArtifact)?;
-            let input =
-                String::from_utf8_lossy(&self.storage.read(&embedding.uri).await?).into_owned();
+            let input = read_text(&self.storage, &embedding.uri).await?;
             attach_embedding(&mut response, &input)?;
         }
         truncate_response(&mut response, query);
@@ -587,8 +615,115 @@ fn truncate_response(response: &mut Value, query: &ResourceQuery) {
         .unwrap_or(1_000)
         .clamp(1, MAX_QUERY_ROWS) as usize;
     if let Some(rows) = response.get_mut("data").and_then(Value::as_array_mut) {
-        rows.truncate(limit);
+        let total = rows.len();
+        let offset = query
+            .options
+            .get("cursor")
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+            })
+            .unwrap_or(0) as usize;
+        let start = offset.min(total);
+        let end = start.saturating_add(limit).min(total);
+        let page = rows[start..end].to_vec();
+        *rows = page;
         response["meta"]["n_rows"] = rows.len().into();
+        response["meta"]["total_rows"] = total.into();
+        if end < total {
+            response["meta"]["next_cursor"] = end.to_string().into();
+        } else if let Some(meta) = response.get_mut("meta").and_then(Value::as_object_mut) {
+            meta.remove("next_cursor");
+        }
+    }
+}
+
+async fn read_text(storage: &LocalObjectStorage, uri: &str) -> Result<String, QueryError> {
+    let uri = ArtifactUri::parse(uri)?;
+    let mut reader = storage.get_stream(&uri).await?;
+    let mut value = String::new();
+    reader.read_to_string(&mut value).await?;
+    Ok(value)
+}
+
+async fn expression_response_from_blob(
+    storage: &LocalObjectStorage,
+    resource: &Resource,
+    query: &ResourceQuery,
+    artifact_uri: &ArtifactUri,
+    index_uri: Option<&ArtifactUri>,
+) -> Result<Value, QueryError> {
+    let Some(index_uri) = index_uri else {
+        let stream = storage.get_stream(artifact_uri).await?;
+        let mut reader = AsyncBufReader::new(stream);
+        let mut header = String::new();
+        if reader.read_line(&mut header).await? == 0 {
+            return Err(QueryError::MalformedArtifact);
+        }
+        let feature = query.feature.as_ref().ok_or(QueryError::Unsupported)?;
+        let mut row = String::new();
+        loop {
+            row.clear();
+            if reader.read_line(&mut row).await? == 0 {
+                return Err(QueryError::NoArtifact);
+            }
+            if row
+                .split(['\t', ','])
+                .next()
+                .is_some_and(|value| value == feature.name)
+            {
+                return expression_response(resource, query, &format!("{header}{row}"));
+            }
+            if row.len() > MAX_QUERY_RESPONSE_BYTES {
+                return Err(QueryError::ResponseTooLarge);
+            }
+        }
+    };
+    let index = read_text(storage, &index_uri.to_string()).await?;
+    let offsets: Value = serde_json::from_str(&index)?;
+    let feature = query.feature.as_ref().ok_or(QueryError::Unsupported)?;
+    let offset = offsets
+        .get("offsets")
+        .and_then(|items| items.get(&feature.name))
+        .and_then(Value::as_u64)
+        .ok_or(QueryError::NoArtifact)?;
+    let meta = storage.head(artifact_uri).await?;
+    let header_end = meta.size.min(1024 * 1024).saturating_sub(1);
+    let mut header_reader = storage
+        .get_range(
+            artifact_uri,
+            ByteRange::new(0, header_end).map_err(|_| QueryError::NoArtifact)?,
+        )
+        .await?;
+    let mut header_chunk = Vec::new();
+    header_reader.read_to_end(&mut header_chunk).await?;
+    let header = String::from_utf8_lossy(&header_chunk)
+        .lines()
+        .next()
+        .ok_or(QueryError::MalformedArtifact)?
+        .to_owned();
+    let mut width = 64 * 1024_u64;
+    loop {
+        let end = offset
+            .saturating_add(width)
+            .min(meta.size.saturating_sub(1));
+        let mut row_reader = storage
+            .get_range(
+                artifact_uri,
+                ByteRange::new(offset, end).map_err(|_| QueryError::NoArtifact)?,
+            )
+            .await?;
+        let mut row_chunk = Vec::new();
+        row_reader.read_to_end(&mut row_chunk).await?;
+        let row = String::from_utf8_lossy(&row_chunk);
+        if let Some(line) = row.lines().next() {
+            return expression_response(resource, query, &format!("{header}\n{line}\n"));
+        }
+        if end >= meta.size.saturating_sub(1) || width >= MAX_QUERY_RESPONSE_BYTES as u64 {
+            return Err(QueryError::NoArtifact);
+        }
+        width = width.saturating_mul(2);
     }
 }
 
@@ -600,6 +735,7 @@ fn expression_response(
     expression_response_from_reader(resource, query, BufReader::new(Cursor::new(input)))
 }
 
+#[cfg(test)]
 fn expression_response_from_file(
     resource: &Resource,
     query: &ResourceQuery,
@@ -727,7 +863,7 @@ mod tests {
     use super::{
         MAX_QUERY_ROWS, QueryError, QueryPlanner, TiledbExecutor, attach_embedding,
         execute_clickhouse_expression, execute_tiledb_expression, expression_response,
-        expression_response_from_file, join_metadata,
+        expression_response_from_file, join_metadata, truncate_response,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -850,6 +986,27 @@ esac
         let response =
             expression_response(&resource, &query, "gene\tS1\tS2\nYTHDF2\t1.2\t3\n").unwrap();
         assert_eq!(response["meta"]["n_rows"], 1);
+    }
+
+    #[test]
+    fn applies_cursor_pages_without_losing_total_rows() {
+        let mut response = json!({"data":[
+            {"observation_id":"S1"},
+            {"observation_id":"S2"},
+            {"observation_id":"S3"},
+            {"observation_id":"S4"}
+        ],"meta":{}});
+        let query: ResourceQuery = serde_json::from_value(json!({
+            "resource":"toil","operation":"expression",
+            "feature":{"type":"gene","name":"YTHDF2"},
+            "options":{"limit":2,"cursor":"1"}
+        }))
+        .unwrap();
+        truncate_response(&mut response, &query);
+        assert_eq!(response["data"].as_array().unwrap().len(), 2);
+        assert_eq!(response["data"][0]["observation_id"], "S2");
+        assert_eq!(response["meta"]["total_rows"], 4);
+        assert_eq!(response["meta"]["next_cursor"], "3");
     }
 
     #[test]
