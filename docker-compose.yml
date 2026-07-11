@@ -6,4 +6,3 @@ services:
       - "18080:8000"
     volumes:
       - ./data:/data
-      - ./db:/var/lib/postgresql/data

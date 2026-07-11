@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-export PGDATA="${PGDATA:-/var/lib/postgresql/data}"
+export PGDATA="${PGDATA:-/data/postgresql}"
 export POSTGRES_USER="${POSTGRES_USER:-shennong}"
 export POSTGRES_DB="${POSTGRES_DB:-shennong}"
 
@@ -21,8 +21,9 @@ case "${SHENNONG_ROLE:-all}" in
     ;;
 esac
 
-mkdir -p "$PGDATA" /data/resources /data/clickhouse /data/tiledb /data/seaweedfs /var/log/clickhouse-server /var/lib/clickhouse
-chown -R postgres:postgres "$PGDATA" /data/resources /data/clickhouse /data/tiledb /data/seaweedfs /var/log/clickhouse-server /var/lib/clickhouse
+mkdir -p "$PGDATA" /data/work /data/clickhouse /data/tiledb /data/objects /var/log/clickhouse-server /var/lib/clickhouse
+chmod 755 /data
+chown -R postgres:postgres "$PGDATA" /data/work /data/clickhouse /data/tiledb /data/objects /var/log/clickhouse-server /var/lib/clickhouse
 
 secret_file=/data/.shennong-secrets
 if [ ! -s "$secret_file" ]; then
@@ -30,11 +31,22 @@ if [ ! -s "$secret_file" ]; then
   {
     printf 'SHENNONG_DEFAULT_ADMIN_API_KEY=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)"
     printf 'SHENNONG_DEFAULT_JWT_SECRET=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)"
+    printf 'SHENNONG_DEFAULT_S3_SECRET=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)"
   } > "$secret_file"
+fi
+if ! grep -q '^SHENNONG_DEFAULT_S3_SECRET=' "$secret_file"; then
+  printf 'SHENNONG_DEFAULT_S3_SECRET=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)" >> "$secret_file"
 fi
 . "$secret_file"
 export SHENNONG_ADMIN_API_KEY="${SHENNONG_ADMIN_API_KEY:-$SHENNONG_DEFAULT_ADMIN_API_KEY}"
 export SHENNONG_JWT_SECRET="${SHENNONG_JWT_SECRET:-$SHENNONG_DEFAULT_JWT_SECRET}"
+export AWS_ACCESS_KEY_ID=shennong
+export AWS_SECRET_ACCESS_KEY="$SHENNONG_DEFAULT_S3_SECRET"
+cat > /data/s3.json <<EOF
+{"identities":[{"name":"shennong","credentials":[{"accessKey":"shennong","secretKey":"$SHENNONG_DEFAULT_S3_SECRET"}],"actions":["Admin","Read","Write"]}]}
+EOF
+chown postgres:postgres /data/s3.json
+chmod 600 /data/s3.json
 
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
   runuser -u postgres -- initdb -D "$PGDATA" --username="$POSTGRES_USER" --auth=trust
@@ -55,20 +67,27 @@ cache_ttl_days="${SHENNONG_CLICKHOUSE_CACHE_TTL_DAYS:-30}"
 sed "s/__TTL_DAYS__/${cache_ttl_days}/g" /app/clickhouse/001_expression_cache.sql \
   | clickhouse-client --host 127.0.0.1 --multiquery >/dev/null
 
-runuser -u postgres -- weed server -s3 -dir=/data/seaweedfs -ip=127.0.0.1 -s3.port=8333 &
+runuser -u postgres -- weed server -s3 -dir=/data/objects -ip=127.0.0.1 -s3.port=8333 -s3.config=/data/s3.json &
 seaweed_pid=$!
 for _ in $(seq 1 60); do
   wget -qO- http://127.0.0.1:8333/status >/dev/null 2>&1 && break
   sleep 1
 done
+printf 's3.bucket.create -name shennong\n' \
+  | runuser -u postgres -- weed shell -master=127.0.0.1:9333 -filer=127.0.0.1:8888 >/dev/null
 
 export SHENNONG_DATABASE_URL="${SHENNONG_DATABASE_URL:-postgres://${POSTGRES_USER}@127.0.0.1:5432/${POSTGRES_DB}}"
 runuser -u postgres -- "$@" &
 server_pid=$!
 
+HOSTNAME=0.0.0.0 PORT=8000 node /app/web/server.js &
+web_pid=$!
+
 shutdown() {
   kill -TERM "$server_pid" 2>/dev/null || true
   wait "$server_pid" 2>/dev/null || true
+  kill -TERM "$web_pid" 2>/dev/null || true
+  wait "$web_pid" 2>/dev/null || true
   kill -TERM "$clickhouse_pid" 2>/dev/null || true
   wait "$clickhouse_pid" 2>/dev/null || true
   kill -TERM "$seaweed_pid" 2>/dev/null || true
@@ -79,6 +98,8 @@ shutdown() {
 trap shutdown INT TERM
 
 wait "$server_pid" || status=$?
+kill -TERM "$web_pid" 2>/dev/null || true
+wait "$web_pid" 2>/dev/null || true
 kill -TERM "$clickhouse_pid" 2>/dev/null || true
 wait "$clickhouse_pid" 2>/dev/null || true
 kill -TERM "$seaweed_pid" 2>/dev/null || true

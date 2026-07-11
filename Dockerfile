@@ -8,6 +8,15 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 RUN cargo build --release --package shennong-server --package shennong-cli
 
+FROM mirror.gcr.io/library/node:24-bookworm-slim AS web-builder
+WORKDIR /app/web
+RUN corepack enable && corepack prepare pnpm@10.17.1 --activate
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web .
+ENV SHENNONG_API_INTERNAL_URL=http://127.0.0.1:8001
+RUN pnpm build
+
 FROM clickhouse/clickhouse-server:26.4.4.38 AS clickhouse
 
 FROM chrislusf/seaweedfs:4.39 AS seaweedfs
@@ -32,6 +41,9 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin shennong
 COPY --from=clickhouse /usr/bin/clickhouse /usr/bin/clickhouse
 COPY --from=clickhouse /etc/clickhouse-server /etc/clickhouse-server
 COPY --from=seaweedfs /usr/bin/weed /usr/local/bin/weed
+COPY --from=web-builder /usr/local /usr/local
+COPY --from=web-builder /app/web/.next/standalone /app/web
+COPY --from=web-builder /app/web/.next/static /app/web/.next/static
 COPY --from=builder /app/target/release/shennong-server /usr/local/bin/shennong-server
 COPY --from=builder /app/target/release/shennong-cli /usr/local/bin/shennong-cli
 COPY providers /app/providers
@@ -42,6 +54,7 @@ COPY docker/clickhouse/001_expression_cache.sql /app/clickhouse/001_expression_c
 COPY docker/tiledb_backend.py /app/tiledb_backend.py
 RUN chmod 755 /usr/local/bin/shennong-entrypoint \
     && chmod 755 /app/tiledb_backend.py \
+    && chmod -R a+rX /app/providers /app/seed \
     && chmod 644 /etc/clickhouse-server/config.d/shennong.xml \
     && ln -s /usr/bin/clickhouse /usr/bin/clickhouse-server \
     && ln -s /usr/bin/clickhouse /usr/bin/clickhouse-client \
@@ -49,8 +62,10 @@ RUN chmod 755 /usr/local/bin/shennong-entrypoint \
     && mkdir -p /data \
     && chown postgres:postgres /data
 
-ENV SHENNONG_BIND=0.0.0.0:8000 \
-    SHENNONG_LOCAL_DATA_ROOT=/data \
+ENV SHENNONG_BIND=127.0.0.1:8001 \
+    SHENNONG_API_INTERNAL_URL=http://127.0.0.1:8001 \
+    SHENNONG_LOCAL_DATA_ROOT=/data/work \
+    PGDATA=/data/postgresql \
     SHENNONG_PROVIDER_DIR=/app/providers \
     SHENNONG_STORAGE_BACKEND=s3 \
     SHENNONG_S3_BUCKET=shennong \
@@ -62,7 +77,7 @@ ENV SHENNONG_BIND=0.0.0.0:8000 \
     POSTGRES_USER=shennong \
     POSTGRES_DB=shennong
 
-VOLUME ["/data", "/var/lib/postgresql/data"]
+VOLUME ["/data"]
 EXPOSE 8000
 ENTRYPOINT ["shennong-entrypoint"]
 CMD ["shennong-server"]

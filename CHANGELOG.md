@@ -4,16 +4,19 @@
 
 ### Added
 
+- Serve the Next.js Web UI from the all-in-one image, including first-run administrator setup and provider installation controls.
 - Bundle SeaweedFS in the ShennongDB image and start it with PostgreSQL and ClickHouse.
 - Persist generated first-run admin and JWT secrets under `/data/.shennong-secrets`.
 
 ### Changed
 
-- Reduce the default and production Compose deployments to one service with two bind mounts.
+- Use pure S3 provider storage and a single `/data` mount with service-specific subdirectories.
+- Reduce the default and production Compose deployments to one service with one bind mount.
 - Publish release images with an additional `latest` tag.
 
 ### Fixed
 
+- Include endpoint ports in S3 signatures and remove provider staging data after publication.
 - Fetch full Git history for the GitHub Actions secret scan so gitleaks can resolve push ranges.
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)

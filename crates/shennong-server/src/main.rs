@@ -72,6 +72,7 @@ struct AppState {
     request_timeout: Duration,
     trust_proxy_headers: bool,
     cache_fill: Arc<AsyncMutex<()>>,
+    setup_lock: Arc<AsyncMutex<()>>,
     cache_hits: Arc<AtomicU64>,
     cache_misses: Arc<AtomicU64>,
     cache_max_bytes: u64,
@@ -467,9 +468,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.parse().ok())
         .filter(|value: &usize| *value > 0)
         .unwrap_or(64 * 1024);
-    let storage: Arc<dyn BlobStore> = if env::var("SHENNONG_STORAGE_BACKEND")
-        .is_ok_and(|value| value.eq_ignore_ascii_case("s3"))
-    {
+    let s3_storage =
+        env::var("SHENNONG_STORAGE_BACKEND").is_ok_and(|value| value.eq_ignore_ascii_case("s3"));
+    let storage: Arc<dyn BlobStore> = if s3_storage {
         let bucket = env::var("SHENNONG_S3_BUCKET").unwrap_or_else(|_| "shennong".into());
         Arc::new(S3ObjectStorage::new(S3Config::from_env(bucket)?)?)
     } else {
@@ -477,11 +478,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let state = AppState {
         repository: Arc::new(repository),
-        providers: Arc::new(ProviderInstaller::new(
-            env::var("SHENNONG_PROVIDER_DIR").unwrap_or_else(|_| "/app/providers".into()),
-            &data_root,
-            max_download_bytes,
-        )),
+        providers: Arc::new(if s3_storage {
+            ProviderInstaller::new(
+                env::var("SHENNONG_PROVIDER_DIR").unwrap_or_else(|_| "/app/providers".into()),
+                &data_root,
+                max_download_bytes,
+            )
+            .with_remote_storage(storage.clone())
+        } else {
+            ProviderInstaller::new(
+                env::var("SHENNONG_PROVIDER_DIR").unwrap_or_else(|_| "/app/providers".into()),
+                &data_root,
+                max_download_bytes,
+            )
+        }),
         storage,
         admin_key,
         jwt_secret,
@@ -511,6 +521,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         request_timeout,
         trust_proxy_headers,
         cache_fill: Arc::new(AsyncMutex::new(())),
+        setup_lock: Arc::new(AsyncMutex::new(())),
         cache_hits: Arc::new(AtomicU64::new(0)),
         cache_misses: Arc::new(AtomicU64::new(0)),
         cache_max_bytes: env::var("SHENNONG_CLICKHOUSE_CACHE_MAX_BYTES")
@@ -557,6 +568,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/agent/resources/{id}/metadata", get(agent_metadata))
         .route("/api/v1/genes/resolve", get(resolve_gene))
         .route("/api/v1/users", get(list_users))
+        .route("/api/v1/setup/status", get(setup_status))
+        .route("/api/v1/setup/admin", post(setup_admin))
         .route("/api/v1/users/{id}", get(get_user).put(upsert_user))
         .route(
             "/api/v1/users/{id}/tokens",
@@ -2192,6 +2205,54 @@ async fn list_users(
     let data = state
         .repository
         .list_users()
+        .await
+        .map_err(database_error)?;
+    Ok(Json(Envelope { data }))
+}
+
+#[derive(serde::Deserialize)]
+struct SetupAdminRequest {
+    display_name: String,
+    email: String,
+    password: String,
+}
+
+async fn setup_status(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    let needs_setup = !state.repository.has_users().await.map_err(database_error)?;
+    Ok(Json(serde_json::json!({"needs_setup": needs_setup})))
+}
+
+async fn setup_admin(
+    State(state): State<AppState>,
+    Json(value): Json<SetupAdminRequest>,
+) -> Result<Json<Envelope<shennong_schema::User>>, ApiError> {
+    let _guard = state.setup_lock.lock().await;
+    if state.repository.has_users().await.map_err(database_error)? {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "instance is already configured".into(),
+        ));
+    }
+    let user = UserUpsert {
+        id: "admin".into(),
+        display_name: value.display_name,
+        email: Some(value.email),
+        role: "admin".into(),
+        status: "active".into(),
+        password: None,
+        password_hash: Some(hash_password(&value.password)),
+        totp_secret: None,
+    };
+    validate_user(&user, "admin")?;
+    if value.password.len() < 12 || value.password.len() > 1024 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "password must be 12..1024 characters".into(),
+        ));
+    }
+    let data = state
+        .repository
+        .upsert_user(&user)
         .await
         .map_err(database_error)?;
     Ok(Json(Envelope { data }))

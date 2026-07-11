@@ -3,7 +3,7 @@ use shennong_schema::{
     Artifact, ArtifactUpsert, AuditEvent, ProviderFile, ProviderManifest, Relation, RelationUpsert,
     Resource, ResourcePermissions, ResourceUpsert, User, UserUpsert,
 };
-use shennong_storage::{ArtifactUri, BlobStore, LocalObjectStorage};
+use shennong_storage::{ArtifactUri, BlobStore, LocalObjectStorage, ObjectKey};
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use std::{
     collections::BTreeMap,
@@ -60,6 +60,8 @@ pub enum ProviderError {
     #[error(transparent)]
     Http(#[from] reqwest::Error),
     #[error(transparent)]
+    Storage(#[from] shennong_storage::StorageError),
+    #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
 
@@ -108,6 +110,7 @@ pub struct ProviderInstaller {
     download_timeout: Duration,
     allow_unverified: bool,
     storage: std::sync::Arc<dyn BlobStore>,
+    remote_storage: Option<std::sync::Arc<dyn BlobStore>>,
 }
 
 struct PreparedFile {
@@ -134,7 +137,13 @@ impl ProviderInstaller {
             allow_unverified: std::env::var("SHENNONG_PROVIDER_ALLOW_UNVERIFIED")
                 .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
             storage: std::sync::Arc::new(LocalObjectStorage::new(data_root)),
+            remote_storage: None,
         }
+    }
+
+    pub fn with_remote_storage(mut self, storage: std::sync::Arc<dyn BlobStore>) -> Self {
+        self.remote_storage = Some(storage);
+        self
     }
 
     pub async fn install(
@@ -388,12 +397,49 @@ impl ProviderInstaller {
                 return Err(error);
             }
         }
+        if let Some(storage) = &self.remote_storage {
+            let mut uri_map = Vec::new();
+            for artifact in &mut artifacts {
+                if artifact.storage_backend != "local" {
+                    continue;
+                }
+                let source = PathBuf::from(&artifact.uri);
+                let relative = source
+                    .strip_prefix(final_directory)
+                    .map_err(|_| ProviderError::MissingArtifact)?;
+                let key = ObjectKey::new(&format!(
+                    "resources/{}/{}/{}",
+                    manifest.name,
+                    manifest.version,
+                    relative.to_string_lossy()
+                ))?;
+                let mut reader = fs::File::open(&source).await?;
+                let uri = storage.put_stream(&key, &mut reader).await?;
+                uri_map.push((artifact.uri.clone(), uri.to_string()));
+                artifact.uri = uri.to_string();
+                artifact.storage_uri = Some(artifact.uri.clone());
+                artifact.storage_backend = "s3".into();
+            }
+            for artifact in &mut artifacts {
+                if let Some(index_uri) = artifact.schema_json.get_mut("index_uri") {
+                    if let Some((_, remote)) = uri_map
+                        .iter()
+                        .find(|(local, _)| index_uri.as_str() == Some(local))
+                    {
+                        *index_uri = remote.clone().into();
+                    }
+                }
+            }
+        }
         let result = repository
             .publish_ingestion(&job.id, &resource, &artifacts)
             .await
             .map_err(ProviderError::Database);
-        if result.is_err() {
+        if result.is_err() || self.remote_storage.is_some() {
             let _ = fs::remove_dir_all(final_directory).await;
+            if let Some(parent) = final_directory.parent() {
+                let _ = fs::remove_dir(parent).await;
+            }
         }
         result
     }
@@ -788,6 +834,7 @@ impl ProviderError {
             Self::Io(_) => "provider_io_failed",
             Self::Json(_) => "provider_json_invalid",
             Self::Http(_) => "provider_http_failed",
+            Self::Storage(_) => "provider_storage_failed",
             Self::Database(_) => "provider_database_failed",
         }
     }
@@ -1334,6 +1381,12 @@ impl ResourceRepository {
     pub async fn list_users(&self) -> Result<Vec<User>, sqlx::Error> {
         sqlx::query_as("SELECT id, display_name, email, role, status, created_at, updated_at FROM users ORDER BY id")
             .fetch_all(&self.pool)
+            .await
+    }
+
+    pub async fn has_users(&self) -> Result<bool, sqlx::Error> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users)")
+            .fetch_one(&self.pool)
             .await
     }
 

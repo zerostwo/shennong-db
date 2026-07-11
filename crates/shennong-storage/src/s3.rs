@@ -172,10 +172,12 @@ impl S3ObjectStorage {
         headers: HeaderMap,
         body: Option<reqwest::Body>,
     ) -> Result<reqwest::Response, StorageError> {
+        let request_label = format!("{method} {url}");
         let response = self.request(method, url, headers, body).await?;
         if response.status().is_success() {
             Ok(response)
         } else {
+            eprintln!("S3 {request_label} failed with {}", response.status());
             Err(StorageError::Http)
         }
     }
@@ -309,7 +311,7 @@ impl S3ObjectStorage {
             "GET\n{}\n{}\nhost:{}\n\nhost\nUNSIGNED-PAYLOAD",
             canonical_uri(&url),
             canonical_query(&url),
-            url.host_str().ok_or(StorageError::InvalidUri)?
+            canonical_host(&url)?
         );
         let string_to_sign = format!(
             "AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{}",
@@ -502,6 +504,12 @@ fn canonical_uri(url: &Url) -> String {
         url.path().into()
     }
 }
+fn canonical_host(url: &Url) -> Result<String, StorageError> {
+    let host = url.host_str().ok_or(StorageError::InvalidUri)?;
+    Ok(url
+        .port()
+        .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}")))
+}
 fn canonical_query(url: &Url) -> String {
     let mut values: Vec<_> = url
         .query_pairs()
@@ -553,7 +561,7 @@ fn sign_request(request: &mut Request, config: &S3Config) -> Result<(), StorageE
             token.parse().map_err(|_| StorageError::Protocol)?,
         );
     }
-    let host = request.url().host_str().ok_or(StorageError::InvalidUri)?;
+    let host = canonical_host(request.url())?;
     let scope = format!("{date}/{}/{}/aws4_request", config.region, "s3");
     let canonical_headers = format!(
         "host:{host}\nx-amz-content-sha256:UNSIGNED-PAYLOAD\nx-amz-date:{}\n",

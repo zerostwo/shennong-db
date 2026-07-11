@@ -130,6 +130,7 @@ export async function listRelations(resourceId: string): Promise<unknown[]> {
 }
 
 export async function listProviders(): Promise<unknown[]> { return request<unknown[]>("/providers"); }
+export async function installProvider(name: string): Promise<unknown> { return request("/resources/install", { method: "POST", body: JSON.stringify({ name }) }); }
 export async function listUsers(): Promise<unknown[]> { return request<unknown[]>("/users"); }
 export async function listAuditEvents(): Promise<unknown[]> { return request<unknown[]>("/audit-events"); }
 export async function getHealth(): Promise<Record<string, unknown>> {
@@ -162,6 +163,11 @@ export async function updateUser(user: { id: string; display_name: string; email
 
 export async function signIn(email: string, password: string): Promise<{ authenticated?: boolean; requires_2fa?: boolean; challenge?: string; user_id?: string; role?: string }> {
   return request("/auth/sign-in", { method: "POST", body: JSON.stringify({ email, password }) });
+}
+
+export async function getSetupStatus(): Promise<{ needs_setup: boolean }> { return request("/setup/status"); }
+export async function setupAdmin(display_name: string, email: string, password: string): Promise<unknown> {
+  return request("/setup/admin", { method: "POST", body: JSON.stringify({ display_name, email, password }) });
 }
 
 export async function verify2fa(challenge: string, code: string): Promise<{ authenticated: boolean; user_id: string; role: string }> {
