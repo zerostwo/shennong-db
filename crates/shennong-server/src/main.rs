@@ -1603,6 +1603,8 @@ async fn query_batch(
         ));
     }
     let mut rows = Vec::new();
+    let mut next_cursor = None;
+    let mut total_rows = None;
     for feature in value.features {
         let request = ResourceQuery {
             resource: value.resource.clone(),
@@ -1614,6 +1616,21 @@ async fn query_batch(
             options: value.options.clone(),
         };
         let response = query(State(state.clone()), headers.clone(), Json(request)).await?;
+        if next_cursor.is_none() {
+            next_cursor = response
+                .0
+                .data
+                .get("meta")
+                .and_then(|meta| meta.get("next_cursor"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            total_rows = response
+                .0
+                .data
+                .get("meta")
+                .and_then(|meta| meta.get("total_rows"))
+                .and_then(serde_json::Value::as_u64);
+        }
         if let Some(values) = response
             .0
             .data
@@ -1630,10 +1647,17 @@ async fn query_batch(
         }
     }
     let n_rows = rows.len();
+    let mut meta = serde_json::json!({"batch": true, "n_rows": n_rows});
+    if let Some(cursor) = next_cursor {
+        meta["next_cursor"] = cursor.into();
+    }
+    if let Some(total) = total_rows {
+        meta["total_rows"] = total.into();
+    }
     let data = serde_json::json!({
         "status": "success",
         "data": rows,
-        "meta": {"batch": true, "n_rows": n_rows}
+        "meta": meta
     });
     ensure_query_response_size(&data).map_err(query_error)?;
     Ok(Json(Envelope { data }))
