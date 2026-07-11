@@ -10,7 +10,7 @@ RUN cargo build --release --package shennong-server --package shennong-cli
 
 FROM clickhouse/clickhouse-server:26.4.4.38 AS clickhouse
 
-FROM chrislusf/seaweedfs:3.80 AS seaweedfs
+FROM chrislusf/seaweedfs:4.39 AS seaweedfs
 
 FROM postgres:17-bookworm
 
@@ -24,7 +24,7 @@ LABEL org.opencontainers.image.source="https://github.com/zerostwo/shennong-db" 
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes gzip python3 python3-venv wget \
     && python3 -m venv /opt/tiledb \
-    && /opt/tiledb/bin/pip install --no-cache-dir --retries 10 --timeout 120 h5py==3.16.0 numpy==2.3.5 tiledb==0.36.1 \
+    && /opt/tiledb/bin/pip install --no-cache-dir --retries 10 --timeout 120 setuptools==80.9.0 h5py==3.16.0 numpy==2.3.5 tiledb==0.36.1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin shennong
@@ -45,6 +45,7 @@ RUN chmod 755 /usr/local/bin/shennong-entrypoint \
     && chmod 644 /etc/clickhouse-server/config.d/shennong.xml \
     && ln -s /usr/bin/clickhouse /usr/bin/clickhouse-server \
     && ln -s /usr/bin/clickhouse /usr/bin/clickhouse-client \
+    && rm -f /usr/local/bin/gosu \
     && mkdir -p /data \
     && chown postgres:postgres /data
 
