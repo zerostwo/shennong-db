@@ -1,0 +1,124 @@
+{
+  "resources": [
+    {
+      "id": "toil",
+      "kind": "Dataset",
+      "metadata": {
+        "title": "TCGA TARGET GTEx Toil RNA-seq",
+        "summary": "Bulk RNA-seq expression matrix spanning TCGA, TARGET, and GTEx samples.",
+        "organism": "human",
+        "data_model": "bulk",
+        "assays": ["rna"],
+        "feature_identifier": "Ensembl gene ID with version suffix"
+      },
+      "spec": {
+        "version": "2026.07",
+        "backend": "local",
+        "operations": ["expression"]
+      },
+      "status": "available",
+      "provenance": {"source": "UCSC Xena Toil"},
+      "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
+    },
+    {
+      "id": "pbmc-1k",
+      "kind": "Dataset",
+      "metadata": {
+        "title": "PBMC 1K filtered feature matrix",
+        "summary": "10x Genomics PBMC single-cell filtered feature matrix in HDF5 format.",
+        "organism": "human",
+        "data_model": "single_cell",
+        "assays": ["scRNA-seq"]
+      },
+      "spec": {"version": "1k", "backend": "local", "operations": ["artifacts"]},
+      "status": "available",
+      "provenance": {"source": "10x Genomics"},
+      "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
+    },
+    {
+      "id": "pbmc-3k",
+      "kind": "Dataset",
+      "metadata": {
+        "title": "PBMC 3K filtered feature matrix",
+        "summary": "10x Genomics PBMC single-cell filtered feature matrix in HDF5 format.",
+        "organism": "human",
+        "data_model": "single_cell",
+        "assays": ["scRNA-seq"]
+      },
+      "spec": {"version": "3k", "backend": "local", "operations": ["artifacts"]},
+      "status": "available",
+      "provenance": {"source": "10x Genomics"},
+      "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
+    },
+    {
+      "id": "pbmc-4k",
+      "kind": "Dataset",
+      "metadata": {
+        "title": "PBMC 4K filtered feature matrix",
+        "summary": "10x Genomics PBMC single-cell filtered feature matrix in HDF5 format.",
+        "organism": "human",
+        "data_model": "single_cell",
+        "assays": ["scRNA-seq"]
+      },
+      "spec": {"version": "4k", "backend": "local", "operations": ["artifacts"]},
+      "status": "available",
+      "provenance": {"source": "10x Genomics"},
+      "permissions": {"visibility": "public", "read_scopes": ["resource.read"]}
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "toil-expression",
+      "resource_id": "toil",
+      "uri": "/data/toil/TcgaTargetGtex_rsem_gene_tpm.tsv",
+      "format": "tsv",
+      "size": 8983490058,
+      "checksum": null,
+      "storage_backend": "local",
+      "schema": {"role": "expression", "layout": "gene_by_sample", "index_uri": "/data/toil/TcgaTargetGtex_rsem_gene_tpm.tsv.idx.json"},
+      "provenance": {"source": "UCSC Xena Toil"}
+    },
+    {
+      "id": "pbmc-1k-matrix",
+      "resource_id": "pbmc-1k",
+      "uri": "/data/pbmc/pbmc1k_filtered_feature_bc_matrix.h5",
+      "format": "h5",
+      "size": 6749472,
+      "checksum": null,
+      "storage_backend": "local",
+      "schema": {"role": "expression_matrix", "layout": "10x_hdf5"},
+      "provenance": {"source": "10x Genomics"}
+    },
+    {
+      "id": "pbmc-3k-matrix",
+      "resource_id": "pbmc-3k",
+      "uri": "/data/pbmc/pbmc3k_filtered_feature_bc_matrix.h5",
+      "format": "h5",
+      "size": 5193554,
+      "checksum": null,
+      "storage_backend": "local",
+      "schema": {"role": "expression_matrix", "layout": "10x_hdf5"},
+      "provenance": {"source": "10x Genomics"}
+    },
+    {
+      "id": "pbmc-4k-matrix",
+      "resource_id": "pbmc-4k",
+      "uri": "/data/pbmc/pbmc4k_filtered_feature_bc_matrix.h5",
+      "format": "h5",
+      "size": 14159556,
+      "checksum": null,
+      "storage_backend": "local",
+      "schema": {"role": "expression_matrix", "layout": "10x_hdf5"},
+      "provenance": {"source": "10x Genomics"}
+    }
+  ],
+  "relations": [
+    {
+      "source": "pbmc-3k",
+      "target": "pbmc-1k",
+      "type": "related_dataset",
+      "evidence": {"basis": "same assay family"},
+      "provenance": {"source": "seed bundle"}
+    }
+  ]
+}

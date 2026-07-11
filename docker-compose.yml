@@ -1,24 +1,23 @@
 services:
   shennong-db:
-    image: zerostwo/shennong-db:latest
+    image: ${SHENNONG_IMAGE:-zerostwo/shennong-db:0.1.0}
     restart: unless-stopped
     ports:
-      - "${SHENNONG_PORT:-8000}:8000"
+      - "${SHENNONG_BIND_ADDRESS:-127.0.0.1}:${SHENNONG_PORT:-8000}:8000"
     environment:
-      SHENNONG_ENVIRONMENT: production
-      SHENNONG_DATA_ROOT: /data
+      SHENNONG_ADMIN_API_KEY: ${SHENNONG_ADMIN_API_KEY}
+      SHENNONG_JWT_SECRET: ${SHENNONG_JWT_SECRET}
       SHENNONG_LOCAL_DATA_ROOT: /data
-      SHENNONG_DATABASE_PATH: /data/shennong.db
-      SHENNONG_DOCS_ENABLED: "true"
+      SHENNONG_PROVIDER_DIR: /app/providers
     volumes:
       - ${SHENNONG_DATA_PATH:-./data}:/data
+      - shennong_metadata:/var/lib/postgresql/data
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+
+volumes:
+  shennong_metadata:

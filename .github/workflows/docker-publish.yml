@@ -8,6 +8,7 @@ on:
 
 env:
   DOCKERHUB_IMAGE: zerostwo/shennong-db
+  VERSION: 0.1.0
 
 jobs:
   publish:
@@ -44,4 +45,5 @@ jobs:
           push: true
           tags: |
             ${{ env.DOCKERHUB_IMAGE }}:latest
+            ${{ env.DOCKERHUB_IMAGE }}:${{ env.VERSION }}
           platforms: linux/amd64
