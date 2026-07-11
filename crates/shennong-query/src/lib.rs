@@ -24,6 +24,8 @@ use tokio::{
 pub const MAX_QUERY_ROWS: u64 = 10_000;
 pub const MAX_QUERY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const TILED_B_IO_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_METADATA_ROWS: usize = 1_000_000;
+const MAX_METADATA_LINE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum QueryError {
@@ -657,6 +659,9 @@ async fn join_metadata_from_blob(
         .collect();
     let mut rows = std::collections::HashMap::new();
     while let Some(line) = lines.next_line().await? {
+        if line.len() > MAX_METADATA_LINE_BYTES || rows.len() >= MAX_METADATA_ROWS {
+            return Err(QueryError::ResponseTooLarge);
+        }
         let values: Vec<_> = line.split('\t').collect();
         let Some(sample) = values.first().map(|value| (*value).to_owned()) else {
             continue;
@@ -964,6 +969,9 @@ async fn attach_embedding_from_blob(
         .ok_or(QueryError::MalformedArtifact)?;
     let mut rows = std::collections::HashMap::new();
     while let Some(line) = lines.next_line().await? {
+        if line.len() > MAX_METADATA_LINE_BYTES || rows.len() >= MAX_METADATA_ROWS {
+            return Err(QueryError::ResponseTooLarge);
+        }
         let values: Vec<_> = line.split(delimiter).map(str::to_owned).collect();
         let Some(id) = values.get(id_index) else {
             continue;
