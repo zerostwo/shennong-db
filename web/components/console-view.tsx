@@ -1,11 +1,52 @@
 "use client";
 
 import { useState } from "react";
+import { Check, Copy, KeyRound, LockKeyhole, Upload, UserRound } from "lucide-react";
+import { issueUserToken, ShennongApiError } from "@/lib/api/adapter";
+import { AppShell, SectionHeader, TinyBadge, TopBar } from "./app-shell";
+
+const tabs = ["API access", "Profile", "Security", "Sessions", "Login history", "Uploads", "Jobs"] as const;
+type Tab = (typeof tabs)[number];
 
 export function ConsoleView() {
-  const [tab, setTab] = useState("API access");
+  const [tab, setTab] = useState<Tab>("API access");
   const [token, setToken] = useState<string | null>(null);
+  const [message, setMessage] = useState("Live API actions require a signed-in session.");
   const [copied, setCopied] = useState(false);
-  const tabs = ["API access", "Profile", "Security", "Uploads", "Jobs"];
-  return <main className="shell" style={{ background: "#f3f7f7" }}><header style={{ background: "#102a2e", color: "white", padding: "18px 24px" }}><div style={{ maxWidth: 1180, margin: "auto", display: "flex", alignItems: "center", gap: 18 }}><a href="/catalog" style={{ fontWeight: 800 }}>ShennongDB</a><span style={{ opacity: .6 }}>/</span><span>Console</span><a href="/catalog" style={{ marginLeft: "auto", opacity: .8, fontSize: 13 }}>Back to catalog</a></div></header><section style={{ maxWidth: 1180, margin: "auto", padding: "44px 24px" }}><div className="eyebrow">User console</div><h1 style={{ fontSize: 40, letterSpacing: "-.03em", margin: "10px 0" }}>Your data access workspace</h1><p className="muted" style={{ maxWidth: 650 }}>Manage API credentials, account security, uploads, and ingestion jobs from one auditable surface.</p><div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "28px 0" }}>{tabs.map((value) => <button className={`button ${tab === value ? "primary" : ""}`} key={value} onClick={() => setTab(value)}>{value}</button>)}</div>{tab === "API access" && <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.4fr) minmax(280px, .8fr)", gap: 18 }}><div className="panel" style={{ padding: 24 }}><div className="eyebrow">Personal tokens</div><h2 style={{ margin: "8px 0" }}>API access</h2><p className="muted" style={{ fontSize: 14 }}>Tokens are shown once. Store them in a secret manager and never commit them to source control.</p><button className="button primary" onClick={() => setToken(`sng_live_${crypto.randomUUID().replaceAll("-", "")}`)}>Create token</button>{token && <div style={{ marginTop: 18, padding: 14, borderRadius: 10, background: "#102a2e", color: "#d7fffa", fontFamily: "ui-monospace", overflowWrap: "anywhere" }}><div style={{ fontSize: 12, opacity: .7, marginBottom: 8 }}>New token · copy now</div>{token}<button className="button" style={{ display: "block", marginTop: 12 }} onClick={() => { void navigator.clipboard?.writeText(token); setCopied(true); }}>{copied ? "Copied" : "Copy token"}</button></div>}</div><div className="panel" style={{ padding: 24 }}><div className="eyebrow">Usage · current month</div><div style={{ fontSize: 38, fontWeight: 800, margin: "10px 0" }}>18.4K</div><div className="muted">requests of 100K allowance</div><div style={{ height: 10, borderRadius: 99, background: "#e0eceb", marginTop: 20 }}><div style={{ width: "18%", height: "100%", background: "var(--teal)", borderRadius: 99 }} /></div><div className="muted" style={{ fontSize: 12, marginTop: 18 }}>Reset in 12 days · 99.7% success rate</div></div></div>}{tab !== "API access" && <div className="panel" style={{ padding: 28 }}><div className="eyebrow">{tab}</div><h2 style={{ margin: "8px 0" }}>{tab === "Profile" ? "Account profile" : tab === "Security" ? "Security controls" : tab === "Uploads" ? "Upload queue" : "Ingestion jobs"}</h2><p className="muted">This workspace is ready for the authenticated ShennongDB API. Changes are recorded in your audit trail.</p><div style={{ display: "grid", gap: 10, maxWidth: 600, marginTop: 20 }}>{["Owner: researcher@demo.org", "Organization: Demo Research", tab === "Security" ? "Two-factor authentication: enabled" : "Last updated: just now"].map((line) => <div className="pill" key={line}>{line}</div>)}</div></div>}</section></main>;
+
+  async function createToken() {
+    setMessage("Creating token…");
+    try {
+      const result = await issueUserToken("researcher");
+      setToken(result.token);
+      setMessage("Token created. It will not be shown again after leaving this page.");
+    } catch (error) {
+      setMessage(error instanceof ShennongApiError ? `${error.code}: ${error.message}` : "Token creation failed");
+    }
+  }
+
+  return <AppShell active="tokens">
+    <TopBar title="API Access" description="Manage personal tokens, usage, limits, and account security." search={false} />
+    <div className="console-page">
+      <div className="console-tabs" role="tablist">{tabs.map((value) => <button key={value} role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{value}</button>)}</div>
+      {tab === "API access" ? <div className="console-grid">
+        <div className="console-panel token-panel"><SectionHeader title="Personal tokens" description="Tokens are issued by the API and shown only once." action={<button className="primary-button" onClick={() => void createToken()}><KeyRound />Create token</button>} /><p className="muted">{message}</p>{token && <div className="secret-token"><code>{token}</code><button className="outline-button" onClick={() => { void navigator.clipboard?.writeText(token); setCopied(true); }}><Copy />{copied ? "Copied" : "Copy"}</button></div>}<table className="simple-table"><thead><tr><th>Token</th><th>Scopes</th><th>Created</th><th>Status</th></tr></thead><tbody><tr><td><code>sn_live_7Yx…</code></td><td>resource.read</td><td>—</td><td><TinyBadge tone="green">API-backed</TinyBadge></td></tr></tbody></table></div>
+        <div className="console-panel"><SectionHeader title="Usage" action={<TinyBadge tone="blue">Live data when signed in</TinyBadge>} /><div className="usage-placeholder"><strong>—</strong><span>Usage API is not implemented by the current Rust service.</span></div></div>
+      </div> : <ConsolePanel tab={tab} />}
+    </div>
+  </AppShell>;
+}
+
+function ConsolePanel({ tab }: { tab: Exclude<Tab, "API access"> }) {
+  const content: Record<Exclude<Tab, "API access">, { title: string; description: string; icon: typeof UserRound }> = {
+    Profile: { title: "Account profile", description: "Profile editing will use the authenticated user endpoint.", icon: UserRound },
+    Security: { title: "Security controls", description: "Password and two-factor enrollment require the web session API.", icon: LockKeyhole },
+    Sessions: { title: "Active sessions", description: "Session revocation will be enabled with the HttpOnly session service.", icon: LockKeyhole },
+    "Login history": { title: "Login history", description: "Login history is not exposed by the current Rust API.", icon: LockKeyhole },
+    Uploads: { title: "Upload queue", description: "Upload endpoints are not exposed by the current Rust API.", icon: Upload },
+    Jobs: { title: "Ingestion jobs", description: "Ingestion job endpoints are not exposed by the current Rust API.", icon: Upload }
+  };
+  const item = content[tab];
+  const Icon = item.icon;
+  return <div className="console-panel unsupported-panel"><Icon /><SectionHeader title={item.title} description={item.description} /><TinyBadge tone="amber">not_supported</TinyBadge></div>;
 }

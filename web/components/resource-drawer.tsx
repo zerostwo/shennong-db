@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, CheckCircle2, CircleSlash2, Code2, Copy, ExternalLink, FileBox, Globe2, LockKeyhole, X } from "lucide-react";
+import { CheckCircle2, CircleSlash2, Copy, ExternalLink, FileBox, Globe2, LockKeyhole, X } from "lucide-react";
 import type { ResourceRecord } from "@/lib/api/adapter";
 import { CopyButton, TinyBadge } from "./app-shell";
 

@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useState } from "react";
 import {
-  Activity, Archive, ArrowLeft, BarChart3, Beaker, BookOpen, Boxes, BriefcaseBusiness, ChevronDown, ChevronLeft,
-  ChevronRight, CircleHelp, ClipboardList, Cloud, Database, FileKey2, FileText, FolderKanban, Gauge, GitBranch,
+  Activity, Archive, ArrowLeft, BarChart3, Beaker, BookOpen, Boxes, ChevronDown, ChevronLeft,
+  ChevronRight, CircleHelp, ClipboardList, Cloud, Database, FileText, FolderKanban, Gauge, GitBranch,
   KeyRound, LayoutDashboard, ListFilter, LogOut, Menu, MoreHorizontal, PackageOpen, PanelLeft, Plus, Search,
   Settings, ShieldCheck, SlidersHorizontal, Tags, Users, X
 } from "lucide-react";
