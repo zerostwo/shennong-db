@@ -490,6 +490,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/users/{id}/tokens", post(issue_user_token))
         .route("/api/v1/query", post(query))
         .route("/api/v1/query/batch", post(query_batch))
+        .route("/api/v1/query/stream", post(query_stream))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1927,6 +1928,57 @@ async fn query_batch(
     Ok(Json(Envelope { data }))
 }
 
+async fn query_stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<BatchResourceQuery>,
+) -> Result<Response, ApiError> {
+    let format = value
+        .options
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("jsonl");
+    if format != "jsonl" {
+        return Err(ApiError(
+            StatusCode::NOT_IMPLEMENTED,
+            "Arrow IPC streaming is not enabled".into(),
+        ));
+    }
+    let response = query_batch(State(state), headers, Json(value)).await?;
+    let rows = response
+        .0
+        .data
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "stream result is malformed".into(),
+            )
+        })?;
+    let mut body = Vec::new();
+    for row in rows {
+        serde_json::to_writer(&mut body, row).map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream encoding failed".into(),
+            )
+        })?;
+        body.push(b'\n');
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/x-ndjson")
+        .header(CONTENT_LENGTH, body.len())
+        .body(Body::from(body))
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream response failed".into(),
+            )
+        })
+}
+
 fn limit_response(mut response: serde_json::Value, query: &ResourceQuery) -> serde_json::Value {
     let limit = query
         .options
@@ -2023,15 +2075,46 @@ fn validate_artifact(value: &ArtifactUpsert) -> Result<(), ApiError> {
     if !matches!(
         value.storage_backend.as_str(),
         "local" | "clickhouse" | "tiledb"
+    ) || !matches!(
+        value.data_class.as_str(),
+        "raw" | "canonical" | "derived" | "cache" | "staging"
     ) || !value.schema_json.is_object()
         || !value.provenance.is_object()
+        || !value.derived_from.is_array()
     {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported artifact backend or invalid schema".into(),
         ));
     }
+    if value.data_class == "raw"
+        && (!value.immutable
+            || value
+                .checksum
+                .as_deref()
+                .is_none_or(|hash| !valid_sha256(hash))
+            || value
+                .content_sha256
+                .as_deref()
+                .is_none_or(|hash| !valid_sha256(hash)))
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "raw artifacts require immutable sha256 content integrity".into(),
+        ));
+    }
+    if value.data_class == "derived" && value.derived_from.as_array().is_none_or(Vec::is_empty) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "derived artifacts require lineage".into(),
+        ));
+    }
     Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    let value = value.strip_prefix("sha256:").unwrap_or(value);
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 fn validate_relation(value: &RelationUpsert) -> Result<(), ApiError> {
     if !valid_identifier(&value.source)
@@ -2223,10 +2306,54 @@ mod tests {
             size: None,
             checksum: None,
             storage_backend: "s3".into(),
+            data_class: "canonical".into(),
+            immutable: false,
+            content_sha256: None,
+            source_uri: None,
+            derived_from: json!([]),
+            pipeline_version: None,
+            retention_policy: None,
+            storage_uri: None,
             schema_json: json!({}),
             provenance: json!({}),
         };
         assert!(validate_artifact(&artifact).is_err());
+    }
+
+    #[test]
+    fn enforces_artifact_lifecycle_integrity() {
+        let mut raw = ArtifactUpsert {
+            id: "raw".into(),
+            resource_id: "resource".into(),
+            uri: "file:///data/raw".into(),
+            format: "tsv".into(),
+            size: Some(1),
+            checksum: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ),
+            storage_backend: "local".into(),
+            data_class: "raw".into(),
+            immutable: true,
+            content_sha256: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ),
+            source_uri: Some("https://example.test/raw".into()),
+            derived_from: json!([]),
+            pipeline_version: None,
+            retention_policy: Some("retain".into()),
+            storage_uri: Some("file:///data/raw".into()),
+            schema_json: json!({}),
+            provenance: json!({}),
+        };
+        assert!(validate_artifact(&raw).is_ok());
+        raw.immutable = false;
+        assert!(validate_artifact(&raw).is_err());
+
+        raw.data_class = "derived".into();
+        raw.immutable = true;
+        assert!(validate_artifact(&raw).is_err());
+        raw.derived_from = json!(["raw"]);
+        assert!(validate_artifact(&raw).is_ok());
     }
 
     #[test]

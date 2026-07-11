@@ -115,6 +115,14 @@ pub struct Artifact {
     pub size: Option<i64>,
     pub checksum: Option<String>,
     pub storage_backend: String,
+    pub data_class: String,
+    pub immutable: bool,
+    pub content_sha256: Option<String>,
+    pub source_uri: Option<String>,
+    pub derived_from: Value,
+    pub pipeline_version: Option<String>,
+    pub retention_policy: Option<String>,
+    pub storage_uri: Option<String>,
     #[serde(rename = "schema")]
     pub schema_json: Value,
     pub provenance: Value,
@@ -130,10 +138,34 @@ pub struct ArtifactUpsert {
     pub size: Option<i64>,
     pub checksum: Option<String>,
     pub storage_backend: String,
+    #[serde(default = "default_data_class")]
+    pub data_class: String,
+    #[serde(default)]
+    pub immutable: bool,
+    #[serde(default)]
+    pub content_sha256: Option<String>,
+    #[serde(default)]
+    pub source_uri: Option<String>,
+    #[serde(default = "empty_array")]
+    pub derived_from: Value,
+    #[serde(default)]
+    pub pipeline_version: Option<String>,
+    #[serde(default)]
+    pub retention_policy: Option<String>,
+    #[serde(default)]
+    pub storage_uri: Option<String>,
     #[serde(rename = "schema", default)]
     pub schema_json: Value,
     #[serde(default)]
     pub provenance: Value,
+}
+
+fn default_data_class() -> String {
+    "canonical".into()
+}
+
+fn empty_array() -> Value {
+    Value::Array(Vec::new())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

@@ -236,25 +236,41 @@ impl ProviderInstaller {
                     format!("{}.idx.json", path.display()).into(),
                 );
             }
-            let raw_path = final_directory.join(
-                prepared
-                    .raw_path
-                    .strip_prefix(staging)
-                    .unwrap_or(&prepared.raw_path),
-            );
+            let raw_name = prepared
+                .raw_path
+                .file_name()
+                .ok_or(ProviderError::InvalidFile)?;
+            let raw_relative = PathBuf::from("raw")
+                .join(&prepared.raw_checksum)
+                .join(raw_name);
+            let raw_staging = staging.join(&raw_relative);
+            if let Some(parent) = raw_staging.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            fs::copy(&prepared.raw_path, &raw_staging).await?;
+            let raw_path = final_directory.join(&raw_relative);
+            let raw_artifact_id = format!("raw-{}", prepared.raw_checksum);
             let integrity_status = if file.checksum.is_some() {
                 "verified"
             } else {
                 "unverified"
             };
             artifacts.push(ArtifactUpsert {
-                id: format!("{}-raw", file.id),
+                id: raw_artifact_id.clone(),
                 resource_id: resource.id.clone(),
                 uri: raw_path.display().to_string(),
                 format: file.format.clone(),
                 size: Some(file.download_size as i64),
                 checksum: Some(prepared.raw_checksum.clone()),
                 storage_backend: "local".into(),
+                data_class: "raw".into(),
+                immutable: true,
+                content_sha256: Some(prepared.raw_checksum.clone()),
+                source_uri: Some(file.download.clone()),
+                derived_from: serde_json::json!([]),
+                pipeline_version: None,
+                retention_policy: Some("retain".into()),
+                storage_uri: Some(raw_path.display().to_string()),
                 schema_json: serde_json::json!({"role": "raw", "compression": file.compression}),
                 provenance: serde_json::json!({
                     "source": manifest.source,
@@ -273,6 +289,14 @@ impl ProviderInstaller {
                 size: Some(file.size as i64),
                 checksum: Some(prepared.canonical_checksum.clone()),
                 storage_backend: "local".into(),
+                data_class: "canonical".into(),
+                immutable: true,
+                content_sha256: Some(prepared.canonical_checksum.clone()),
+                source_uri: Some(raw_path.display().to_string()),
+                derived_from: serde_json::json!([raw_artifact_id]),
+                pipeline_version: Some("provider-canonical-v1".into()),
+                retention_policy: Some("retain".into()),
+                storage_uri: Some(path.display().to_string()),
                 schema_json: schema.into(),
                 provenance: serde_json::json!({
                     "source": manifest.source,
@@ -282,7 +306,7 @@ impl ProviderInstaller {
                     "integrity_status": integrity_status,
                     "raw_checksum": prepared.raw_checksum,
                     "canonical_checksum": prepared.canonical_checksum,
-                    "raw_artifact_id": format!("{}-raw", file.id),
+                    "raw_artifact_id": format!("raw-{}", prepared.raw_checksum),
                 }),
             });
             if let Some(index_path) = prepared.index_path {
@@ -305,6 +329,14 @@ impl ProviderInstaller {
                     ),
                     checksum: Some(hash_file(&index_path)?),
                     storage_backend: "local".into(),
+                    data_class: "derived".into(),
+                    immutable: true,
+                    content_sha256: Some(hash_file(&index_path)?),
+                    source_uri: Some(path.display().to_string()),
+                    derived_from: serde_json::json!([file.id]),
+                    pipeline_version: Some("gene-index-v1".into()),
+                    retention_policy: Some("rebuildable".into()),
+                    storage_uri: Some(index_path.display().to_string()),
                     schema_json: serde_json::json!({"role": "gene_index", "artifact_id": file.id}),
                     provenance: serde_json::json!({
                         "derived_from": file.id,
@@ -792,7 +824,7 @@ async fn upsert_artifact_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     value: &ArtifactUpsert,
 ) -> Result<Artifact, sqlx::Error> {
-    sqlx::query_as("INSERT INTO artifacts (id, resource_id, uri, format, size, checksum, storage_backend, schema_json, provenance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO UPDATE SET resource_id = EXCLUDED.resource_id, uri = EXCLUDED.uri, format = EXCLUDED.format, size = EXCLUDED.size, checksum = EXCLUDED.checksum, storage_backend = EXCLUDED.storage_backend, schema_json = EXCLUDED.schema_json, provenance = EXCLUDED.provenance RETURNING id, resource_id, uri, format, size, checksum, storage_backend, schema_json, provenance, created_at")
+    sqlx::query_as("INSERT INTO artifacts (id, resource_id, uri, format, size, checksum, storage_backend, data_class, immutable, content_sha256, source_uri, derived_from, pipeline_version, retention_policy, storage_uri, schema_json, provenance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) ON CONFLICT (id) DO UPDATE SET resource_id = EXCLUDED.resource_id, uri = EXCLUDED.uri, format = EXCLUDED.format, size = EXCLUDED.size, checksum = EXCLUDED.checksum, storage_backend = EXCLUDED.storage_backend, data_class = EXCLUDED.data_class, immutable = EXCLUDED.immutable, content_sha256 = EXCLUDED.content_sha256, source_uri = EXCLUDED.source_uri, derived_from = EXCLUDED.derived_from, pipeline_version = EXCLUDED.pipeline_version, retention_policy = EXCLUDED.retention_policy, storage_uri = EXCLUDED.storage_uri, schema_json = EXCLUDED.schema_json, provenance = EXCLUDED.provenance WHERE NOT (artifacts.data_class = 'raw' AND artifacts.immutable AND artifacts.content_sha256 IS DISTINCT FROM EXCLUDED.content_sha256) RETURNING id, resource_id, uri, format, size, checksum, storage_backend, data_class, immutable, content_sha256, source_uri, derived_from, pipeline_version, retention_policy, storage_uri, schema_json, provenance, created_at")
         .bind(&value.id)
         .bind(&value.resource_id)
         .bind(&value.uri)
@@ -800,6 +832,14 @@ async fn upsert_artifact_transaction(
         .bind(value.size)
         .bind(&value.checksum)
         .bind(&value.storage_backend)
+        .bind(&value.data_class)
+        .bind(value.immutable)
+        .bind(&value.content_sha256)
+        .bind(&value.source_uri)
+        .bind(&value.derived_from)
+        .bind(&value.pipeline_version)
+        .bind(&value.retention_policy)
+        .bind(&value.storage_uri)
         .bind(&value.schema_json)
         .bind(&value.provenance)
         .fetch_one(&mut **transaction)
@@ -1072,18 +1112,18 @@ impl ResourceRepository {
     }
 
     pub async fn list_artifacts(&self, resource_id: &str) -> Result<Vec<Artifact>, sqlx::Error> {
-        sqlx::query_as("SELECT id, resource_id, uri, format, size, checksum, storage_backend, schema_json, provenance, created_at FROM artifacts WHERE resource_id = $1 ORDER BY id")
+        sqlx::query_as("SELECT id, resource_id, uri, format, size, checksum, storage_backend, data_class, immutable, content_sha256, source_uri, derived_from, pipeline_version, retention_policy, storage_uri, schema_json, provenance, created_at FROM artifacts WHERE resource_id = $1 ORDER BY id")
             .bind(resource_id).fetch_all(&self.pool).await
     }
 
     pub async fn get_artifact(&self, id: &str) -> Result<Option<Artifact>, sqlx::Error> {
-        sqlx::query_as("SELECT id, resource_id, uri, format, size, checksum, storage_backend, schema_json, provenance, created_at FROM artifacts WHERE id = $1")
+        sqlx::query_as("SELECT id, resource_id, uri, format, size, checksum, storage_backend, data_class, immutable, content_sha256, source_uri, derived_from, pipeline_version, retention_policy, storage_uri, schema_json, provenance, created_at FROM artifacts WHERE id = $1")
             .bind(id).fetch_optional(&self.pool).await
     }
 
     pub async fn upsert_artifact(&self, value: &ArtifactUpsert) -> Result<Artifact, sqlx::Error> {
-        sqlx::query_as("INSERT INTO artifacts (id, resource_id, uri, format, size, checksum, storage_backend, schema_json, provenance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO UPDATE SET resource_id = EXCLUDED.resource_id, uri = EXCLUDED.uri, format = EXCLUDED.format, size = EXCLUDED.size, checksum = EXCLUDED.checksum, storage_backend = EXCLUDED.storage_backend, schema_json = EXCLUDED.schema_json, provenance = EXCLUDED.provenance RETURNING id, resource_id, uri, format, size, checksum, storage_backend, schema_json, provenance, created_at")
-            .bind(&value.id).bind(&value.resource_id).bind(&value.uri).bind(&value.format).bind(value.size).bind(&value.checksum).bind(&value.storage_backend).bind(&value.schema_json).bind(&value.provenance)
+        sqlx::query_as("INSERT INTO artifacts (id, resource_id, uri, format, size, checksum, storage_backend, data_class, immutable, content_sha256, source_uri, derived_from, pipeline_version, retention_policy, storage_uri, schema_json, provenance) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) ON CONFLICT (id) DO UPDATE SET resource_id = EXCLUDED.resource_id, uri = EXCLUDED.uri, format = EXCLUDED.format, size = EXCLUDED.size, checksum = EXCLUDED.checksum, storage_backend = EXCLUDED.storage_backend, data_class = EXCLUDED.data_class, immutable = EXCLUDED.immutable, content_sha256 = EXCLUDED.content_sha256, source_uri = EXCLUDED.source_uri, derived_from = EXCLUDED.derived_from, pipeline_version = EXCLUDED.pipeline_version, retention_policy = EXCLUDED.retention_policy, storage_uri = EXCLUDED.storage_uri, schema_json = EXCLUDED.schema_json, provenance = EXCLUDED.provenance WHERE NOT (artifacts.data_class = 'raw' AND artifacts.immutable AND artifacts.content_sha256 IS DISTINCT FROM EXCLUDED.content_sha256) RETURNING id, resource_id, uri, format, size, checksum, storage_backend, data_class, immutable, content_sha256, source_uri, derived_from, pipeline_version, retention_policy, storage_uri, schema_json, provenance, created_at")
+            .bind(&value.id).bind(&value.resource_id).bind(&value.uri).bind(&value.format).bind(value.size).bind(&value.checksum).bind(&value.storage_backend).bind(&value.data_class).bind(value.immutable).bind(&value.content_sha256).bind(&value.source_uri).bind(&value.derived_from).bind(&value.pipeline_version).bind(&value.retention_policy).bind(&value.storage_uri).bind(&value.schema_json).bind(&value.provenance)
             .fetch_one(&self.pool).await
     }
 
