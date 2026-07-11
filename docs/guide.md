@@ -47,6 +47,20 @@ docker compose exec shennong-db shennong-cli import /app/seed/toil-pbmc.json
 curl -fsS http://127.0.0.1:8000/healthz
 ```
 
+Install or refresh the complete built-in Toil cohort directly from UCSC Xena:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/resources/install \
+  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"toil"}'
+```
+
+The request streams and resumes the 1.32 GB compressed TPM matrix, decompresses
+it, builds the gene-row index, and installs phenotype, category, TCGA survival,
+and GENCODE v23 mapping Artifacts. The completed Resource occupies about 9 GB
+plus the small annotation files.
+
 The one container starts PostgreSQL, internal-only ClickHouse, embedded TileDB,
 and the HTTP API. On first startup it creates TileDB arrays under
 `$SHENNONG_DATA_PATH/tiledb`. ClickHouse data is stored under
@@ -131,6 +145,23 @@ curl -sS http://127.0.0.1:8000/api/v1/query \
   }' | jq
 ```
 
+Filter Toil by installed phenotype labels:
+
+```bash
+curl -sS http://127.0.0.1:8000/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "resource":"toil",
+    "operation":"expression",
+    "feature":{"type":"gene","name":"ENSG00000198492.14"},
+    "context":{"disease":"Skin Cutaneous Melanoma","sample_type":"Primary Tumor"},
+    "options":{"limit":1000}
+  }' | jq
+```
+
+Use `"operation":"survival_expression"` to attach OS, DSS, DFI, and PFI
+endpoints to the filtered expression rows.
+
 Context filters are rejected until the selected Resource declares the required
 annotations. This prevents an agent from mistaking unfiltered results for a
 cancer cohort, tumor/normal comparison, survival analysis, or cell-type result.
@@ -175,7 +206,15 @@ curl -X PUT http://127.0.0.1:8000/api/v1/resources/private-dataset/grants/analys
 Use the returned token as `Authorization: Bearer TOKEN`. Setting the user's
 status to `disabled` revokes access immediately, including already-issued JWTs.
 
-## 6. Operations
+## 6. Gene identifiers across annotation releases
+
+Use `/api/v1/genes/resolve` before cross-dataset analysis. ShennongDB joins
+GENCODE v23 Toil and GENCODE v37 PBMC features by the unversioned stable Ensembl
+gene ID while retaining each original versioned ID and annotation release.
+Symbols are search/display values, not join keys. See
+[gene-identifiers.md](gene-identifiers.md) for the complete policy.
+
+## 7. Operations
 
 ```bash
 docker compose ps

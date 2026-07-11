@@ -18,6 +18,10 @@ and [Semantic Versioning](https://semver.org/).
 - Two-level agent discovery with a small Resource catalog and per-Resource
   analysis-readiness details.
 - Standard Docker installation, API usage, and measured performance guides.
+- A resumable multi-file UCSC Xena Toil provider with expression, phenotype,
+  category, survival, and GENCODE v23 mapping Artifacts.
+- Release-aware gene resolution using stable Ensembl gene IDs while preserving
+  original versioned identifiers and annotation provenance.
 
 ### Changed
 
@@ -25,6 +29,8 @@ and [Semantic Versioning](https://semver.org/).
   the API, PostgreSQL, ClickHouse, and TileDB.
 - Context filters now fail explicitly when required cohort, clinical, or
   cell-type annotations are unavailable.
+- Toil expression queries can use installed phenotype filters and attach TCGA
+  survival endpoints.
 
 ### Removed
 

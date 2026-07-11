@@ -1,0 +1,113 @@
+name: toil
+version: "2018-05-08"
+source:
+  name: UCSC Xena Toil RNA-seq Recompute
+  hub: https://toil.xenahubs.net
+  cohort: TCGA TARGET GTEx
+files:
+  - id: toil-expression
+    download: https://toil.xenahubs.net/download/TcgaTargetGtex_rsem_gene_tpm.gz
+    filename: TcgaTargetGtex_rsem_gene_tpm.tsv
+    format: tsv
+    download_size: 1323254426
+    size: 8983490058
+    checksum: null
+    compression: gzip
+    index: gene_matrix
+    schema:
+      role: expression
+      layout: gene_by_sample
+      feature_field: ensembl_gene_id
+      observation_field: sample_id
+      measure: log2_tpm_plus_0.001
+  - id: toil-phenotype
+    download: https://toil.xenahubs.net/download/TcgaTargetGTEX_phenotype.txt.gz
+    filename: TcgaTargetGTEX_phenotype.tsv
+    format: tsv
+    download_size: 135753
+    size: 1933723
+    checksum: sha256:ba4d4461cff0fe5e91cc3e58f793aa47ff3c5d6fbf77d65ccff5a07231aaf2db
+    compression: gzip
+    index: null
+    schema:
+      role: sample_metadata
+      key: sample
+      context_fields:
+        disease: primary disease or tissue
+        primary_site: _primary_site
+        sample_type: _sample_type
+        study: _study
+        detailed_category: detailed_category
+  - id: toil-category
+    download: https://toil.xenahubs.net/download/TCGA_GTEX_category.txt
+    filename: TCGA_GTEX_category.tsv
+    format: tsv
+    download_size: 740889
+    size: 740889
+    checksum: sha256:dd15689244609202eb7b475ce61072aae95a9e992325992ee31ff58a8f763bc6
+    compression: null
+    index: null
+    schema:
+      role: cohort_category
+      key: sample
+      fields: [TCGA_GTEX_main_category]
+  - id: toil-survival
+    download: https://toil.xenahubs.net/download/TCGA_survival_data
+    filename: TCGA_survival_data.tsv
+    format: tsv
+    download_size: 406381
+    size: 406381
+    checksum: sha256:b78880e96e1efeac82bb46ed7f5331b135ff3d859007813c358373ebb81dc095
+    compression: null
+    index: null
+    schema:
+      role: survival_metadata
+      key: sample
+      fields: [OS, OS.time, DSS, DSS.time, DFI, DFI.time, PFI, PFI.time]
+      time_unit: days
+  - id: toil-gencode-v23-gene-map
+    download: https://toil.xenahubs.net/download/probeMap/gencode.v23.annotation.gene.probemap
+    filename: gencode.v23.annotation.gene.probemap.tsv
+    format: tsv
+    download_size: 3244244
+    size: 3244244
+    checksum: sha256:6783ea58791ae876efb697889a042cc7be8e32e40fc01191c622ef25d9416931
+    compression: null
+    index: null
+    schema:
+      role: gene_mapping
+      source_id: versioned_ensembl_gene_id
+      canonical_id: ensembl_gene_stable_id_without_version
+      display_name: gene_symbol
+      fields: [id, gene, chrom, chromStart, chromEnd, strand]
+resource_schema:
+  kind: Dataset
+  title: TCGA TARGET GTEx Toil RNA-seq complete cohort
+  summary: Harmonized bulk RNA-seq expression with phenotype, category, TCGA survival, and GENCODE v23 gene mapping.
+  use_when: Compare expression across TCGA, TARGET, and GTEx cohorts or join TCGA expression with survival endpoints.
+  organism: human
+  data_model: bulk
+  assays: [rna]
+  dimensions:
+    features: 60498
+    samples: 19131
+  fields: [sample_id, ensembl_gene_id, log2_tpm_plus_0.001]
+  reference:
+    assembly: GRCh38.p3
+    gene_annotation: GENCODE v23
+    identifier: versioned Ensembl gene ID
+    canonical_cross_dataset_key: Ensembl gene stable ID without version suffix
+  feature_identifier: GENCODE v23 Ensembl gene ID with version suffix
+  example_feature: ENSG00000198492.14
+  supported_context: [disease, primary_site, sample_type, study, detailed_category]
+  analysis_capabilities:
+    ready: [gene_expression_by_sample, tumor_normal_expression_by_cancer, survival_expression, gene_resolution]
+    requires_additional_resources: {}
+resource_spec:
+  backend: local
+  operations: [expression, survival_expression]
+storage:
+  backend: local
+  permissions:
+    visibility: public
+    read_scopes: [resource.read]

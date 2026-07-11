@@ -161,12 +161,28 @@ pub struct ProviderManifest {
     #[serde(deserialize_with = "string_or_number")]
     pub version: String,
     pub source: Value,
-    pub download: String,
-    pub checksum: Option<String>,
+    pub files: Vec<ProviderFile>,
     #[serde(default)]
     pub resource_schema: Value,
     #[serde(default)]
+    pub resource_spec: Value,
+    #[serde(default)]
     pub storage: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderFile {
+    pub id: String,
+    pub download: String,
+    pub filename: String,
+    pub format: String,
+    pub download_size: u64,
+    pub size: u64,
+    pub checksum: Option<String>,
+    pub compression: Option<String>,
+    pub index: Option<String>,
+    #[serde(default)]
+    pub schema: Value,
 }
 
 fn string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -209,7 +225,7 @@ impl Default for Capabilities {
         Self {
             api_version: "v1",
             resources: ["discover", "inspect", "artifacts", "relations"],
-            query_operations: vec!["expression", "embedding_expression"],
+            query_operations: vec!["expression", "survival_expression", "embedding_expression"],
             artifact_formats: [
                 "h5",
                 "h5ad",
@@ -231,7 +247,7 @@ impl Default for Capabilities {
                 "resource": "resource id",
                 "operation": "expression",
                 "feature": {"type": "gene", "name": "gene symbol"},
-                "context": {"disease": "optional disease or cancer code"},
+                "context": {"disease": "Resource-declared exact label", "sample_type": "Resource-declared exact label"},
                 "options": {"limit": "1..100000"}
             }),
         }

@@ -10,7 +10,7 @@ FROM clickhouse/clickhouse-server:26.4.4.38 AS clickhouse
 FROM postgres:17-bookworm
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes python3 python3-venv wget \
+    && apt-get install --no-install-recommends --yes gzip python3 python3-venv wget \
     && python3 -m venv /opt/tiledb \
     && /opt/tiledb/bin/pip install --no-cache-dir --retries 10 --timeout 120 h5py==3.16.0 numpy==2.3.5 tiledb==0.36.1 \
     && rm -rf /var/lib/apt/lists/*

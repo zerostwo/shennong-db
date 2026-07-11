@@ -94,6 +94,23 @@ def query(uri, feature, limit):
     }
 
 
+def resolve(uri, feature):
+    with tiledb.open(uri, "r") as array:
+        feature_ids = json.loads(array.meta["feature_ids"])
+        feature_names = json.loads(array.meta["feature_names"])
+    query_value = feature.casefold()
+    matches = []
+    for feature_id, feature_name in zip(feature_ids, feature_names):
+        stable_id = feature_id.split(".", 1)[0]
+        if query_value in {feature_id.casefold(), stable_id.casefold(), feature_name.casefold()}:
+            matches.append({
+                "original_id": feature_id,
+                "stable_id": stable_id,
+                "symbol": feature_name,
+            })
+    return {"matches": matches}
+
+
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -104,6 +121,9 @@ def main():
     query_parser.add_argument("--uri", required=True)
     query_parser.add_argument("--feature", required=True)
     query_parser.add_argument("--limit", type=int, default=1000)
+    resolve_parser = commands.add_parser("resolve")
+    resolve_parser.add_argument("--uri", required=True)
+    resolve_parser.add_argument("--feature", required=True)
     describe_parser = commands.add_parser("describe")
     describe_parser.add_argument("--uri", required=True)
     arguments = parser.parse_args()
@@ -111,6 +131,8 @@ def main():
         output = ingest(arguments.source, arguments.uri)
     elif arguments.command == "query":
         output = query(arguments.uri, arguments.feature, max(1, min(arguments.limit, 100000)))
+    elif arguments.command == "resolve":
+        output = resolve(arguments.uri, arguments.feature)
     else:
         output = describe(arguments.uri)
     print(json.dumps(output, separators=(",", ":")))
