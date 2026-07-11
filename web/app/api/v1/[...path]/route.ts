@@ -32,6 +32,7 @@ async function proxy(request: NextRequest, context: Context): Promise<Response> 
     headers,
     body,
     redirect: "manual",
+    signal: request.signal,
   });
 
   return new Response(response.body, {
