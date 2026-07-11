@@ -252,6 +252,10 @@ pub struct ProviderFile {
     pub download_size: u64,
     pub size: u64,
     pub checksum: Option<String>,
+    #[serde(default, alias = "uncompressed_checksum")]
+    pub canonical_checksum: Option<String>,
+    #[serde(default)]
+    pub uncompressed_size: Option<u64>,
     pub compression: Option<String>,
     pub index: Option<String>,
     #[serde(default)]

@@ -1721,6 +1721,7 @@ name = "shennong-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "libc",
  "reqwest",
  "serde_json",
  "serde_yaml",

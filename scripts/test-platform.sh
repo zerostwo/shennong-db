@@ -276,6 +276,9 @@ run_docker exec "$container_id" psql -U shennong -d shennong -A -t -c "SELECT st
 [ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/bad-second")" = 404 ]
 [ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -H "$admin" -H "$json" -d '{"name":"bad-materialization"}' "$base/api/v1/resources/install")" = 422 ]
 [ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/bad-materialization")" = 404 ]
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -H "$admin" -H "$json" -d '{"name":"missing-checksum"}' "$base/api/v1/resources/install")" = 422 ]
+[ "$(run_docker exec "$container_id" psql -U shennong -d shennong -A -t -c "SELECT status || ':' || error_code FROM ingestion_jobs WHERE provider_name = 'missing-checksum'" | tr -d '\r\n')" = "failed:provider_integrity_required" ]
+[ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' "$base/api/v1/resources/missing-checksum")" = 404 ]
 run_docker exec "$container_id" psql -U shennong -d shennong -c "UPDATE ingestion_jobs SET status = 'downloading' WHERE provider_name = 'bad-second'" >/dev/null
 [ "$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' -H "$admin" -H "$json" -d '{"name":"bad-second"}' "$base/api/v1/resources/install")" = 422 ]
 run_compose exec -T -e "SHENNONG_DATABASE_URL=$database_url" shennong-db shennong-cli import /app/seed/toil-pbmc.json >/dev/null

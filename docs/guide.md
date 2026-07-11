@@ -68,6 +68,12 @@ and the HTTP API. On first startup it creates TileDB arrays under
 `$SHENNONG_DATA_PATH/tiledb`. ClickHouse data is stored under
 `$SHENNONG_DATA_PATH/clickhouse`.
 
+Provider installation requires a SHA-256 checksum for every source file.
+Downloaded compressed raw files are retained beside canonical files, and
+canonical plus gene-index checksums are recorded in Artifact provenance.
+`SHENNONG_PROVIDER_ALLOW_UNVERIFIED=1` is reserved for isolated development
+fixtures and marks those Artifacts as unverified.
+
 Upgrade with:
 
 ```bash

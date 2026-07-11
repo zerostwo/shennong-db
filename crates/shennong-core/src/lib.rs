@@ -8,10 +8,16 @@ use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read},
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
+    time::Duration,
 };
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    time::timeout,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -26,8 +32,14 @@ pub enum ProviderError {
     TooLarge,
     #[error("provider file size verification failed")]
     Size,
+    #[error("provider staging area does not have enough free space")]
+    DiskSpace,
     #[error("provider checksum verification failed")]
     Checksum,
+    #[error("provider checksum is required in production mode")]
+    IntegrityRequired,
+    #[error("provider operation timed out")]
+    Timeout,
     #[error("provider file definition is invalid")]
     InvalidFile,
     #[error("provider permissions are invalid")]
@@ -69,6 +81,17 @@ pub struct ProviderInstaller {
     provider_dir: PathBuf,
     data_root: PathBuf,
     max_download_bytes: usize,
+    download_timeout: Duration,
+    allow_unverified: bool,
+}
+
+struct PreparedFile {
+    file: ProviderFile,
+    raw_path: PathBuf,
+    raw_checksum: String,
+    canonical_checksum: String,
+    fetched_at: String,
+    index_path: Option<PathBuf>,
 }
 
 impl ProviderInstaller {
@@ -81,6 +104,9 @@ impl ProviderInstaller {
             provider_dir: provider_dir.into(),
             data_root: data_root.into(),
             max_download_bytes,
+            download_timeout: env_duration("SHENNONG_DOWNLOAD_TIMEOUT_SECS", 300),
+            allow_unverified: std::env::var("SHENNONG_PROVIDER_ALLOW_UNVERIFIED")
+                .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
         }
     }
 
@@ -150,8 +176,8 @@ impl ProviderInstaller {
         }
         let mut files = Vec::with_capacity(manifest.files.len());
         for file in &manifest.files {
-            self.prepare_file(file, staging).await?;
-            files.push(file.clone());
+            ensure_disk_space(staging, file.download_size.saturating_add(file.size))?;
+            files.push(self.prepare_file(file, staging).await?);
         }
         repository
             .transition_ingestion(&job.id, "verifying")
@@ -196,7 +222,8 @@ impl ProviderInstaller {
             permissions,
         };
         let mut artifacts = Vec::with_capacity(files.len());
-        for file in files {
+        for prepared in files {
+            let file = prepared.file;
             let mut schema = file.schema.as_object().cloned().unwrap_or_default();
             let path = final_directory.join(&file.filename);
             if file.index.as_deref() == Some("gene_matrix") {
@@ -205,17 +232,73 @@ impl ProviderInstaller {
                     format!("{}.idx.json", path.display()).into(),
                 );
             }
+            let raw_path = final_directory.join(
+                prepared
+                    .raw_path
+                    .strip_prefix(staging)
+                    .unwrap_or(&prepared.raw_path),
+            );
+            let integrity_status = if file.checksum.is_some() {
+                "verified"
+            } else {
+                "unverified"
+            };
+            artifacts.push(ArtifactUpsert {
+                id: format!("{}-raw", file.id),
+                resource_id: resource.id.clone(),
+                uri: raw_path.display().to_string(),
+                format: file.format.clone(),
+                size: Some(file.download_size as i64),
+                checksum: Some(prepared.raw_checksum.clone()),
+                storage_backend: "local".into(),
+                schema_json: serde_json::json!({"role": "raw", "compression": file.compression}),
+                provenance: serde_json::json!({
+                    "source": manifest.source,
+                    "version": manifest.version,
+                    "download": file.download,
+                "fetched_at": prepared.fetched_at.clone(),
+                    "integrity_status": integrity_status,
+                    "canonical_artifact_id": file.id,
+                }),
+            });
             artifacts.push(ArtifactUpsert {
                 id: file.id.clone(),
                 resource_id: resource.id.clone(),
                 uri: path.display().to_string(),
                 format: file.format.clone(),
                 size: Some(file.size as i64),
-                checksum: file.checksum.clone(),
+                checksum: Some(prepared.canonical_checksum.clone()),
                 storage_backend: "local".into(),
                 schema_json: schema.into(),
-                provenance: serde_json::json!({"source": manifest.source, "version": manifest.version, "download": file.download}),
+                provenance: serde_json::json!({
+                    "source": manifest.source,
+                    "version": manifest.version,
+                    "download": file.download,
+                    "fetched_at": prepared.fetched_at,
+                    "integrity_status": integrity_status,
+                    "raw_checksum": prepared.raw_checksum,
+                    "canonical_checksum": prepared.canonical_checksum,
+                    "raw_artifact_id": format!("{}-raw", file.id),
+                }),
             });
+            if let Some(index_path) = prepared.index_path {
+                let index_path =
+                    final_directory.join(index_path.strip_prefix(staging).unwrap_or(&index_path));
+                artifacts.push(ArtifactUpsert {
+                    id: format!("{}-index", file.id),
+                    resource_id: resource.id.clone(),
+                    uri: index_path.display().to_string(),
+                    format: "json".into(),
+                    size: Some(fs::metadata(&index_path).await?.len() as i64),
+                    checksum: Some(hash_file(&index_path)?),
+                    storage_backend: "local".into(),
+                    schema_json: serde_json::json!({"role": "gene_index", "artifact_id": file.id}),
+                    provenance: serde_json::json!({
+                        "derived_from": file.id,
+                        "integrity_status": "verified",
+                    }),
+                });
+            }
         }
         repository
             .transition_ingestion(&job.id, "materializing")
@@ -268,45 +351,76 @@ impl ProviderInstaller {
         &self,
         file: &ProviderFile,
         directory: &Path,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<PreparedFile, ProviderError> {
         let destination = directory.join(&file.filename);
         let source = if file.compression.as_deref() == Some("gzip") {
             PathBuf::from(format!("{}.gz", destination.display()))
         } else {
             destination.clone()
         };
-        self.download_to(&file.download, &source, file.download_size)
+        let raw_checksum = self
+            .download_to(
+                &file.download,
+                &source,
+                file.download_size,
+                file.checksum.as_deref(),
+            )
             .await?;
-        if let Some(expected) = &file.checksum
-            && hash_file(&source)?
-                != expected
-                    .strip_prefix("sha256:")
-                    .unwrap_or(expected)
-                    .to_lowercase()
-        {
-            return Err(ProviderError::Checksum);
+        let fetched_at = chrono::Utc::now().to_rfc3339();
+        let canonical_checksum = if file.compression.as_deref() == Some("gzip") {
+            decompress_gzip(
+                source.clone(),
+                destination.clone(),
+                file.size,
+                self.max_download_bytes as u64,
+                self.download_timeout,
+            )
+            .await?
+        } else {
+            raw_checksum.clone()
+        };
+        if let Some(expected) = &file.canonical_checksum {
+            verify_checksum(&canonical_checksum, expected)?;
         }
-        if file.compression.as_deref() == Some("gzip") {
-            decompress_gzip(source.clone(), destination.clone()).await?;
-            fs::remove_file(source).await?;
-        } else if file.compression.is_some() {
+        if file.compression.is_some() && file.compression.as_deref() != Some("gzip") {
             return Err(ProviderError::UnsupportedSource);
         }
         if fs::metadata(&destination).await?.len() != file.size {
             return Err(ProviderError::Size);
         }
-        self.ensure_index(file, &destination).await?;
-        Ok(())
+        let index_path = self.ensure_index(file, &destination).await?;
+        Ok(PreparedFile {
+            file: file.clone(),
+            raw_path: source,
+            raw_checksum,
+            canonical_checksum,
+            fetched_at,
+            index_path,
+        })
     }
 
     fn validate_file(&self, file: &ProviderFile) -> Result<(), ProviderError> {
         if file.id.is_empty()
+            || file.download_size == 0
+            || file.size == 0
             || file.download_size > self.max_download_bytes as u64
             || Path::new(&file.filename)
                 .components()
                 .any(|component| !matches!(component, Component::Normal(_)))
         {
             return Err(ProviderError::InvalidFile);
+        }
+        if file.checksum.is_none() && !self.allow_unverified {
+            return Err(ProviderError::IntegrityRequired);
+        }
+        if let Some(checksum) = &file.checksum {
+            validate_checksum(checksum)?;
+        }
+        if let Some(checksum) = &file.canonical_checksum {
+            validate_checksum(checksum)?;
+        }
+        if file.uncompressed_size.is_some_and(|size| size != file.size) {
+            return Err(ProviderError::Size);
         }
         if file
             .compression
@@ -323,7 +437,8 @@ impl ProviderInstaller {
         url: &str,
         destination: &Path,
         expected_size: u64,
-    ) -> Result<(), ProviderError> {
+        expected_checksum: Option<&str>,
+    ) -> Result<String, ProviderError> {
         if !url.starts_with("https://") {
             return Err(ProviderError::UnsupportedSource);
         }
@@ -331,7 +446,11 @@ impl ProviderInstaller {
             .await
             .is_ok_and(|metadata| metadata.len() == expected_size)
         {
-            return Ok(());
+            let checksum = hash_file_async(destination).await?;
+            if let Some(expected) = expected_checksum {
+                verify_checksum(&checksum, expected)?;
+            }
+            return Ok(checksum);
         }
         let partial = PathBuf::from(format!("{}.part", destination.display()));
         let mut offset = fs::metadata(&partial)
@@ -348,56 +467,102 @@ impl ProviderInstaller {
         {
             client = client.proxy(reqwest::Proxy::all(proxy)?);
         }
-        let client = client.build()?;
-        let mut request = client.get(url);
-        if offset > 0 {
-            request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-        }
-        let mut response = request.send().await?.error_for_status()?;
-        let append = offset > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-        if !append {
-            offset = 0;
-        }
-        let mut output = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(append)
-            .truncate(!append)
-            .open(&partial)
-            .await?;
-        let mut total = offset;
-        while let Some(chunk) = response.chunk().await? {
-            total += chunk.len() as u64;
-            if total > expected_size || total > self.max_download_bytes as u64 {
-                return Err(ProviderError::TooLarge);
+        let client = client.timeout(self.download_timeout).build()?;
+        loop {
+            let mut request = client.get(url);
+            if offset > 0 {
+                request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
             }
-            output.write_all(&chunk).await?;
+            let mut response = request.send().await?;
+            if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && offset > 0 {
+                fs::remove_file(&partial).await?;
+                offset = 0;
+                continue;
+            }
+            if !response.status().is_success() {
+                return Err(ProviderError::Http(
+                    response.error_for_status().unwrap_err(),
+                ));
+            }
+            let append = offset > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+            if let Some(content_length) = response.content_length() {
+                let expected_response_size = if append {
+                    expected_size - offset
+                } else {
+                    expected_size
+                };
+                if content_length != expected_response_size {
+                    let _ = fs::remove_file(&partial).await;
+                    return Err(ProviderError::Size);
+                }
+            }
+            if append {
+                let valid_range = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with(&format!("bytes {offset}-")));
+                if !valid_range {
+                    let _ = fs::remove_file(&partial).await;
+                    return Err(ProviderError::Size);
+                }
+            } else {
+                offset = 0;
+            }
+            let mut digest = if append {
+                digest_file_async(&partial).await?
+            } else {
+                Sha256::new()
+            };
+            let mut output = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(append)
+                .truncate(!append)
+                .open(&partial)
+                .await?;
+            let mut total = offset;
+            while let Some(chunk) = response.chunk().await? {
+                total += chunk.len() as u64;
+                if total > expected_size || total > self.max_download_bytes as u64 {
+                    let _ = fs::remove_file(&partial).await;
+                    return Err(ProviderError::TooLarge);
+                }
+                digest.update(&chunk);
+                output.write_all(&chunk).await?;
+            }
+            output.flush().await?;
+            output.sync_all().await?;
+            if total != expected_size {
+                return Err(ProviderError::Size);
+            }
+            let checksum = format!("{:x}", digest.finalize());
+            if let Some(expected) = expected_checksum {
+                verify_checksum(&checksum, expected)?;
+            }
+            fs::rename(&partial, destination).await?;
+            return Ok(checksum);
         }
-        output.flush().await?;
-        if total != expected_size {
-            return Err(ProviderError::Size);
-        }
-        fs::rename(partial, destination).await?;
-        Ok(())
     }
 
     async fn ensure_index(
         &self,
         file: &ProviderFile,
         destination: &Path,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<Option<PathBuf>, ProviderError> {
         if file.index.as_deref() != Some("gene_matrix") {
-            return Ok(());
+            return Ok(None);
         }
         let index = PathBuf::from(format!("{}.idx.json", destination.display()));
         if index.is_file() {
-            return Ok(());
+            return Ok(Some(index));
         }
         let source = destination.to_path_buf();
-        tokio::task::spawn_blocking(move || build_gene_index(&source, &index))
+        let output = index.clone();
+        tokio::task::spawn_blocking(move || build_gene_index(&source, &output))
             .await
             .map_err(|error| ProviderError::Process(error.to_string()))??;
-        Ok(())
+        Ok(Some(index))
     }
 }
 
@@ -409,7 +574,10 @@ impl ProviderError {
             Self::UnsupportedSource => "provider_source_unsupported",
             Self::TooLarge => "provider_download_too_large",
             Self::Size => "provider_size_mismatch",
+            Self::DiskSpace => "provider_disk_space",
             Self::Checksum => "provider_checksum_mismatch",
+            Self::IntegrityRequired => "provider_integrity_required",
+            Self::Timeout => "provider_timeout",
             Self::InvalidFile => "provider_file_invalid",
             Self::InvalidPermissions => "provider_permissions_invalid",
             Self::Busy => "provider_busy",
@@ -438,23 +606,132 @@ fn hash_file(path: &Path) -> Result<String, ProviderError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-async fn decompress_gzip(source: PathBuf, destination: PathBuf) -> Result<(), ProviderError> {
-    tokio::task::spawn_blocking(move || {
-        let partial = PathBuf::from(format!("{}.part", destination.display()));
-        let output = std::fs::File::create(&partial)?;
-        let status = Command::new("gzip")
-            .args(["-dc"])
-            .arg(&source)
-            .stdout(Stdio::from(output))
-            .status()?;
-        if !status.success() {
-            return Err(ProviderError::Process("gzip returned an error".into()));
+async fn hash_file_async(path: &Path) -> Result<String, ProviderError> {
+    Ok(format!("{:x}", digest_file_async(path).await?.finalize()))
+}
+
+async fn digest_file_async(path: &Path) -> Result<Sha256, ProviderError> {
+    let mut input = fs::File::open(path).await?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = input.read(&mut buffer).await?;
+        if count == 0 {
+            break;
         }
-        std::fs::rename(partial, destination)?;
-        Ok(())
-    })
-    .await
-    .map_err(|error| ProviderError::Process(error.to_string()))?
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest)
+}
+
+async fn decompress_gzip(
+    source: PathBuf,
+    destination: PathBuf,
+    expected_size: u64,
+    max_size: u64,
+    operation_timeout: Duration,
+) -> Result<String, ProviderError> {
+    let partial = PathBuf::from(format!("{}.part", destination.display()));
+    let mut child = Command::new("gzip")
+        .args(["-dc"])
+        .arg(&source)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ProviderError::Process("gzip stdout was unavailable".into()))?;
+    let mut output = fs::File::create(&partial).await?;
+    let mut digest = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let count = timeout(operation_timeout, stdout.read(&mut buffer))
+            .await
+            .map_err(|_| ProviderError::Timeout)??;
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        if total > expected_size || total > max_size {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = fs::remove_file(&partial).await;
+            return Err(ProviderError::TooLarge);
+        }
+        digest.update(&buffer[..count]);
+        output.write_all(&buffer[..count]).await?;
+    }
+    let status = timeout(operation_timeout, child.wait())
+        .await
+        .map_err(|_| ProviderError::Timeout)??;
+    if !status.success() {
+        let _ = fs::remove_file(&partial).await;
+        return Err(ProviderError::Process("gzip returned an error".into()));
+    }
+    output.flush().await?;
+    output.sync_all().await?;
+    if total != expected_size {
+        let _ = fs::remove_file(&partial).await;
+        return Err(ProviderError::Size);
+    }
+    fs::rename(&partial, destination).await?;
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn validate_checksum(checksum: &str) -> Result<(), ProviderError> {
+    let value = checksum.strip_prefix("sha256:").unwrap_or(checksum);
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ProviderError::Checksum);
+    }
+    Ok(())
+}
+
+fn verify_checksum(actual: &str, expected: &str) -> Result<(), ProviderError> {
+    validate_checksum(expected)?;
+    let expected = expected
+        .strip_prefix("sha256:")
+        .unwrap_or(expected)
+        .to_ascii_lowercase();
+    if actual != expected {
+        return Err(ProviderError::Checksum);
+    }
+    Ok(())
+}
+
+fn env_duration(name: &str, default_seconds: u64) -> Duration {
+    Duration::from_secs(
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value: &u64| *value > 0)
+            .unwrap_or(default_seconds),
+    )
+}
+
+fn ensure_disk_space(path: &Path, required: u64) -> Result<(), ProviderError> {
+    #[cfg(unix)]
+    {
+        use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+        let path =
+            CString::new(path.as_os_str().as_bytes()).map_err(|_| ProviderError::DiskSpace)?;
+        let mut stats = MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: path is NUL-terminated and stats points to writable storage.
+        let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
+        if result != 0 {
+            return Err(ProviderError::DiskSpace);
+        }
+        // SAFETY: statvfs initialized stats when it returned success.
+        let stats = unsafe { stats.assume_init() };
+        let available = stats.f_bavail.saturating_mul(stats.f_frsize);
+        if available < required {
+            return Err(ProviderError::DiskSpace);
+        }
+    }
+    let _ = (path, required);
+    Ok(())
 }
 
 fn build_gene_index(source: &Path, destination: &Path) -> Result<(), ProviderError> {
@@ -889,7 +1166,11 @@ impl ResourceRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderInstaller, build_gene_index};
+    use super::{
+        ProviderError, ProviderInstaller, build_gene_index, decompress_gzip, ensure_disk_space,
+        validate_checksum, verify_checksum,
+    };
+    use sha2::{Digest, Sha256};
     use std::env::temp_dir;
     use tokio::fs;
     use uuid::Uuid;
@@ -926,5 +1207,91 @@ mod tests {
         assert_eq!(value["offsets"]["ENSG1.1"], 10);
         assert_eq!(value["offsets"]["ENSG2.4"], 20);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn validates_sha256_metadata() {
+        assert!(
+            validate_checksum(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+            .is_ok()
+        );
+        assert!(validate_checksum("not-a-checksum").is_err());
+        assert!(
+            verify_checksum(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            verify_checksum(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            Err(ProviderError::Checksum)
+        ));
+    }
+
+    #[tokio::test]
+    async fn gzip_materialization_is_hashed_and_bounded() {
+        let directory = temp_dir().join(format!("shennong-gzip-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).await.unwrap();
+        let input = directory.join("input.tsv");
+        let source = directory.join("input.tsv.gz");
+        let destination = directory.join("output.tsv");
+        let content = b"gene\tvalue\nYTHDF2\t1\n";
+        fs::write(&input, content).await.unwrap();
+        let status = std::process::Command::new("gzip")
+            .args(["-c"])
+            .arg(&input)
+            .stdout(std::fs::File::create(&source).unwrap())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let checksum = decompress_gzip(
+            source,
+            destination.clone(),
+            content.len() as u64,
+            content.len() as u64 + 1,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let mut digest = Sha256::new();
+        digest.update(content);
+        assert_eq!(checksum, format!("{:x}", digest.finalize()));
+        assert_eq!(fs::read(&destination).await.unwrap(), content);
+        assert!(directory.join("input.tsv.gz").is_file());
+
+        let limited = directory.join("limited.tsv");
+        let error = decompress_gzip(
+            directory.join("input.tsv.gz"),
+            limited.clone(),
+            2,
+            2,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ProviderError::TooLarge));
+        assert!(!limited.exists());
+        let insufficient = directory.join("insufficient.tsv");
+        let error = decompress_gzip(
+            directory.join("input.tsv.gz"),
+            insufficient,
+            content.len() as u64 + 1,
+            content.len() as u64 + 1,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ProviderError::Size));
+        assert!(matches!(
+            ensure_disk_space(&directory, u64::MAX),
+            Err(ProviderError::DiskSpace)
+        ));
+        fs::remove_dir_all(directory).await.unwrap();
     }
 }

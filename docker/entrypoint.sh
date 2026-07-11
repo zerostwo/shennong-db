@@ -10,8 +10,8 @@ if [ "$(id -u)" != 0 ]; then
   exit 1
 fi
 
-mkdir -p "$PGDATA" /data/clickhouse /data/tiledb /var/log/clickhouse-server /var/lib/clickhouse
-chown -R postgres:postgres "$PGDATA" /data/clickhouse /data/tiledb /var/log/clickhouse-server /var/lib/clickhouse
+mkdir -p "$PGDATA" /data/resources /data/clickhouse /data/tiledb /var/log/clickhouse-server /var/lib/clickhouse
+chown -R postgres:postgres "$PGDATA" /data/resources /data/clickhouse /data/tiledb /var/log/clickhouse-server /var/lib/clickhouse
 
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
   gosu postgres initdb -D "$PGDATA" --username="$POSTGRES_USER" --auth=trust

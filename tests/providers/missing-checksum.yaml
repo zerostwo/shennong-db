@@ -1,0 +1,21 @@
+name: missing-checksum
+version: "1"
+source: https://example.org/missing-checksum
+files:
+  - id: missing-checksum-file
+    download: https://example.org/missing-checksum.tsv
+    filename: missing-checksum.tsv
+    format: tsv
+    download_size: 1
+    size: 1
+    checksum: null
+    compression: null
+    index: null
+    schema:
+      role: expression
+resource_schema:
+  kind: Dataset
+resource_spec:
+  backend: local
+storage:
+  backend: local

@@ -48,6 +48,9 @@ Compose file, starts an isolated stack, and checks:
 - atomic seed import and provider-ingestion state checks, including failed
   transaction rollback, duplicate-provider rejection, unavailable resources,
   and restart persistence;
+- Provider integrity checks: production rejection of missing checksums, streamed
+  SHA-256 verification, bounded gzip materialization, free-space preflight, and
+  raw-file retention;
 - authenticated administrator writes;
 - a query bounded to two fixture rows;
 - a local expression fixture inside `/data` and rejection of an Artifact path
