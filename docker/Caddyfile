@@ -1,0 +1,11 @@
+{$SHENNONG_DOMAIN} {
+    request_body {
+        max_size 1MB
+    }
+    reverse_proxy shennong-api:8000 {
+        transport http {
+            read_timeout 30s
+            write_timeout 30s
+        }
+    }
+}

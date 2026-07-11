@@ -1,6 +1,7 @@
 #!/opt/tiledb/bin/python
 import argparse
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import h5py
@@ -136,20 +137,57 @@ def serve():
     for raw in __import__("sys").stdin:
         try:
             request = json.loads(raw)
-            command = request.pop("command")
-            if command == "health":
-                result = {"status": "ok"}
-            elif command == "query":
-                result = query(request["uri"], request["feature"], int(request.get("limit", 1000)), int(request.get("offset", 0)))
-            elif command == "resolve":
-                result = resolve(request["uri"], request["feature"])
-            elif command == "describe":
-                result = describe(request["uri"])
-            else:
-                raise ValueError("unsupported command")
+            result = dispatch(request)
             print(json.dumps(result, separators=(",", ":")), flush=True)
         except Exception as error:
             print(json.dumps({"status": "error", "error": str(error)}, separators=(",", ":")), flush=True)
+
+
+def dispatch(request):
+    command = request.pop("command")
+    if command == "health":
+        return {"status": "ok"}
+    if command == "query":
+        return query(request["uri"], request["feature"], int(request.get("limit", 1000)), int(request.get("offset", 0)))
+    if command == "resolve":
+        return resolve(request["uri"], request["feature"])
+    if command == "describe":
+        return describe(request["uri"])
+    raise ValueError("unsupported command")
+
+
+def http_serve(bind):
+    host, port = bind.rsplit(":", 1)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            payload = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_POST(self):
+            try:
+                length = int(self.headers.get("content-length", "0"))
+                if length > 10 * 1024 * 1024:
+                    raise ValueError("request too large")
+                result = dispatch(json.loads(self.rfile.read(length)))
+                payload = json.dumps(result, separators=(",", ":")).encode()
+                self.send_response(200)
+            except Exception as error:
+                payload = json.dumps({"status": "error", "error": str(error)}, separators=(",", ":")).encode()
+                self.send_response(422)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format, *_args):
+            return
+
+    ThreadingHTTPServer((host, int(port)), Handler).serve_forever()
 
 
 def main():
@@ -169,9 +207,14 @@ def main():
     describe_parser = commands.add_parser("describe")
     describe_parser.add_argument("--uri", required=True)
     commands.add_parser("serve")
+    http_parser = commands.add_parser("http")
+    http_parser.add_argument("--bind", default="127.0.0.1:8090")
     arguments = parser.parse_args()
     if arguments.command == "serve":
         serve()
+        return
+    if arguments.command == "http":
+        http_serve(arguments.bind)
         return
     if arguments.command == "ingest":
         output = ingest(arguments.source, arguments.uri)

@@ -15,6 +15,8 @@ RUN apt-get update \
     && /opt/tiledb/bin/pip install --no-cache-dir --retries 10 --timeout 120 h5py==3.16.0 numpy==2.3.5 tiledb==0.36.1 \
     && rm -rf /var/lib/apt/lists/*
 
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin shennong
+
 COPY --from=clickhouse /usr/bin/clickhouse /usr/bin/clickhouse
 COPY --from=clickhouse /etc/clickhouse-server /etc/clickhouse-server
 COPY --from=builder /app/target/release/shennong-server /usr/local/bin/shennong-server

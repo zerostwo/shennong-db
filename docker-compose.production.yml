@@ -1,0 +1,174 @@
+services:
+  reverse-proxy:
+    image: caddy:2.9.1
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SHENNONG_DOMAIN: ${SHENNONG_DOMAIN:-localhost}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      shennong-api:
+        condition: service_healthy
+    networks: [public, private]
+    mem_limit: 128m
+    cpus: 0.25
+
+  shennong-api:
+    image: ${SHENNONG_IMAGE:-zerostwo/shennong-db:0.1.0}
+    restart: unless-stopped
+    environment:
+      SHENNONG_ROLE: api
+      SHENNONG_DATABASE_URL_FILE: /run/secrets/database_url
+      SHENNONG_ADMIN_API_KEY_FILE: /run/secrets/admin_api_key
+      SHENNONG_JWT_SECRET_FILE: /run/secrets/jwt_secret
+      SHENNONG_LOCAL_DATA_ROOT: /data
+      SHENNONG_STORAGE_BACKEND: s3
+      SHENNONG_S3_BUCKET: ${SHENNONG_S3_BUCKET:-shennong}
+      SHENNONG_S3_ENDPOINT: http://seaweedfs:8333
+      SHENNONG_S3_REGION: us-east-1
+      SHENNONG_S3_FORCE_PATH_STYLE: "1"
+      SHENNONG_S3_PRESIGN_DOWNLOADS: "1"
+      SHENNONG_CLICKHOUSE_URL_FILE: /run/secrets/clickhouse_url
+      SHENNONG_TILEDB_URL: http://tiledb-backend:8090
+      SHENNONG_PROVIDER_DIR: /app/providers
+      SHENNONG_CORS_ORIGINS: ${SHENNONG_CORS_ORIGINS:-}
+      SHENNONG_MAX_BODY_BYTES: ${SHENNONG_MAX_BODY_BYTES:-1048576}
+      SHENNONG_REQUEST_TIMEOUT_SECS: ${SHENNONG_REQUEST_TIMEOUT_SECS:-30}
+    secrets:
+      - database_url
+      - admin_api_key
+      - jwt_secret
+      - clickhouse_url
+    volumes:
+      - ${SHENNONG_DATA_PATH:-./data}:/data
+    expose: ["8000"]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [private]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+      tiledb-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    mem_limit: 1g
+    cpus: 2
+
+  tiledb-backend:
+    image: ${SHENNONG_IMAGE:-zerostwo/shennong-db:0.1.0}
+    restart: unless-stopped
+    command: ["/opt/tiledb/bin/python", "/app/tiledb_backend.py", "http", "--bind", "0.0.0.0:8090"]
+    environment:
+      SHENNONG_ROLE: worker
+    volumes:
+      - ${SHENNONG_DATA_PATH:-./data}:/data
+    expose: ["8090"]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [private]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8090/health | grep -q 'ok'"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    mem_limit: 2g
+    cpus: 2
+
+  postgres:
+    image: postgres:17.5-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: shennong
+      POSTGRES_DB: shennong
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    expose: ["5432"]
+    networks: [private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shennong -d shennong"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    mem_limit: 1g
+    cpus: 2
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.4.4.38
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: shennong
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+      CLICKHOUSE_DB: shennong
+    secrets: [clickhouse_password]
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    expose: ["8123"]
+    networks: [private]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    mem_limit: 2g
+    cpus: 2
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.80
+    restart: unless-stopped
+    command: server -s3 -dir=/data -ip=seaweedfs
+    volumes:
+      - object_data:/data
+    expose: ["8333"]
+    networks: [private]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8333/status >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    mem_limit: 1g
+    cpus: 1
+
+networks:
+  public:
+  private:
+    internal: true
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  object_data:
+  caddy_data:
+  caddy_config:
+
+secrets:
+  database_url:
+    file: ${SHENNONG_SECRET_DIR:-./secrets}/database_url
+  admin_api_key:
+    file: ${SHENNONG_SECRET_DIR:-./secrets}/admin_api_key
+  jwt_secret:
+    file: ${SHENNONG_SECRET_DIR:-./secrets}/jwt_secret
+  postgres_password:
+    file: ${SHENNONG_SECRET_DIR:-./secrets}/postgres_password
+  clickhouse_password:
+    file: ${SHENNONG_SECRET_DIR:-./secrets}/clickhouse_password
+  clickhouse_url:
+    file: ${SHENNONG_SECRET_DIR:-./secrets}/clickhouse_url

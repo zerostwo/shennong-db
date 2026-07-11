@@ -10,6 +10,17 @@ if [ "$(id -u)" != 0 ]; then
   exit 1
 fi
 
+case "${SHENNONG_ROLE:-all}" in
+  api|worker)
+    exec gosu shennong "$@"
+    ;;
+  all) ;;
+  *)
+    echo "unsupported SHENNONG_ROLE" >&2
+    exit 1
+    ;;
+esac
+
 mkdir -p "$PGDATA" /data/resources /data/clickhouse /data/tiledb /var/log/clickhouse-server /var/lib/clickhouse
 chown -R postgres:postgres "$PGDATA" /data/resources /data/clickhouse /data/tiledb /var/log/clickhouse-server /var/lib/clickhouse
 
