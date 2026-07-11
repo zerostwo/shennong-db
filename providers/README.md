@@ -44,3 +44,27 @@ the resulting Artifacts are explicitly marked `integrity_status: unverified`.
 `toil.yaml` is the built-in complete TCGA TARGET GTEx provider. It installs the
 TPM expression matrix, phenotype, category, survival endpoints, and GENCODE v23
 gene map from the UCSC Xena Toil hub.
+
+PBMC 1k/3k/4k are ordinary provider examples when supplied by an operator. A
+manifest can declare a generic 10x HDF5 materializer; the installer runs it
+after atomic directory promotion but before the catalog transaction, then
+records the output as a rebuildable derived Artifact:
+
+```yaml
+storage:
+  backend: local
+  materializer:
+    id: tiledb
+    command: /app/tiledb_backend.py
+    python: /opt/tiledb/bin/python
+    source_file: pbmc3k.h5
+    target: derived/pbmc-3k
+    format: tiledb
+    storage_backend: tiledb
+    version: tiledb-0.36.1
+    schema: {role: expression, layout: sparse_feature_by_cell}
+```
+
+The source file checksum is required in production. A missing source, corrupt
+HDF5 file, or failed materializer leaves the ingestion job failed and does not
+publish an `available` Resource. Re-running the same provider is idempotent.
