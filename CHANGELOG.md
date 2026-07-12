@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-12
+
 ### Added
 
 - Add the complete Next.js WebUI for the public catalog, role-aware user console, six-step uploads, API tokens and usage, authentication, and administrator operations.
@@ -88,4 +90,5 @@ and [Semantic Versioning](https://semver.org/).
 [0.1.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.1.0
 [0.2.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.2.0
 [0.3.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.3.0
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.3.0...HEAD
+[0.4.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.0
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.4.0...HEAD
