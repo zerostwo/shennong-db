@@ -1,0 +1,3 @@
+import { z } from "zod";
+export const uploadSchema=z.object({name:z.string().min(3,"Dataset name must contain at least 3 characters"),description:z.string().min(10,"Describe the dataset in at least 10 characters"),organism:z.string().min(2,"Organism is required"),modality:z.string().min(2,"Modality is required"),assay:z.string().min(2,"Assay is required"),reference:z.string().min(2,"Reference genome is required"),annotation:z.string().min(2,"Annotation release is required"),role:z.string(),format:z.string(),dataClass:z.string(),compression:z.string(),visibility:z.enum(["Private","Public"]),grantUsers:z.string(),scopes:z.string()});
+export type UploadForm=z.infer<typeof uploadSchema>;

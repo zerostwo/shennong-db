@@ -1,51 +1,95 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Copy, KeyRound, LockKeyhole, Upload, UserRound } from "lucide-react";
-import { getSession, issueUserToken, listUserTokens, ShennongApiError } from "@/lib/api/adapter";
+import dynamic from "next/dynamic";
+import { usePathname } from "next/navigation";
+import { Check, Upload } from "lucide-react";
 import { AppShell, SectionHeader, TinyBadge, TopBar } from "./app-shell";
+import { ApiAccessView } from "./api-access-view";
+import { AccountView } from "./account-view";
+import { DataOpsView } from "./data-ops-view";
 
-const tabs = ["API access", "Profile", "Security", "Sessions", "Login history", "Uploads", "Jobs"] as const;
-type Tab = (typeof tabs)[number];
+const AppLineChart = dynamic(
+  () => import("./charts/line-chart").then((module) => module.AppLineChart),
+  { ssr: false, loading: () => <div className="chart-skeleton" aria-label="Loading request chart" /> },
+);
+
+type Page =
+  | "api-access"
+  | "usage"
+  | "profile"
+  | "security"
+  | "sessions"
+  | "login-history"
+  | "uploads"
+  | "jobs"
+  | "my-data";
+
+const pageFromPath = (path: string): Page =>
+  (path.split("/").filter(Boolean).at(-1) as Page) || "api-access";
 
 export function ConsoleView() {
-  const [tab, setTab] = useState<Tab>("API access");
-  const [token, setToken] = useState<string | null>(null);
-  const [tokens, setTokens] = useState<unknown[]>([]);
-  const [message, setMessage] = useState("Live API actions require a signed-in session.");
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => { void getSession().then((session) => session.authenticated ? listUserTokens(session.user_id).then(setTokens) : undefined).catch(() => undefined); }, []);
-
-  async function createToken() {
-    setMessage("Creating token…");
-    try {
-      const session = await getSession();
-      if (!session.authenticated) throw new Error("Sign in before creating a token.");
-      const issued = await issueUserToken(session.user_id);
-      setToken(issued.token);
-      setTokens(await listUserTokens(session.user_id));
-      setMessage("Token created. It will not be shown again after leaving this page.");
-    } catch (reason) {
-      setMessage(reason instanceof ShennongApiError || reason instanceof Error ? reason.message : "Token creation failed");
-    }
-  }
-
-  return <AppShell active="tokens"><TopBar title="API Access" description="Manage personal tokens and account security." search={false} /><div className="console-page">
-    <div className="console-tabs" role="tablist">{tabs.map((value) => <button key={value} role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{value}</button>)}</div>
-    {tab === "API access" ? <div className="console-grid"><div className="console-panel token-panel"><SectionHeader title="Personal tokens" description="Tokens are issued by the API and shown only once." action={<button className="primary-button" onClick={() => void createToken()}><KeyRound />Create token</button>} /><p className="muted">{message}</p>{token && <div className="secret-token"><code>{token}</code><button className="outline-button" onClick={() => { void navigator.clipboard?.writeText(token); setCopied(true); }}><Copy />{copied ? "Copied" : "Copy"}</button></div>}<table className="simple-table"><thead><tr><th>Token</th><th>Details</th><th>Status</th></tr></thead><tbody>{tokens.map((item, index) => { const value = item as Record<string, unknown>; return <tr key={String(value.id ?? index)}><td><code>{String(value.id ?? "—")}</code></td><td><code>{JSON.stringify(value)}</code></td><td><TinyBadge tone="green">API-backed</TinyBadge></td></tr>; })}</tbody></table>{tokens.length === 0 && <p className="muted">No tokens returned by the API.</p>}</div><div className="console-panel"><SectionHeader title="Usage" action={<TinyBadge tone="amber">not_supported</TinyBadge>} /><div className="usage-placeholder"><strong>—</strong><span>Usage metrics are not exposed by the Rust API.</span></div></div></div> : <ConsolePanel tab={tab} />}
-  </div></AppShell>;
+  const page = pageFromPath(usePathname());
+  const titles: Record<Page, [string, string]> = {
+    "api-access": ["API Access", "Manage personal tokens, usage, limits, SDKs, and examples."],
+    usage: ["Usage", "Understand API traffic, transfer, errors, and rate limiting."],
+    profile: ["Profile", "Manage your identity and regional preferences."],
+    security: ["Security", "Protect your account, credentials, and recovery methods."],
+    sessions: ["Active sessions", "Review and revoke devices with access to your account."],
+    "login-history": ["Login history", "Review recent authentication activity."],
+    uploads: ["Uploads", "Track file transfer and validation progress."],
+    jobs: ["Ingestion jobs", "Follow registration, verification, and materialization."],
+    "my-data": ["My Data", "Resources you own, use, or have collected."],
+  };
+  return (
+    <AppShell active={page}>
+      <TopBar title={titles[page][0]} description={titles[page][1]} search={false} />
+      <div className="console-page"><ConsolePage page={page} /></div>
+    </AppShell>
+  );
 }
 
-function ConsolePanel({ tab }: { tab: Exclude<Tab, "API access"> }) {
-  const content: Record<Exclude<Tab, "API access">, { title: string; description: string; icon: typeof UserRound }> = {
-    Profile: { title: "Account profile", description: "Profile editing is not exposed by the current Rust API.", icon: UserRound },
-    Security: { title: "Security controls", description: "Password and 2FA enrollment are not exposed by the current Rust API.", icon: LockKeyhole },
-    Sessions: { title: "Active sessions", description: "Session listing is not exposed by the current Rust API.", icon: LockKeyhole },
-    "Login history": { title: "Login history", description: "Login history is not exposed by the current Rust API.", icon: LockKeyhole },
-    Uploads: { title: "Upload queue", description: "Upload endpoints are not exposed by the current Rust API.", icon: Upload },
-    Jobs: { title: "Ingestion jobs", description: "Ingestion job endpoints are not exposed by the current Rust API.", icon: Upload }
-  };
-  const item = content[tab]; const Icon = item.icon;
-  return <div className="console-panel unsupported-panel"><Icon /><SectionHeader title={item.title} description={item.description} /><TinyBadge tone="amber">not_supported</TinyBadge></div>;
+function ConsolePage({ page }: { page: Page }) {
+  if (page === "api-access") return <ApiAccessView />;
+  if (page === "usage") return <Usage />;
+  if (["profile", "security", "sessions", "login-history"].includes(page)) return <AccountView page={page as "profile" | "security" | "sessions" | "login-history"} />;
+  if (["uploads", "jobs", "my-data"].includes(page)) return <DataOpsView page={page as "uploads" | "jobs" | "my-data"} />;
+  return null;
+}
+
+function Usage() {
+  return (
+    <>
+      <div className="workspace-toolbar">
+        <select aria-label="Date range"><option>Last 30 days</option><option>Last 7 days</option><option>Last 90 days</option></select>
+        <select aria-label="Token"><option>All tokens</option><option>Notebook analysis</option></select>
+        <select aria-label="Endpoint"><option>All endpoints</option><option>/api/v1/resources</option></select>
+        <select aria-label="Resource"><option>All resources</option><option>Toil RNA-seq</option></select>
+        <select aria-label="Status"><option>All status codes</option><option>2xx</option><option>4xx</option><option>5xx</option></select>
+      </div>
+      <div className="api-metrics">
+        {[["Requests", "2.14M"], ["Data transfer", "186.4 GB"], ["Errors", "0.18%"], ["Rate limited", "1,204"]].map(([label, value]) => <div className="console-metric" key={label}><span>{label}</span><strong>{value}</strong></div>)}
+      </div>
+      <div className="console-panel">
+        <SectionHeader title="Request volume" />
+        <AppLineChart label="Request volume for the last 30 days" values={[58, 64, 61, 73, 69, 82, 78, 91]} />
+      </div>
+      <RecordTable headings={["Top resource", "Requests", "Transfer", "Errors"]} rows={[["Toil RNA-seq", "1.12M", "82.4 GB", "0.09%"], ["PBMC 3K", "632K", "61.7 GB", "0.22%"], ["TCGA survival", "388K", "42.3 GB", "0.31%"]]} />
+      <div className="usage-grid">
+        <RecordTable headings={["Top endpoint", "Requests", "Median latency"]} rows={[["GET /resources", "881K", "82 ms"], ["POST /query", "743K", "241 ms"], ["GET /artifacts", "516K", "116 ms"]]} />
+        <RecordTable headings={["Token", "Requests", "Errors"]} rows={[["Notebook analysis", "1.48M", "0.12%"], ["RStudio", "421K", "0.21%"], ["CLI", "239K", "0.43%"]]} />
+      </div>
+    </>
+  );
+}
+
+function RecordTable({ headings, rows }: { headings: readonly string[]; rows: readonly (readonly string[])[] }) {
+  return (
+    <div className="record-table-wrap">
+      <table className="simple-table">
+        <thead><tr>{headings.map((heading) => <th key={heading}>{heading}</th>)}</tr></thead>
+        <tbody>{rows.map((row) => <tr key={row.join("-")}>{row.map((cell, index) => <td key={cell}>{index === 0 ? <strong>{cell}</strong> : cell.includes("Success") || cell === "Available" || cell === "Active" ? <TinyBadge tone="green"><Check />{cell}</TinyBadge> : cell}</td>)}</tr>)}</tbody>
+      </table>
+      {rows.length === 0 && <div className="empty-state"><Upload /><h3>No records</h3><p>There is nothing to show yet.</p></div>}
+    </div>
+  );
 }

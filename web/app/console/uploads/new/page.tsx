@@ -1,5 +1,5 @@
-import { ConsoleView } from "@/components/console-view";
+import { UploadView } from "@/components/upload-view";
 
 export default function NewUploadPage() {
-  return <ConsoleView />;
+  return <UploadView />;
 }
