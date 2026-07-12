@@ -6,3 +6,19 @@ services:
       - "18080:8000"
     volumes:
       - ./data:/data
+  shennong-db-web:
+    image: shennong-db-web:0.1.0
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      - shennong-db
+    environment:
+      SHENNONG_API_INTERNAL_URL: http://shennong-db:8000
+      NEXT_PUBLIC_SHENNONG_PUBLIC_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true

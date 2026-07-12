@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Add the complete Next.js WebUI for the public catalog, role-aware user console, six-step uploads, API tokens and usage, authentication, and administrator operations.
+- Add browser and Node MSW contracts, Vitest component coverage, desktop/mobile Playwright flows, OpenAPI documentation, and committed visual QA references.
+- Add a standalone non-root WebUI image and hardened two-service Compose deployment.
+
+### Changed
+
+- Route browser API traffic through a bounded BFF with HttpOnly session authentication, explicit security headers, strict role-aware middleware, and private-resource non-disclosure.
+- Replace static placeholder controls and charts with stateful dialogs, drawers, forms, tables, URL filters, ECharts, and destructive confirmations.
+
+### Fixed
+
+- Prevent mobile table and full-screen Drawer overflow, keep Drawer close controls reachable, and preserve catalog filters when opening or closing a Resource.
+
 ## [0.3.0] - 2026-07-12
 
 ### Added
@@ -71,3 +88,4 @@ and [Semantic Versioning](https://semver.org/).
 [0.1.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.1.0
 [0.2.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.2.0
 [0.3.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.3.0
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.3.0...HEAD
