@@ -1,2 +1,2 @@
-import { CatalogView } from "@/components/catalog-view";
-export default function SchemasPage() { return <CatalogView />; }
+import { CatalogSectionView } from "@/components/catalog-section-view";
+export default function SchemasPage() { return <CatalogSectionView />; }
