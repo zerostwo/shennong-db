@@ -1,0 +1,27 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "ShennongDB API", "version": "0.1.0", "description": "WebUI-facing Rust API contract." },
+  "servers": [{ "url": "/api/v1" }],
+  "paths": {
+    "/resources": { "get": { "operationId": "listResources", "responses": { "200": { "description": "Visible resources" } } } },
+    "/resources/{id}": { "get": { "operationId": "getResource", "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Resource" }, "404": { "$ref": "#/components/responses/NotFound" } } } },
+    "/resources/{id}/artifacts": { "get": { "operationId": "listArtifacts", "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Artifacts" } } } },
+    "/resources/{id}/relations": { "get": { "operationId": "listRelations", "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Relations" } } } },
+    "/providers": { "get": { "operationId": "listProviders", "responses": { "200": { "description": "Providers" } } } },
+    "/users": { "get": { "operationId": "listUsers", "responses": { "200": { "description": "Users" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } },
+    "/audit-events": { "get": { "operationId": "listAuditEvents", "responses": { "200": { "description": "Audit events" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } },
+    "/auth/sign-in": { "post": { "operationId": "signIn", "responses": { "200": { "description": "Session or 2FA challenge" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } },
+    "/auth/verify-2fa": { "post": { "operationId": "verify2fa", "responses": { "200": { "description": "Authenticated session" } } } },
+    "/auth/session": { "get": { "operationId": "getSession", "responses": { "200": { "description": "Current HttpOnly web session" } } } },
+    "/auth/sign-out": { "post": { "operationId": "signOut", "responses": { "204": { "description": "Signed out" } } } },
+    "/auth/tokens": { "post": { "operationId": "createPersonalToken", "responses": { "200": { "description": "One-time token secret" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } },
+    "/query": { "post": { "operationId": "query", "responses": { "200": { "description": "Query result" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } }
+  },
+  "components": {
+    "parameters": { "Id": { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } } },
+    "responses": {
+      "Unauthorized": { "description": "Authentication required" },
+      "NotFound": { "description": "Missing or undiscoverable resource" }
+    }
+  }
+}

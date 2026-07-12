@@ -1,3 +1,5 @@
+import { waitForMockWorker } from "@/lib/msw-ready";
+
 export type ResourceVisibility = "Public" | "Private";
 export type ResourceKind = "Resource" | "Artifact" | "Relation";
 
@@ -47,6 +49,7 @@ export class ShennongApiError extends Error {
 const API_BASE = process.env.NEXT_PUBLIC_SHENNONG_API_URL ?? "/api/v1";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  await waitForMockWorker();
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
@@ -135,6 +138,7 @@ export async function installProvider(name: string): Promise<unknown> { return r
 export async function listUsers(): Promise<unknown[]> { return request<unknown[]>("/users"); }
 export async function listAuditEvents(): Promise<unknown[]> { return request<unknown[]>("/audit-events"); }
 export async function getHealth(): Promise<Record<string, unknown>> {
+  await waitForMockWorker();
   const response = await fetch("/healthz", { credentials: "include", headers: { accept: "application/json" } });
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) throw new ShennongApiError({ code: "health_unavailable", message: typeof payload.message === "string" ? payload.message : "Health check failed", status: response.status });
