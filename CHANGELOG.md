@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-12
+
+### Fixed
+
+- Preserve administrator settings panels while live data refreshes so successful saves retain visible confirmation instead of briefly unmounting the UI.
+- Wait for the persisted personal-token inventory before browser mutation assertions, eliminating races with the initial authenticated API load.
+
 ## [0.5.1] - 2026-07-12
 
 ### Fixed
@@ -140,4 +147,5 @@ and [Semantic Versioning](https://semver.org/).
 [0.4.3]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.3
 [0.5.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.0
 [0.5.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.1
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.5.1...HEAD
+[0.5.2]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.2
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.5.2...HEAD

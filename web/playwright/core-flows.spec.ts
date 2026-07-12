@@ -89,7 +89,11 @@ test("authenticated mutations persist and reversible QA changes are cleaned up",
   await page.getByRole("button", { name: `Delete ${collectionName}` }).click();
   await expect(page.getByText(collectionName)).toHaveCount(0);
 
+  const tokensLoaded = page.waitForResponse((response) =>
+    response.request().method() === "GET" && response.url().includes("/api/v1/auth/tokens"),
+  );
   await page.goto("/console/api-access");
+  await tokensLoaded;
   const revokeButtons = page.getByRole("button", { name: /^Revoke / });
   const initialTokens = await revokeButtons.count();
   await page.getByRole("button", { name: "Create token" }).click();
@@ -106,12 +110,12 @@ test("authenticated mutations persist and reversible QA changes are cleaned up",
   const originalName = await instanceName.inputValue();
   await instanceName.fill(`${originalName} QA`);
   await page.getByRole("button", { name: "Save changes" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await expect(page.getByRole("status")).toHaveText("Saved to PostgreSQL");
   await page.reload();
   await expect(instanceName).toHaveValue(`${originalName} QA`);
   await instanceName.fill(originalName);
   await page.getByRole("button", { name: "Save changes" }).click();
-  await expect(page.getByRole("status")).toHaveText("Saved");
+  await expect(page.getByRole("status")).toHaveText("Saved to PostgreSQL");
 
   await page.goto("/admin/backups");
   const completed = page.getByRole("cell", { name: "completed" });

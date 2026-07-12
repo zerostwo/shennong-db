@@ -43,7 +43,7 @@ export function AdminSectionView({ section }: { section: Section }) {
   const [error, setError] = useState("");
   const [updated, setUpdated] = useState("");
   const load = useCallback(async () => {
-    setLoading(true); setError("");
+    setError("");
     try {
       if (section === "dashboard") {
         const [health, overview, usage, rows] = await Promise.all([getHealth(), getAdminOverview(), getUsage(30), listAuditEvents()]);
@@ -106,7 +106,7 @@ function Settings({ settings, reload }: { settings: JsonRecord; reload: () => Pr
 function JsonSettings({ group, value, reload }: { group:string; value:JsonRecord; reload:()=>Promise<void> }) {
   const [draft,setDraft]=useState<JsonRecord>(value);const [saving,setSaving]=useState(false);const [message,setMessage]=useState("");
   useEffect(()=>setDraft(value),[value]);
-  async function save(){setSaving(true);setMessage("");try{await updateSetting(group,draft);setMessage("Saved to PostgreSQL");await reload();}catch(reason){setMessage(reason instanceof Error?reason.message:"Save failed");}finally{setSaving(false);}}
+  async function save(){setSaving(true);setMessage("");try{await updateSetting(group,draft);await reload();setMessage("Saved to PostgreSQL");}catch(reason){setMessage(reason instanceof Error?reason.message:"Save failed");}finally{setSaving(false);}}
   return <div className="settings-section"><SectionHeader title={group[0]?.toUpperCase()+group.slice(1)} description="Values are loaded from and persisted by the Rust API."/>{Object.entries(draft).map(([key,val])=><label className="setting-row" key={key}><span><strong>{key.replaceAll("_"," ")}</strong></span>{typeof val==="boolean"?<input type="checkbox" checked={val} onChange={(event)=>setDraft((old)=>({...old,[key]:event.target.checked}))}/>:<input type={typeof val==="number"?"number":"text"} value={String(val??"")} onChange={(event)=>setDraft((old)=>({...old,[key]:typeof val==="number"?Number(event.target.value):event.target.value}))}/>}</label>)}<div className="settings-footer"><span role="status">{message}</span><button className="primary-button" onClick={()=>void save()} disabled={saving}>{saving?"Saving…":"Save changes"}</button></div></div>;
 }
 
