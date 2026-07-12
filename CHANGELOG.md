@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-12
+
+### Fixed
+
+- Fill every non-final S3 multipart upload part across fragmented async reads so SeaweedFS accepts large Provider Artifacts.
+
 ## [0.4.0] - 2026-07-12
 
 ### Added
@@ -91,4 +97,5 @@ and [Semantic Versioning](https://semver.org/).
 [0.2.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.2.0
 [0.3.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.3.0
 [0.4.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.0
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.4.0...HEAD
+[0.4.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.1
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.4.1...HEAD

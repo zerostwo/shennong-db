@@ -204,15 +204,12 @@ impl S3ObjectStorage {
         let mut part_number = 1_u32;
         let mut etags = Vec::new();
         loop {
-            let mut chunk = vec![0_u8; self.config.multipart_part_size.max(5 * 1024 * 1024)];
-            let count = reader
-                .read(&mut chunk)
-                .await
-                .map_err(|_| StorageError::Io(io::Error::other("s3 read")))?;
-            if count == 0 {
+            let chunk =
+                read_multipart_chunk(reader, self.config.multipart_part_size.max(5 * 1024 * 1024))
+                    .await?;
+            if chunk.is_empty() {
                 break;
             }
-            chunk.truncate(count);
             let part_url = with_query_pair(
                 &base,
                 "partNumber",
@@ -325,6 +322,26 @@ impl S3ObjectStorage {
             .append_pair("X-Amz-Signature", &signature);
         Ok(url.to_string())
     }
+}
+
+async fn read_multipart_chunk(
+    reader: &mut (dyn AsyncRead + Send + Unpin),
+    part_size: usize,
+) -> Result<Vec<u8>, StorageError> {
+    let mut chunk = vec![0_u8; part_size];
+    let mut count = 0;
+    while count < chunk.len() {
+        let read = reader
+            .read(&mut chunk[count..])
+            .await
+            .map_err(|_| StorageError::Io(io::Error::other("s3 read")))?;
+        if read == 0 {
+            break;
+        }
+        count += read;
+    }
+    chunk.truncate(count);
+    Ok(chunk)
 }
 
 #[async_trait]
@@ -597,9 +614,64 @@ fn sign_request(request: &mut Request, config: &S3Config) -> Result<(), StorageE
 
 #[cfg(test)]
 mod tests {
-    use super::{S3Config, S3ObjectStorage, percent_encode};
+    use super::{S3Config, S3ObjectStorage, percent_encode, read_multipart_chunk};
     use crate::{ArtifactUri, BlobStore, ByteRange};
+    use std::io::Cursor;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use std::time::Duration;
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    struct FragmentedReader {
+        inner: Cursor<Vec<u8>>,
+        max_read: usize,
+    }
+
+    impl AsyncRead for FragmentedReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let remaining = self.inner.get_ref().len() - self.inner.position() as usize;
+            let count = remaining.min(self.max_read).min(buffer.remaining());
+            if count > 0 {
+                let start = self.inner.position() as usize;
+                buffer.put_slice(&self.inner.get_ref()[start..start + count]);
+                self.inner.set_position((start + count) as u64);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_chunks_fill_across_fragmented_reads() {
+        let part_size = 5 * 1024 * 1024;
+        let mut reader = FragmentedReader {
+            inner: Cursor::new(vec![7_u8; part_size + 123]),
+            max_read: 16 * 1024,
+        };
+        assert_eq!(
+            read_multipart_chunk(&mut reader, part_size)
+                .await
+                .unwrap()
+                .len(),
+            part_size
+        );
+        assert_eq!(
+            read_multipart_chunk(&mut reader, part_size)
+                .await
+                .unwrap()
+                .len(),
+            123
+        );
+        assert!(
+            read_multipart_chunk(&mut reader, part_size)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
     #[test]
     fn encodes_unicode_keys_for_sigv4() {
         assert_eq!(percent_encode("café/data".as_bytes()), "caf%C3%A9%2Fdata");
