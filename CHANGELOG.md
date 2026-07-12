@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-12
+
+### Fixed
+
+- Verify the complete Toil expression archive with its measured SHA-256 checksum instead of requiring the unverified-provider compatibility switch.
+- Give synchronous Provider installation its own four-hour timeout while retaining the short default timeout for ordinary API requests.
+
 ## [0.4.1] - 2026-07-12
 
 ### Fixed
@@ -98,4 +105,5 @@ and [Semantic Versioning](https://semver.org/).
 [0.3.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.3.0
 [0.4.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.0
 [0.4.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.1
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.4.1...HEAD
+[0.4.2]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.2
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.4.2...HEAD

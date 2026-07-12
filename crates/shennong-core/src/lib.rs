@@ -133,7 +133,10 @@ impl ProviderInstaller {
             provider_dir: provider_dir.into(),
             data_root: data_root.clone(),
             max_download_bytes,
-            download_timeout: env_duration("SHENNONG_DOWNLOAD_TIMEOUT_SECS", 300),
+            download_timeout: env_duration(
+                "SHENNONG_PROVIDER_INSTALL_TIMEOUT_SECS",
+                env_duration("SHENNONG_DOWNLOAD_TIMEOUT_SECS", 14_400).as_secs(),
+            ),
             allow_unverified: std::env::var("SHENNONG_PROVIDER_ALLOW_UNVERIFIED")
                 .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
             storage: std::sync::Arc::new(LocalObjectStorage::new(data_root)),

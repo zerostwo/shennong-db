@@ -70,6 +70,7 @@ struct AppState {
     download_rate: RateLimiter,
     download_timeout: Duration,
     request_timeout: Duration,
+    provider_install_timeout: Duration,
     trust_proxy_headers: bool,
     cache_fill: Arc<AsyncMutex<()>>,
     setup_lock: Arc<AsyncMutex<()>>,
@@ -204,7 +205,12 @@ async fn request_timeout_middleware(
     if matches!(request.uri().path(), "/health" | "/healthz") {
         return next.run(request).await;
     }
-    match tokio::time::timeout(state.request_timeout, next.run(request)).await {
+    let timeout = if request.uri().path() == "/api/v1/resources/install" {
+        state.provider_install_timeout
+    } else {
+        state.request_timeout
+    };
+    match tokio::time::timeout(timeout, next.run(request)).await {
         Ok(response) => response,
         Err(_) => ApiError(
             StatusCode::REQUEST_TIMEOUT,
@@ -420,6 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(300),
     );
     let request_timeout = env_duration("SHENNONG_REQUEST_TIMEOUT_SECS", 30);
+    let provider_install_timeout = env_duration("SHENNONG_PROVIDER_INSTALL_TIMEOUT_SECS", 14_400);
     let max_body_bytes = env_usize("SHENNONG_MAX_BODY_BYTES", 1024 * 1024);
     let global_concurrency = env_usize("SHENNONG_MAX_CONCURRENCY", 64);
     let query_concurrency = env_usize("SHENNONG_QUERY_MAX_CONCURRENCY", 8);
@@ -519,6 +526,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         download_rate,
         download_timeout,
         request_timeout,
+        provider_install_timeout,
         trust_proxy_headers,
         cache_fill: Arc::new(AsyncMutex::new(())),
         setup_lock: Arc::new(AsyncMutex::new(())),
@@ -599,7 +607,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(TraceLayer::new_for_http());
     let address = env::var("SHENNONG_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    tracing::info!(%address, "shennong-db v0.4.1 listening");
+    tracing::info!(%address, "shennong-db v0.4.2 listening");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -622,7 +630,7 @@ fn env_secret(name: &str) -> Option<String> {
 }
 
 async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"status":"ok","service":"ShennongDB","version":"0.4.1"}))
+    Json(serde_json::json!({"status":"ok","service":"ShennongDB","version":"0.4.2"}))
 }
 
 async fn metrics(State(state): State<AppState>) -> Response {
@@ -678,7 +686,7 @@ async fn ready(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
     }
 }
 async fn version() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"service":"ShennongDB","version":"0.4.1","api":"v1"}))
+    Json(serde_json::json!({"service":"ShennongDB","version":"0.4.2","api":"v1"}))
 }
 
 #[derive(serde::Deserialize)]

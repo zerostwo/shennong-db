@@ -11,7 +11,7 @@ files:
     format: tsv
     download_size: 1323254426
     size: 8983490058
-    checksum: null
+    checksum: sha256:a8c36cb16ef82eccb0b6e1e62a2af3ab9d54c1f56735bc59dfac4cbbe2391d4d
     compression: gzip
     index: gene_matrix
     schema:
