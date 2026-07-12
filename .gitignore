@@ -8,6 +8,9 @@ data/
 web/node_modules/
 web/.next/
 web/dist/
+web/test-results/
+web/playwright-report/
+web/coverage/
 *.tsbuildinfo
 web/vite.config.d.ts
 web/vite.config.js

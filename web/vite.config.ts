@@ -1,24 +1,20 @@
 import path from "path";
 
-import tailwindcss from "@tailwindcss/vite";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src")
+      "@": path.resolve(__dirname, ".")
     }
   },
-  build: {
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          charts: ["recharts"]
-        }
-      }
-    }
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./tests/setup.ts"],
+    restoreMocks: true,
+    exclude: ["playwright/**", "node_modules/**"]
   },
   server: {
     host: "127.0.0.1",
