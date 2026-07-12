@@ -6,7 +6,7 @@ services:
     ports:
       - "127.0.0.1:${SHENNONG_TEST_PORT:-18081}:8000"
     environment:
-      SHENNONG_ADMIN_API_KEY: integration-test-admin-key
+      SHENNONG_ADMIN_API_KEY: integration-test-admin-key-32-bytes
       SHENNONG_JWT_SECRET: integration-test-jwt-secret-with-32-bytes
       SHENNONG_LOCAL_DATA_ROOT: /data
       SHENNONG_STORAGE_BACKEND: local

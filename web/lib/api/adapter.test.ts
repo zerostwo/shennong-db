@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { http, HttpResponse } from "msw";
 import { getResource, listResources } from "./adapter";
-import { server } from "@/mocks/server";
 
 describe("listResources", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -15,12 +13,13 @@ describe("listResources", () => {
   });
 
   it("normalizes API failures without exposing server internals", async () => {
-    server.use(http.get("*/api/v1/resources/private-record", () => HttpResponse.json({ code:"not_found", message:"Resource not found", request_id:"req-42" }, { status:404 })));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ code:"not_found", message:"Resource not found", request_id:"req-42" }), { status:404, headers:{"content-type":"application/json"} })));
     await expect(getResource("private-record")).rejects.toMatchObject({ code:"not_found", message:"Resource not found", requestId:"req-42", status:404 });
   });
 
-  it("uses the MSW catalog contract", async () => {
+  it("does not invent catalog records when the live API returns none", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ data:[] }), { status:200, headers:{"content-type":"application/json"} })));
     const result = await listResources();
-    expect(result.data[0]).toMatchObject({ id:"toil", visibility:"Public", backend:"TileDB" });
+    expect(result.data).toEqual([]);
   });
 });

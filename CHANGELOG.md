@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-12
+
+### Added
+
+- Add PostgreSQL-backed collections, favorites, uploads, user preferences, settings, metadata backups, login history, revocable web sessions, password resets, TOTP enrollment, recovery codes, and request-usage events.
+- Add permission-checked Rust APIs for every WebUI product surface, streaming uploads with SHA-256 verification, atomic upload-to-Resource registration, real monitoring aggregates, and object-storage metadata backup/restore with a pre-restore safety snapshot.
+- Add live public instance configuration and capabilities views for the Support and Docs pages.
+
+### Changed
+
+- Drive Catalog, resource details, API access, usage, uploads, ingestion, account security, administrator tables, monitoring, storage, settings, and backups exclusively from persisted API records.
+- Enforce persisted session lifetime, password length, administrator 2FA, public-catalog, storage-prefix, and retention settings in the Rust service.
+- Record successful and failed authentication, request latency, response bytes, errors, rate limiting, and per-resource traffic for real dashboards.
+
+### Removed
+
+- Remove the MSW dependency and worker, demo roles, runtime fallback resources, hard-coded notifications, fabricated metrics, fake table mutations, and the complete WebUI mock dataset.
+
 ## [0.4.3] - 2026-07-12
 
 ### Fixed
@@ -113,4 +131,5 @@ and [Semantic Versioning](https://semver.org/).
 [0.4.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.1
 [0.4.2]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.2
 [0.4.3]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.3
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.4.3...HEAD
+[0.5.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.0
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.5.0...HEAD

@@ -11,13 +11,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Use the browser API mock during isolated UI development:
-
-```bash
-NEXT_PUBLIC_MSW_ENABLED=1 NEXT_PUBLIC_SHENNONG_DEMO_ROLE=admin pnpm dev
-```
-
-`NEXT_PUBLIC_SHENNONG_DEMO_ROLE` accepts `guest`, `user`, or `admin` and is only read when explicitly set. Production authentication always comes from the HttpOnly Web session exposed by the Rust API through the BFF.
+The development server uses the configured live Rust API. Authentication comes from the HttpOnly Web session exposed through the BFF; there is no runtime demo-role or mock-data mode.
 
 ## Verification
 
@@ -29,7 +23,7 @@ pnpm playwright
 pnpm build
 ```
 
-The Playwright suite starts the role-aware MSW environment and writes reference screenshots to `../docs/screenshots/webui`.
+Set `SHENNONG_E2E_BASE_URL`, `SHENNONG_E2E_EMAIL`, and `SHENNONG_E2E_PASSWORD` to run Playwright against a live deployment. Reference screenshots are written to `../docs/screenshots/webui`.
 
 ## Production
 

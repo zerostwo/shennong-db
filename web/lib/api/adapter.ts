@@ -1,5 +1,3 @@
-import { waitForMockWorker } from "@/lib/msw-ready";
-
 export type ResourceVisibility = "Public" | "Private";
 export type ResourceKind = "Resource" | "Artifact" | "Relation";
 
@@ -49,7 +47,6 @@ export class ShennongApiError extends Error {
 const API_BASE = process.env.NEXT_PUBLIC_SHENNONG_API_URL ?? "/api/v1";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  await waitForMockWorker();
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}`, {
@@ -114,7 +111,7 @@ function toResource(value: Record<string, unknown>): ResourceRecord {
   };
 }
 
-export type ApiResult<T> = { data: T; source: "live" | "fallback" };
+export type ApiResult<T> = { data: T; source: "live" };
 
 export async function listResources(query?: string): Promise<ApiResult<ResourceRecord[]>> {
   const params = query ? `?q=${encodeURIComponent(query)}` : "";
@@ -136,23 +133,30 @@ export async function listRelations(resourceId: string): Promise<unknown[]> {
 export async function listProviders(): Promise<unknown[]> { return request<unknown[]>("/providers"); }
 export async function installProvider(name: string): Promise<unknown> { return request("/resources/install", { method: "POST", body: JSON.stringify({ name }) }); }
 export async function listUsers(): Promise<unknown[]> { return request<unknown[]>("/users"); }
+export async function getUser(id: string): Promise<JsonRecord> { return request(`/users/${encodeURIComponent(id)}`); }
+export async function listAdminUserSessions(id: string): Promise<JsonRecord[]> { return request(`/users/${encodeURIComponent(id)}/sessions`); }
+export async function listAdminUserLoginHistory(id: string): Promise<JsonRecord[]> { return request(`/users/${encodeURIComponent(id)}/login-history`); }
 export async function listAuditEvents(): Promise<unknown[]> { return request<unknown[]>("/audit-events"); }
 export async function getHealth(): Promise<Record<string, unknown>> {
-  await waitForMockWorker();
   const response = await fetch("/healthz", { credentials: "include", headers: { accept: "application/json" } });
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) throw new ShennongApiError({ code: "health_unavailable", message: typeof payload.message === "string" ? payload.message : "Health check failed", status: response.status });
   return payload;
 }
+export async function getCapabilities(): Promise<JsonRecord> { return request("/capabilities"); }
+export async function getPublicConfig(): Promise<JsonRecord> { return request("/public-config"); }
 
-export async function issueUserToken(userId: string, expiresIn = 86_400, scopes = ["resource.read"]): Promise<{ token: string; expires_at: number }> {
+export async function issueUserToken(userId: string, expiresIn = 86_400, scopes = ["resource.read"]): Promise<{ token: string; expires_at: number; token_id: string }> {
   void userId;
   return request("/auth/tokens", { method: "POST", body: JSON.stringify({ expires_in: expiresIn, scopes }) });
 }
 
 export async function listUserTokens(userId: string): Promise<unknown[]> {
-  return request<unknown[]>(`/users/${encodeURIComponent(userId)}/tokens`);
+  void userId;
+  return request<unknown[]>("/auth/tokens");
 }
+export async function listAdminUserTokens(userId: string): Promise<JsonRecord[]> { return request(`/users/${encodeURIComponent(userId)}/tokens`); }
+export async function revokeOwnToken(tokenId: string): Promise<void> { await request(`/auth/tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" }); }
 
 export async function revokeCurrentToken(): Promise<void> {
   await request("/auth/revoke", { method: "POST" });
@@ -162,7 +166,7 @@ export async function grantResource(resourceId: string, userId: string): Promise
   await request(`/resources/${encodeURIComponent(resourceId)}/grants/${encodeURIComponent(userId)}`, { method: "PUT" });
 }
 
-export async function updateUser(user: { id: string; display_name: string; email?: string; role: string; status: string }): Promise<unknown> {
+export async function updateUser(user: { id: string; display_name: string; email?: string; role: string; status: string; password?: string }): Promise<unknown> {
   return request(`/users/${encodeURIComponent(user.id)}`, { method: "PUT", body: JSON.stringify(user) });
 }
 
@@ -187,6 +191,45 @@ export async function getSession(): Promise<{ authenticated: boolean; user_id: s
   return request("/auth/session");
 }
 
-export async function unsupported<T>(feature: string): Promise<T> {
-  throw new ShennongApiError({ code: "not_supported", message: `${feature} is not supported by the current API` });
+export type JsonRecord = Record<string, unknown>;
+export async function listGrants(): Promise<JsonRecord[]> { return request("/grants"); }
+export async function createGrant(value: JsonRecord): Promise<JsonRecord> { return request("/grants", { method: "POST", body: JSON.stringify(value) }); }
+export async function deleteGrant(resourceId: string, userId: string): Promise<void> { await request(`/grants/${encodeURIComponent(resourceId)}/${encodeURIComponent(userId)}`, { method: "DELETE" }); }
+export async function listIngestionJobs(): Promise<JsonRecord[]> { return request("/ingestion-jobs"); }
+export async function listAllTokens(): Promise<JsonRecord[]> { return request("/admin/tokens"); }
+export async function revokeToken(tokenId: string): Promise<void> { await request(`/admin/tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" }); }
+export async function listCollections(): Promise<JsonRecord[]> { return request("/collections"); }
+export async function createCollection(value: { name: string; description: string; visibility: "public" | "private" }): Promise<JsonRecord> { return request("/collections", { method: "POST", body: JSON.stringify(value) }); }
+export async function deleteCollection(id: string): Promise<void> { await request(`/collections/${encodeURIComponent(id)}`, { method: "DELETE" }); }
+export async function setCollectionResource(collectionId: string, resourceId: string, add: boolean): Promise<void> { await request(`/collections/${encodeURIComponent(collectionId)}/resources/${encodeURIComponent(resourceId)}`, { method: add ? "PUT" : "DELETE" }); }
+export async function listFavorites(): Promise<JsonRecord[]> { return request("/favorites"); }
+export async function setFavorite(resourceId: string, favorite: boolean): Promise<void> { await request(`/favorites/${encodeURIComponent(resourceId)}`, { method: favorite ? "PUT" : "DELETE" }); }
+export async function listUploads(): Promise<JsonRecord[]> { return request("/uploads"); }
+export async function uploadFile(file: File): Promise<JsonRecord> {
+  const response = await fetch(`${API_BASE}/uploads`, { method: "POST", credentials: "include", headers: { "content-type": file.type || "application/octet-stream", "x-filename": file.name }, body: file });
+  const payload = await response.json().catch(() => ({})) as JsonRecord;
+  if (!response.ok) throw new ShennongApiError({ code: String(payload.code ?? "upload_failed"), message: String(payload.message ?? `Upload failed (${response.status})`), status: response.status });
+  return ("data" in payload ? payload.data : payload) as JsonRecord;
 }
+export async function registerUploads(value: JsonRecord): Promise<JsonRecord> { return request("/uploads/register", { method: "POST", body: JSON.stringify(value) }); }
+export async function getSettings(): Promise<JsonRecord> { return request("/settings"); }
+export async function updateSetting(key: string, value: JsonRecord): Promise<JsonRecord> { return request(`/settings/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify(value) }); }
+export async function listBackups(): Promise<JsonRecord[]> { return request("/backups"); }
+export async function createBackup(kind: "metadata" | "full" = "metadata"): Promise<JsonRecord> { return request("/backups", { method: "POST", body: JSON.stringify({ kind }) }); }
+export async function restoreBackup(id: string): Promise<void> { await request(`/backups/${encodeURIComponent(id)}/restore`, { method: "POST" }); }
+export async function getUsage(days = 30): Promise<JsonRecord> { return request(`/usage?days=${days}`); }
+export async function getAdminOverview(): Promise<JsonRecord> { return request("/admin/overview"); }
+export async function getStorageSummary(): Promise<JsonRecord> { return request("/storage"); }
+export async function listSessions(): Promise<JsonRecord[]> { return request("/auth/sessions"); }
+export async function revokeSession(tokenId: string): Promise<void> { await request(`/auth/sessions/${encodeURIComponent(tokenId)}`, { method: "DELETE" }); }
+export async function listLoginHistory(): Promise<JsonRecord[]> { return request("/auth/login-history"); }
+export async function getProfile(): Promise<JsonRecord> { return request("/auth/profile"); }
+export async function updateProfile(value: JsonRecord): Promise<JsonRecord> { return request("/auth/profile", { method: "PUT", body: JSON.stringify(value) }); }
+export async function changePassword(current_password: string, new_password: string): Promise<void> { await request("/auth/change-password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }); }
+export async function getTwoFactorStatus(): Promise<{ enabled: boolean; recovery_codes_remaining: number }> { return request("/auth/2fa"); }
+export async function enrollTwoFactor(): Promise<{ secret: string; otpauth_uri: string; expires_in: number }> { return request("/auth/2fa/enroll", { method: "POST" }); }
+export async function confirmTwoFactor(code: string): Promise<{ enabled: boolean; recovery_codes: string[] }> { return request("/auth/2fa/confirm", { method: "POST", body: JSON.stringify({ code }) }); }
+export async function disableTwoFactor(password: string): Promise<void> { await request("/auth/2fa", { method: "DELETE", body: JSON.stringify({ password }) }); }
+export async function forgotPassword(email: string): Promise<JsonRecord> { return request("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }); }
+export async function resetPassword(token: string, new_password: string): Promise<void> { await request("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, new_password }) }); }
+export async function verifyRecoveryCode(challenge: string, code: string): Promise<JsonRecord> { return request("/auth/recovery-code", { method: "POST", body: JSON.stringify({ challenge, code }) }); }

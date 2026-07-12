@@ -8,6 +8,6 @@ const compat = new FlatCompat({ baseDirectory: directory });
 export default [
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   {
-    ignores: [".next/**", "node_modules/**", "dist/**", "src/**", "public/mockServiceWorker.js", "next-env.d.ts", "eslint.config.mjs", "postcss.config.mjs", "vite.config.ts", "index.html"]
+    ignores: [".next/**", "node_modules/**", "dist/**", "src/**", "next-env.d.ts", "eslint.config.mjs", "postcss.config.mjs", "vite.config.ts", "index.html"]
   }
 ];

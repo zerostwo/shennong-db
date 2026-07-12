@@ -29,10 +29,11 @@ export function AuthView() {
         setStep("done");
       } else if (step === "signin") {
         const result = await signIn(String(form.get("email") ?? ""), String(form.get("password") ?? ""));
-        if (result.requires_2fa && result.challenge) { setChallenge(result.challenge); setStep("twofa"); }
+        if (result.requires_2fa && result.challenge) { setChallenge(result.challenge); window.sessionStorage.setItem("shennong_2fa_challenge", result.challenge); setStep("twofa"); }
         else if (result.authenticated) setStep("done");
       } else if (challenge) {
         await verify2fa(challenge, String(form.get("code") ?? ""));
+        window.sessionStorage.removeItem("shennong_2fa_challenge");
         setStep("done");
       }
     } catch (reason) {

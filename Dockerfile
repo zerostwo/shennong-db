@@ -11,7 +11,7 @@ RUN cargo build --release --package shennong-server --package shennong-cli
 FROM mirror.gcr.io/library/node:24-bookworm-slim AS web-builder
 WORKDIR /app/web
 RUN corepack enable && corepack prepare pnpm@10.17.1 --activate
-COPY web/package.json web/pnpm-lock.yaml ./
+COPY web/package.json web/pnpm-lock.yaml web/.npmrc ./
 RUN pnpm install --frozen-lockfile
 COPY web .
 ENV SHENNONG_API_INTERNAL_URL=http://127.0.0.1:8001

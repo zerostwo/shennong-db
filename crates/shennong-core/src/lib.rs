@@ -21,6 +21,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod web;
+pub use web::{LoginEventWrite, UploadWrite, UsageEventWrite};
+
 #[derive(Debug, Error)]
 pub enum ProviderError {
     #[error("resource provider was not found")]

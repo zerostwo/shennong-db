@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { getSession, signOut } from "@/lib/api/adapter";
+import { getHealth, getSession, listIngestionJobs, signOut, type JsonRecord } from "@/lib/api/adapter";
 import {
   Activity,
   ArrowLeft,
@@ -86,6 +86,7 @@ export function AppShell({ variant = "public", children }: ShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [systemStatus, setSystemStatus] = useState<"checking" | "ok" | "unavailable">("checking");
   const [session, setSession] = useState<{
     authenticated: boolean;
     user_id: string;
@@ -94,14 +95,10 @@ export function AppShell({ variant = "public", children }: ShellProps) {
   const pathname = usePathname();
   const isAdmin = variant === "admin";
   useEffect(() => {
-    const demoRole = new URLSearchParams(window.location.search).get("demoRole") || process.env.NEXT_PUBLIC_SHENNONG_DEMO_ROLE;
-    if (demoRole) {
-      setSession(demoRole === "guest" ? { authenticated: false, user_id: "", role: "" } : { authenticated: true, user_id: demoRole === "user" ? "elias-morgan" : "maya-chen", role: demoRole });
-      return;
-    }
     void getSession()
       .then(setSession)
       .catch(() => setSession({ authenticated: false, user_id: "", role: "" }));
+    void getHealth().then(() => setSystemStatus("ok")).catch(() => setSystemStatus("unavailable"));
   }, []);
 
   return (
@@ -149,8 +146,8 @@ export function AppShell({ variant = "public", children }: ShellProps) {
         </div>
         {!isAdmin && (
           <div className="system-status">
-            <span className="status-dot" />
-            All systems operational
+            <span className={systemStatus === "ok" ? "status-dot" : "event-dot"} />
+            {systemStatus === "checking" ? "Checking system status" : systemStatus === "ok" ? "Systems operational" : "System health unavailable"}
           </div>
         )}
         {isAdmin ? (
@@ -360,6 +357,7 @@ export function TopBar({
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [role, setRole] = useState("");
+  const [notifications, setNotifications] = useState<JsonRecord[]>([]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -377,7 +375,11 @@ export function TopBar({
   }, []);
   useEffect(() => {
     void getSession()
-      .then((session) => setRole(session.role))
+      .then((session) => {
+        setRole(session.role);
+        return listIngestionJobs();
+      })
+      .then((jobs) => setNotifications(jobs.slice(0, 5)))
       .catch(() => undefined);
   }, []);
   const commands = [
@@ -390,7 +392,7 @@ export function TopBar({
     ["Open administrator panel", "/admin/dashboard", "System health and governance"],
   ].filter(([label, , detail]) =>
     `${label} ${detail}`.toLowerCase().includes(commandQuery.toLowerCase()),
-  ).filter(([, href]) => (!href.startsWith("/admin") || role === "admin" || process.env.NODE_ENV === "development") && (!href.startsWith("/console") || Boolean(role) || process.env.NODE_ENV === "development"));
+  ).filter(([, href]) => (!href.startsWith("/admin") || role === "admin") && (!href.startsWith("/console") || Boolean(role)));
   return (
     <>
       <header className="topbar">
@@ -428,12 +430,12 @@ export function TopBar({
           </button>
           <button className="icon-button notification-button" aria-label="Notifications" onClick={() => setNotificationsOpen((value) => !value)}>
             <Activity />
-            <span aria-hidden="true" />
+            {notifications.length > 0 && <span aria-hidden="true" />}
           </button>
         </div>
       </header>
       {helpOpen && <div className="top-popover help-popover"><strong>Help &amp; documentation</strong><p>Browse API examples, deployment guidance, and governance concepts.</p><Link href="/docs" onClick={() => setHelpOpen(false)}>Open documentation</Link><Link href="/support" onClick={() => setHelpOpen(false)}>Contact support</Link></div>}
-      {notificationsOpen && <div className="top-popover notifications-popover" role="status"><strong>Notifications</strong><div><span className="status-dot"/><p><b>Ingestion completed</b><small>GENCODE v44 gene map · 8 minutes ago</small></p></div><div><span className="event-dot"/><p><b>Grant expires soon</b><small>PBMC 3K · in 7 days</small></p></div><button className="text-button" onClick={() => setNotificationsOpen(false)}>Mark all as read</button></div>}
+      {notificationsOpen && <div className="top-popover notifications-popover" role="status"><strong>Ingestion activity</strong>{notifications.map((job)=><div key={String(job.id)}><span className={job.status === "failed" ? "event-dot" : "status-dot"}/><p><b>{String(job.resource_id ?? job.provider_name)}</b><small>{String(job.status)} · {String(job.updated_at ?? "")}</small></p></div>)}{notifications.length===0&&<p>No ingestion activity.</p>}<button className="text-button" onClick={() => setNotificationsOpen(false)}>Close</button></div>}
       {commandOpen && (
         <div className="modal-scrim" onClick={() => setCommandOpen(false)}>
           <div

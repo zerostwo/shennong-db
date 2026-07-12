@@ -6,7 +6,7 @@ project="shennong-test-$$"
 compose="${COMPOSE_COMMAND:-docker compose}"
 file="docker-compose.test.yml"
 docker_command=$(printenv DOCKER_COMMAND 2>/dev/null || printf docker)
-admin='X-Shennong-Admin-Key: integration-test-admin-key'
+admin='X-Shennong-Admin-Key: integration-test-admin-key-32-bytes'
 json='Content-Type: application/json'
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/shennong-test.XXXXXX")
 slow_pid=
@@ -202,6 +202,17 @@ bad_scope_token=$(curl --noproxy '*' --fail --silent -H "$admin" -H "$json" -d '
 good_scope_token=$(curl --noproxy '*' --fail --silent -H "$admin" -H "$json" -d '{"expires_in":3600,"scopes":["resource.secret"]}' "$base/api/v1/users/reader-good-scope/tokens" | jq -r '.data.token')
 disabled_token=$(curl --noproxy '*' --fail --silent -H "$admin" -H "$json" -d '{"expires_in":3600,"scopes":["resource.secret"]}' "$base/api/v1/users/reader-disabled/tokens" | jq -r '.data.token')
 admin_token=$(curl --noproxy '*' --fail --silent -H "$admin" -H "$json" -d '{"expires_in":3600,"scopes":["resource.read"]}' "$base/api/v1/users/reader-admin/tokens" | jq -r '.data.token')
+
+# Raw uploads are streamed beyond the 1 MiB JSON-body limit while still
+# enforcing authentication and the upload handler's own size bound.
+truncate -s 1048577 "$tmpdir/upload.bin"
+upload_code=$(curl --noproxy '*' --silent -o "$tmpdir/upload.response" -w '%{http_code}' \
+  -H "Authorization: Bearer $admin_token" \
+  -H 'Content-Type: application/octet-stream' -H 'X-Filename: upload.bin' \
+  --data-binary "@$tmpdir/upload.bin" "$base/api/v1/uploads")
+[ "$upload_code" = 200 ] || { cat "$tmpdir/upload.response" >&2; exit 1; }
+jq -e '.data.size_bytes == 1048577 and .data.status == "uploaded"' \
+  < "$tmpdir/upload.response" >/dev/null
 
 for user in reader-bad-scope reader-good-scope reader-disabled; do
   curl --noproxy '*' --fail --silent -X PUT -H "$admin" "$base/api/v1/resources/fixture-private/grants/$user" >/dev/null

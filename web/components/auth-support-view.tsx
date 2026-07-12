@@ -2,6 +2,7 @@
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { CheckCircle2 } from "lucide-react";
+import { forgotPassword, resetPassword, verify2fa, verifyRecoveryCode } from "@/lib/api/adapter";
 
 type Mode = "forgot" | "reset" | "two-factor" | "recovery";
 const copy: Record<Mode, [string, string, string]> = {
@@ -30,7 +31,7 @@ export function AuthSupportView({ mode }: { mode: Mode }) {
   const [done, setDone] = useState(false);
   const [error, setError] = useState("");
   const [title, description, action] = copy[mode];
-  function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     const data = new FormData(event.currentTarget);
@@ -38,7 +39,21 @@ export function AuthSupportView({ mode }: { mode: Mode }) {
       setError("Passwords do not match");
       return;
     }
-    setDone(true);
+    try {
+      if (mode === "forgot") await forgotPassword(String(data.get("email")));
+      else if (mode === "reset") {
+        const token = new URLSearchParams(window.location.search).get("token") ?? String(data.get("token") ?? "");
+        if (!token) throw new Error("A password reset token is required.");
+        await resetPassword(token, String(data.get("password")));
+      } else {
+        const challenge = window.sessionStorage.getItem("shennong_2fa_challenge");
+        if (!challenge) throw new Error("The two-factor challenge is missing or expired. Sign in again.");
+        if (mode === "two-factor") await verify2fa(challenge, String(data.get("code")));
+        else await verifyRecoveryCode(challenge, String(data.get("code")));
+        window.sessionStorage.removeItem("shennong_2fa_challenge");
+      }
+      setDone(true);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Request failed"); }
   }
   return (
     <main className="auth-screen">
@@ -70,6 +85,7 @@ export function AuthSupportView({ mode }: { mode: Mode }) {
             )}
             {mode === "reset" && (
               <>
+                <label>Reset token<input name="token" defaultValue={typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("token") ?? "" : ""} required /></label>
                 <label>
                   New password
                   <input

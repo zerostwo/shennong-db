@@ -14,11 +14,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+use futures_util::StreamExt;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use shennong_auth::{
     Principal, Role, hash_password, issue_token, token_fingerprint, verify_password, verify_totp,
 };
-use shennong_core::{ProviderInstaller, ResourceRepository};
+use shennong_core::{
+    LoginEventWrite, ProviderInstaller, ResourceRepository, UploadWrite, UsageEventWrite,
+};
 use shennong_query::{
     FileExpressionAdapter, MAX_QUERY_RESPONSE_BYTES, QueryAdapter, QueryError, QueryPlanner,
     TiledbExecutor, cache_clickhouse_expression, clickhouse_cache_bytes,
@@ -28,7 +32,9 @@ use shennong_schema::{
     ArtifactUpsert, Capabilities, RelationUpsert, ResourceInstallRequest, ResourcePermissions,
     ResourceQuery, ResourceUpsert, TokenIssueRequest, UserUpsert, Visibility,
 };
-use shennong_storage::{ArtifactUri, BlobStore, LocalObjectStorage, S3Config, S3ObjectStorage};
+use shennong_storage::{
+    ArtifactUri, BlobStore, LocalObjectStorage, ObjectKey, S3Config, S3ObjectStorage,
+};
 use std::{
     collections::HashMap,
     env, io,
@@ -41,7 +47,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore},
 };
 use tower_http::{
@@ -220,6 +226,77 @@ async fn request_timeout_middleware(
     }
 }
 
+async fn usage_tracking(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let started = Instant::now();
+    let method = request.method().to_string();
+    let path = request.uri().path().to_owned();
+    let authenticated = principal(request.headers(), &state);
+    let user_id = authenticated.user_id.clone();
+    let token_hash = authenticated.token_hash.clone();
+    let resource_id = resource_id_from_path(&path);
+    if let Some(token_hash) = token_hash.as_deref() {
+        let _ = state.repository.touch_auth_session(token_hash).await;
+    }
+    let response = next.run(request).await;
+    let status = response.status().as_u16();
+    let header_bytes = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let (response, response_bytes) =
+        if header_bytes == 0 && !path.ends_with("/download") && path != "/api/v1/query/stream" {
+            let (parts, body) = response.into_parts();
+            match axum::body::to_bytes(body, MAX_QUERY_RESPONSE_BYTES).await {
+                Ok(bytes) => {
+                    let length = bytes.len() as i64;
+                    (Response::from_parts(parts, Body::from(bytes)), length)
+                }
+                Err(_) => (
+                    ApiError(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "response measurement failed".into(),
+                    )
+                    .into_response(),
+                    0,
+                ),
+            }
+        } else {
+            (response, header_bytes)
+        };
+    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let repository = state.repository.clone();
+    tokio::spawn(async move {
+        if let Err(error) = repository
+            .record_usage(&UsageEventWrite {
+                user_id: user_id.as_deref(),
+                token_hash: token_hash.as_deref(),
+                method: &method,
+                path: &path,
+                resource_id: resource_id.as_deref(),
+                status,
+                response_bytes,
+                duration_ms,
+                rate_limited: status == StatusCode::TOO_MANY_REQUESTS.as_u16(),
+            })
+            .await
+        {
+            tracing::warn!(%error, "failed to record request usage");
+        }
+    });
+    response
+}
+
+fn resource_id_from_path(path: &str) -> Option<String> {
+    let parts = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let index = parts.iter().position(|part| *part == "resources")?;
+    parts.get(index + 1).map(|value| (*value).to_owned())
+}
+
 async fn security_headers(mut request: Request, next: Next) -> Response {
     let request_id = request
         .headers()
@@ -269,12 +346,20 @@ fn client_key(request: &Request, state: &AppState) -> String {
 
 fn cors_layer() -> CorsLayer {
     let mut layer = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
         .allow_headers([
             AUTHORIZATION,
             CONTENT_TYPE,
             HeaderName::from_static("x-shennong-admin-key"),
             HeaderName::from_static("x-request-id"),
+            HeaderName::from_static("x-filename"),
+            HeaderName::from_static("x-upload-metadata"),
             RANGE,
         ]);
     let origins = env::var("SHENNONG_CORS_ORIGINS")
@@ -537,6 +622,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|value| value.parse().ok())
             .unwrap_or(1024 * 1024 * 1024),
     };
+    let upload_routes = Router::new().route("/api/v1/uploads", post(upload_file));
     let app = Router::new()
         .route("/health", get(health))
         .route("/healthz", get(ready))
@@ -564,9 +650,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             put(grant_resource),
         )
         .route("/api/v1/audit-events", get(list_audit_events))
+        .route("/api/v1/grants", get(list_grants).post(create_grant))
+        .route(
+            "/api/v1/grants/{resource_id}/{user_id}",
+            axum::routing::delete(remove_grant),
+        )
+        .route("/api/v1/ingestion-jobs", get(list_ingestion_jobs))
+        .route("/api/v1/admin/tokens", get(list_all_tokens))
+        .route(
+            "/api/v1/admin/tokens/{token_id}",
+            axum::routing::delete(revoke_token),
+        )
+        .route(
+            "/api/v1/collections",
+            get(list_collections).post(create_collection),
+        )
+        .route(
+            "/api/v1/collections/{id}",
+            axum::routing::delete(delete_collection),
+        )
+        .route(
+            "/api/v1/collections/{id}/resources/{resource_id}",
+            put(add_collection_resource).delete(remove_collection_resource),
+        )
+        .route("/api/v1/favorites", get(list_favorites))
+        .route(
+            "/api/v1/favorites/{resource_id}",
+            put(add_favorite).delete(remove_favorite),
+        )
+        .route("/api/v1/uploads", get(list_uploads))
+        .route("/api/v1/uploads/register", post(register_uploads))
+        .route("/api/v1/settings", get(get_settings))
+        .route("/api/v1/settings/{key}", put(update_setting))
+        .route("/api/v1/backups", get(list_backups).post(create_backup))
+        .route("/api/v1/backups/{id}/restore", post(restore_backup))
+        .route("/api/v1/usage", get(get_usage))
+        .route("/api/v1/admin/overview", get(admin_overview))
+        .route("/api/v1/storage", get(storage_summary))
+        .route("/api/v1/auth/sessions", get(list_sessions))
+        .route(
+            "/api/v1/auth/sessions/{token_id}",
+            axum::routing::delete(revoke_session),
+        )
+        .route("/api/v1/auth/login-history", get(login_history))
+        .route("/api/v1/auth/profile", get(get_profile).put(update_profile))
+        .route("/api/v1/auth/change-password", post(change_password))
+        .route("/api/v1/auth/forgot-password", post(forgot_password))
+        .route("/api/v1/auth/reset-password", post(reset_password))
+        .route(
+            "/api/v1/auth/2fa",
+            get(two_factor_status).delete(disable_two_factor),
+        )
+        .route("/api/v1/auth/2fa/enroll", post(enroll_two_factor))
+        .route("/api/v1/auth/2fa/confirm", post(confirm_two_factor))
+        .route("/api/v1/auth/recovery-code", post(verify_recovery_code))
         .route("/api/v1/resources/install", post(install_resource))
         .route("/api/v1/providers", get(list_providers))
         .route("/api/v1/capabilities", get(capabilities))
+        .route("/api/v1/public-config", get(public_config))
         .route("/api/v1/cache/stats", get(cache_stats))
         .route("/api/v1/cache", axum::routing::delete(clear_cache))
         .route("/.well-known/shennong-agent.json", get(agent_manifest))
@@ -579,6 +720,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/setup/status", get(setup_status))
         .route("/api/v1/setup/admin", post(setup_admin))
         .route("/api/v1/users/{id}", get(get_user).put(upsert_user))
+        .route("/api/v1/users/{id}/sessions", get(admin_user_sessions))
+        .route(
+            "/api/v1/users/{id}/login-history",
+            get(admin_user_login_history),
+        )
         .route(
             "/api/v1/users/{id}/tokens",
             get(list_user_tokens).post(issue_user_token),
@@ -588,10 +734,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/auth/verify-2fa", post(verify_2fa))
         .route("/api/v1/auth/sign-out", post(sign_out))
         .route("/api/v1/auth/session", get(auth_session))
-        .route("/api/v1/auth/tokens", post(issue_current_user_token))
+        .route(
+            "/api/v1/auth/tokens",
+            get(list_current_user_tokens).post(issue_current_user_token),
+        )
+        .route(
+            "/api/v1/auth/tokens/{token_id}",
+            axum::routing::delete(revoke_own_token),
+        )
         .route("/api/v1/query", post(query))
         .route("/api/v1/query/batch", post(query_batch))
         .route("/api/v1/query/stream", post(query_stream))
+        .layer(RequestBodyLimitLayer::new(max_body_bytes))
+        // Uploads are streamed and bounded inside `upload_file` by
+        // SHENNONG_MAX_UPLOAD_BYTES, independently of the small JSON limit.
+        .merge(upload_routes)
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -601,13 +758,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.clone(),
             request_timeout_middleware,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            usage_tracking,
+        ))
         .layer(middleware::from_fn(security_headers))
-        .layer(RequestBodyLimitLayer::new(max_body_bytes))
         .layer(cors_layer())
         .layer(TraceLayer::new_for_http());
     let address = env::var("SHENNONG_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    tracing::info!(%address, "shennong-db v0.4.3 listening");
+    tracing::info!(%address, version = env!("CARGO_PKG_VERSION"), "shennong-db listening");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -630,7 +790,9 @@ fn env_secret(name: &str) -> Option<String> {
 }
 
 async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"status":"ok","service":"ShennongDB","version":"0.4.3"}))
+    Json(
+        serde_json::json!({"status":"ok","service":"ShennongDB","version":env!("CARGO_PKG_VERSION")}),
+    )
 }
 
 async fn metrics(State(state): State<AppState>) -> Response {
@@ -686,7 +848,7 @@ async fn ready(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
     }
 }
 async fn version() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"service":"ShennongDB","version":"0.4.3","api":"v1"}))
+    Json(serde_json::json!({"service":"ShennongDB","version":env!("CARGO_PKG_VERSION"),"api":"v1"}))
 }
 
 #[derive(serde::Deserialize)]
@@ -699,6 +861,32 @@ struct SignInRequest {
 struct Verify2faRequest {
     challenge: String,
     code: String,
+}
+
+fn request_ip(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+        })
+}
+
+fn request_user_agent(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            if value.len() > 512 {
+                &value[..512]
+            } else {
+                value
+            }
+        })
 }
 
 fn auth_cookie(token: &str, max_age: u64) -> String {
@@ -718,6 +906,7 @@ fn expired_auth_cookie() -> &'static str {
 
 async fn sign_in(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(value): Json<SignInRequest>,
 ) -> Result<Response, ApiError> {
     if value.email.len() > 320 || value.password.len() > 1024 {
@@ -726,22 +915,37 @@ async fn sign_in(
             "invalid credentials".into(),
         ));
     }
-    let user = state
+    let candidate = state
         .repository
         .get_user_credentials(&value.email)
         .await
-        .map_err(database_error)?
-        .filter(|user| {
-            user.status == "active"
-                && user
-                    .password_hash
-                    .as_deref()
-                    .is_some_and(|hash| verify_password(&value.password, hash))
-        })
-        .ok_or(ApiError(
+        .map_err(database_error)?;
+    let user = candidate.filter(|user| {
+        user.status == "active"
+            && user
+                .password_hash
+                .as_deref()
+                .is_some_and(|hash| verify_password(&value.password, hash))
+    });
+    let Some(user) = user else {
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let _ = state
+            .repository
+            .record_login_event(&LoginEventWrite {
+                id: &event_id,
+                user_id: None,
+                email: &value.email,
+                success: false,
+                ip: request_ip(&headers),
+                user_agent: request_user_agent(&headers),
+                reason: Some("invalid_credentials"),
+            })
+            .await;
+        return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "invalid credentials".into(),
-        ))?;
+        ));
+    };
     let secret = state.jwt_secret.as_deref().ok_or(ApiError(
         StatusCode::SERVICE_UNAVAILABLE,
         "session signing is unavailable".into(),
@@ -760,6 +964,21 @@ async fn sign_in(
             )
         })?
         .as_secs();
+    let security = setting_object(&state, "security").await?;
+    let session_lifetime =
+        setting_u64(&security, "session_lifetime_seconds", 28_800).clamp(300, 2_592_000);
+    if role == Role::Admin
+        && security
+            .get("require_2fa_for_admins")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && user.totp_secret.is_none()
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "administrator 2FA enrollment is required".into(),
+        ));
+    }
     if user.totp_secret.is_some() {
         let challenge = issue_token(
             secret,
@@ -791,7 +1010,7 @@ async fn sign_in(
         secret,
         user.id.clone(),
         role,
-        (now + 28_800) as usize,
+        (now + session_lifetime) as usize,
         vec!["resource.read".into(), "query.execute".into()],
     )
     .map_err(|_| {
@@ -805,15 +1024,46 @@ async fn sign_in(
         .store_access_token(
             &token_fingerprint(&token),
             &user.id,
-            now + 28_800,
+            now + session_lifetime,
             &serde_json::json!(["resource.read", "query.execute"]),
         )
+        .await
+        .map_err(database_error)?;
+    let token_hash = token_fingerprint(&token);
+    state
+        .repository
+        .create_auth_session(
+            &token_hash,
+            &user.id,
+            chrono::DateTime::from_timestamp((now + session_lifetime) as i64, 0).ok_or(
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session timestamp failed".into(),
+                ),
+            )?,
+            request_ip(&headers),
+            request_user_agent(&headers),
+        )
+        .await
+        .map_err(database_error)?;
+    let event_id = uuid::Uuid::new_v4().to_string();
+    state
+        .repository
+        .record_login_event(&LoginEventWrite {
+            id: &event_id,
+            user_id: Some(&user.id),
+            email: &value.email,
+            success: true,
+            ip: request_ip(&headers),
+            user_agent: request_user_agent(&headers),
+            reason: None,
+        })
         .await
         .map_err(database_error)?;
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "application/json")
-        .header(SET_COOKIE, auth_cookie(&token, 28_800))
+        .header(SET_COOKIE, auth_cookie(&token, session_lifetime))
         .body(Body::from(
             serde_json::json!({"data":{"authenticated":true,"user_id":user.id,"role":role}})
                 .to_string(),
@@ -828,19 +1078,20 @@ async fn sign_in(
 
 async fn verify_2fa(
     State(state): State<AppState>,
+    request_headers: HeaderMap,
     Json(value): Json<Verify2faRequest>,
 ) -> Result<Response, ApiError> {
     let secret = state.jwt_secret.as_deref().ok_or(ApiError(
         StatusCode::SERVICE_UNAVAILABLE,
         "session signing is unavailable".into(),
     ))?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
+    let mut challenge_headers = HeaderMap::new();
+    challenge_headers.insert(
         AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {}", value.challenge))
             .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "invalid challenge".into()))?,
     );
-    let challenge = Principal::from_headers(&headers, None, Some(secret));
+    let challenge = Principal::from_headers(&challenge_headers, None, Some(secret));
     if !challenge.has_scopes(&["auth:2fa".into()]) {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
@@ -887,11 +1138,17 @@ async fn verify_2fa(
             )
         })?
         .as_secs();
+    let session_lifetime = setting_u64(
+        &setting_object(&state, "security").await?,
+        "session_lifetime_seconds",
+        28_800,
+    )
+    .clamp(300, 2_592_000);
     let token = issue_token(
         secret,
         user.id.clone(),
         role,
-        (now + 28_800) as usize,
+        (now + session_lifetime) as usize,
         vec!["resource.read".into(), "query.execute".into()],
     )
     .map_err(|_| {
@@ -905,15 +1162,46 @@ async fn verify_2fa(
         .store_access_token(
             &token_fingerprint(&token),
             &user.id,
-            now + 28_800,
+            now + session_lifetime,
             &serde_json::json!(["resource.read", "query.execute"]),
         )
+        .await
+        .map_err(database_error)?;
+    let token_hash = token_fingerprint(&token);
+    state
+        .repository
+        .create_auth_session(
+            &token_hash,
+            &user.id,
+            chrono::DateTime::from_timestamp((now + session_lifetime) as i64, 0).ok_or(
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session timestamp failed".into(),
+                ),
+            )?,
+            request_ip(&request_headers),
+            request_user_agent(&request_headers),
+        )
+        .await
+        .map_err(database_error)?;
+    let event_id = uuid::Uuid::new_v4().to_string();
+    state
+        .repository
+        .record_login_event(&LoginEventWrite {
+            id: &event_id,
+            user_id: Some(&user.id),
+            email: user.email.as_deref().unwrap_or(""),
+            success: true,
+            ip: request_ip(&request_headers),
+            user_agent: request_user_agent(&request_headers),
+            reason: None,
+        })
         .await
         .map_err(database_error)?;
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "application/json")
-        .header(SET_COOKIE, auth_cookie(&token, 28_800))
+        .header(SET_COOKIE, auth_cookie(&token, session_lifetime))
         .body(Body::from(
             serde_json::json!({"data":{"authenticated":true,"user_id":user.id,"role":role}})
                 .to_string(),
@@ -933,6 +1221,12 @@ async fn sign_out(State(state): State<AppState>, headers: HeaderMap) -> Result<R
             .revoke_access_token(&token_hash)
             .await
             .map_err(database_error)?;
+        if let Some(user_id) = principal(&headers, &state).user_id {
+            let _ = state
+                .repository
+                .revoke_auth_session(&token_hash, &user_id)
+                .await;
+        }
     }
     Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -1050,6 +1344,42 @@ async fn issue_current_user_token(
         data: serde_json::json!({"token": token, "token_type": "Bearer", "expires_at": expires_at, "token_id": token_fingerprint(&token)}),
     }))
 }
+
+async fn list_current_user_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let tokens = state
+        .repository
+        .list_access_tokens(actor.user_id.as_deref().unwrap_or_default())
+        .await
+        .map_err(database_error)?;
+    Ok(Json(Envelope{data:tokens.into_iter().map(|token|serde_json::json!({"token_id":token.token_hash,"issued_at":token.issued_at,"expires_at":token.expires_at,"scopes":token.scopes})).collect()}))
+}
+async fn revoke_own_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let own = state
+        .repository
+        .list_access_tokens(actor.user_id.as_deref().unwrap_or_default())
+        .await
+        .map_err(database_error)?
+        .iter()
+        .any(|token| token.token_hash == token_id);
+    if !own {
+        return Err(not_found());
+    }
+    state
+        .repository
+        .revoke_access_token(&token_id)
+        .await
+        .map_err(database_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
 async fn capabilities() -> Json<Envelope<serde_json::Value>> {
     let mut data = serde_json::to_value(Capabilities::default()).unwrap_or_default();
     data["batch_features"] = true.into();
@@ -1063,6 +1393,21 @@ async fn capabilities() -> Json<Envelope<serde_json::Value>> {
         operations.push("expression_batch".into());
     }
     Json(Envelope { data })
+}
+
+async fn public_config(
+    State(state): State<AppState>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let general = setting_object(&state, "general").await?;
+    Ok(Json(Envelope {
+        data: serde_json::json!({
+            "instance_name": general.get("instance_name").and_then(serde_json::Value::as_str).unwrap_or("ShennongDB"),
+            "support_email": general.get("support_email").and_then(serde_json::Value::as_str).unwrap_or(""),
+            "public_catalog": general.get("public_catalog").and_then(serde_json::Value::as_bool).unwrap_or(true),
+            "api_version": "v1",
+            "service_version": env!("CARGO_PKG_VERSION")
+        }),
+    }))
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1701,12 +2046,1536 @@ async fn admin(headers: &HeaderMap, state: &AppState) -> Result<Principal, ApiEr
     Ok(principal)
 }
 
+async fn authenticated(headers: &HeaderMap, state: &AppState) -> Result<Principal, ApiError> {
+    let value = principal(headers, state);
+    if !matches!(value.role, Role::User | Role::Admin) || value.user_id.is_none() {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "authentication required".into(),
+        ));
+    }
+    Ok(value)
+}
+
+async fn setting_object(state: &AppState, key: &str) -> Result<serde_json::Value, ApiError> {
+    Ok(state
+        .repository
+        .setting_value(key)
+        .await
+        .map_err(database_error)?
+        .unwrap_or_else(|| serde_json::json!({})))
+}
+
+fn setting_u64(value: &serde_json::Value, key: &str, fallback: u64) -> u64 {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(fallback)
+}
+
+fn setting_string(value: &serde_json::Value, key: &str, fallback: &str) -> String {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
+#[derive(serde::Deserialize)]
+struct GrantWriteRequest {
+    resource_id: String,
+    user_id: String,
+    #[serde(default = "default_read_scope")]
+    scopes: Vec<String>,
+    reason: Option<String>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+fn default_read_scope() -> Vec<String> {
+    vec!["resource.read".into()]
+}
+
+async fn list_grants(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    admin(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_grants()
+            .await
+            .map_err(database_error)?,
+    }))
+}
+
+async fn create_grant(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<GrantWriteRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = admin(&headers, &state).await?;
+    if value.resource_id.is_empty()
+        || value.user_id.is_empty()
+        || value.scopes.is_empty()
+        || value
+            .scopes
+            .iter()
+            .any(|scope| scope.len() > 128 || scope.is_empty())
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid grant".into(),
+        ));
+    }
+    let data = state
+        .repository
+        .upsert_grant_details(
+            &value.resource_id,
+            &value.user_id,
+            &serde_json::json!(value.scopes),
+            actor.user_id.as_deref(),
+            value.reason.as_deref(),
+            value.expires_at,
+        )
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "grant.upsert",
+        "resource",
+        &value.resource_id,
+        serde_json::json!({"user_id":value.user_id}),
+    )
+    .await?;
+    Ok(Json(Envelope { data }))
+}
+
+async fn remove_grant(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((resource_id, user_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    admin(&headers, &state).await?;
+    if !state
+        .repository
+        .delete_grant(&resource_id, &user_id)
+        .await
+        .map_err(database_error)?
+    {
+        return Err(not_found());
+    }
+    audit(
+        &state,
+        &headers,
+        "grant.delete",
+        "resource",
+        &resource_id,
+        serde_json::json!({"user_id":user_id}),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_ingestion_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    authenticated(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_ingestion_jobs()
+            .await
+            .map_err(database_error)?,
+    }))
+}
+
+async fn list_all_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    admin(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_all_access_tokens()
+            .await
+            .map_err(database_error)?,
+    }))
+}
+
+async fn revoke_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    admin(&headers, &state).await?;
+    if !state
+        .repository
+        .revoke_access_token(&token_id)
+        .await
+        .map_err(database_error)?
+    {
+        return Err(not_found());
+    }
+    audit(
+        &state,
+        &headers,
+        "token.revoke",
+        "token",
+        &token_id,
+        serde_json::json!({}),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+struct CollectionWriteRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default = "private_visibility")]
+    visibility: String,
+}
+fn private_visibility() -> String {
+    "private".into()
+}
+
+async fn list_collections(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    let actor = principal(&headers, &state);
+    let admin = actor.role == Role::Admin;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_collections(actor.user_id.as_deref(), admin)
+            .await
+            .map_err(database_error)?,
+    }))
+}
+
+async fn create_collection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<CollectionWriteRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let owner = actor.user_id.as_deref().unwrap_or_default();
+    if value.name.trim().is_empty()
+        || value.name.len() > 160
+        || !matches!(value.visibility.as_str(), "public" | "private")
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid collection".into(),
+        ));
+    }
+    let id = format!("collection-{}", uuid::Uuid::new_v4());
+    let data = state
+        .repository
+        .create_collection(
+            &id,
+            value.name.trim(),
+            value.description.trim(),
+            owner,
+            &value.visibility,
+        )
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "collection.create",
+        "collection",
+        &id,
+        serde_json::json!({}),
+    )
+    .await?;
+    Ok(Json(Envelope { data }))
+}
+
+async fn delete_collection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    if !state
+        .repository
+        .delete_collection(
+            &id,
+            actor.user_id.as_deref().unwrap_or_default(),
+            actor.role == Role::Admin,
+        )
+        .await
+        .map_err(database_error)?
+    {
+        return Err(not_found());
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn collection_resource(
+    state: &AppState,
+    headers: &HeaderMap,
+    id: &str,
+    resource_id: &str,
+    add: bool,
+) -> Result<StatusCode, ApiError> {
+    let actor = authenticated(headers, state).await?;
+    let collections = state
+        .repository
+        .list_collections(actor.user_id.as_deref(), actor.role == Role::Admin)
+        .await
+        .map_err(database_error)?;
+    if !collections.iter().any(|row| {
+        row.get("id").and_then(|v| v.as_str()) == Some(id)
+            && (actor.role == Role::Admin
+                || row.get("owner_user_id").and_then(|v| v.as_str()) == actor.user_id.as_deref())
+    }) {
+        return Err(not_found());
+    }
+    state
+        .repository
+        .set_collection_resource(id, resource_id, add)
+        .await
+        .map_err(database_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn add_collection_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, resource_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    collection_resource(&state, &headers, &id, &resource_id, true).await
+}
+async fn remove_collection_resource(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, resource_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    collection_resource(&state, &headers, &id, &resource_id, false).await
+}
+
+async fn list_favorites(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_favorites(actor.user_id.as_deref().unwrap_or_default())
+            .await
+            .map_err(database_error)?,
+    }))
+}
+async fn favorite(
+    state: &AppState,
+    headers: &HeaderMap,
+    resource_id: &str,
+    value: bool,
+) -> Result<StatusCode, ApiError> {
+    let actor = authenticated(headers, state).await?;
+    state
+        .repository
+        .set_favorite(
+            actor.user_id.as_deref().unwrap_or_default(),
+            resource_id,
+            value,
+        )
+        .await
+        .map_err(database_error)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn add_favorite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resource_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    favorite(&state, &headers, &resource_id, true).await
+}
+async fn remove_favorite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(resource_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    favorite(&state, &headers, &resource_id, false).await
+}
+
+async fn list_uploads(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_uploads(actor.user_id.as_deref(), actor.role == Role::Admin)
+            .await
+            .map_err(database_error)?,
+    }))
+}
+
+async fn upload_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let user_id = actor.user_id.as_deref().unwrap_or_default();
+    let filename = headers
+        .get("x-filename")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| FilePath::new(v).file_name())
+        .and_then(|v| v.to_str())
+        .filter(|v| !v.is_empty() && v.len() <= 255)
+        .ok_or(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "x-filename is required".into(),
+        ))?
+        .to_owned();
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let id = uuid::Uuid::new_v4().to_string();
+    let temp = env::temp_dir().join(format!("shennong-upload-{id}.part"));
+    let mut file = tokio::fs::File::create(&temp).await.map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "upload staging failed".into(),
+        )
+    })?;
+    let mut stream = body.into_data_stream();
+    let mut digest = Sha256::new();
+    let mut size = 0_u64;
+    let max = env::var("SHENNONG_MAX_UPLOAD_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50 * 1024 * 1024 * 1024_u64);
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|_| ApiError(StatusCode::BAD_REQUEST, "upload stream failed".into()))?;
+        size = size.saturating_add(chunk.len() as u64);
+        if size > max {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err(ApiError(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "upload exceeds configured size limit".into(),
+            ));
+        }
+        digest.update(&chunk);
+        file.write_all(&chunk).await.map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "upload staging failed".into(),
+            )
+        })?;
+    }
+    file.flush().await.map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "upload staging failed".into(),
+        )
+    })?;
+    drop(file);
+    let checksum = format!("{:x}", digest.finalize());
+    let upload_prefix = setting_string(
+        &setting_object(&state, "storage").await?,
+        "upload_prefix",
+        "uploads",
+    );
+    let key =
+        ObjectKey::new(&format!("{upload_prefix}/{user_id}/{id}/{filename}")).map_err(|_| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid upload filename".into(),
+            )
+        })?;
+    let mut reader = tokio::fs::File::open(&temp).await.map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "upload staging failed".into(),
+        )
+    })?;
+    let uri = state
+        .storage
+        .put_stream(&key, &mut reader)
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "object storage upload failed".into(),
+            )
+        })?
+        .to_string();
+    let _ = tokio::fs::remove_file(&temp).await;
+    let data = state
+        .repository
+        .create_upload(&UploadWrite {
+            id: &id,
+            user_id,
+            filename: &filename,
+            content_type: &content_type,
+            size: size as i64,
+            checksum: &checksum,
+            storage_uri: &uri,
+            metadata: &serde_json::json!({}),
+        })
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "upload.create",
+        "upload",
+        &id,
+        serde_json::json!({"filename":filename,"size_bytes":size}),
+    )
+    .await?;
+    Ok(Json(Envelope { data }))
+}
+
+#[derive(serde::Deserialize)]
+struct RegisterUploadsRequest {
+    upload_ids: Vec<String>,
+    resource_id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    organism: String,
+    #[serde(default)]
+    modality: String,
+    #[serde(default)]
+    assay: String,
+    #[serde(default)]
+    reference: String,
+    #[serde(default)]
+    annotation: String,
+    #[serde(default = "default_upload_format")]
+    format: String,
+    #[serde(default = "default_data_class")]
+    data_class: String,
+    #[serde(default = "private_visibility")]
+    visibility: String,
+}
+fn default_upload_format() -> String {
+    "binary".into()
+}
+fn default_data_class() -> String {
+    "raw".into()
+}
+async fn register_uploads(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<RegisterUploadsRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    if value.upload_ids.is_empty()
+        || value.upload_ids.len() > 100
+        || value.resource_id.is_empty()
+        || value.resource_id.len() > 160
+        || !value
+            .resource_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        || value.name.trim().is_empty()
+        || !matches!(value.visibility.as_str(), "public" | "private")
+        || !matches!(value.data_class.as_str(), "raw" | "canonical" | "derived")
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid upload registration".into(),
+        ));
+    }
+    let user_id = actor.user_id.as_deref().unwrap_or_default();
+    let resource = ResourceUpsert {
+        id: value.resource_id.clone(),
+        kind: "Dataset".into(),
+        metadata: serde_json::json!({"title":value.name,"description":value.description,"owner":user_id,"organism":value.organism,"modality":value.modality,"assay":value.assay,"reference_assembly":value.reference,"annotation_release":value.annotation}),
+        spec: serde_json::json!({"backend":if env::var("SHENNONG_STORAGE_BACKEND").is_ok_and(|v|v.eq_ignore_ascii_case("s3")){"s3"}else{"local"},"data_class":value.data_class,"operations":[]}),
+        status: "available".into(),
+        provenance: serde_json::json!({"registered_by":user_id,"pipeline":"web-upload-v1"}),
+        permissions: ResourcePermissions {
+            visibility: if value.visibility == "public" {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            },
+            read_scopes: vec!["resource.read".into()],
+        },
+    };
+    let data = state
+        .repository
+        .register_upload_resource(
+            &resource,
+            &value.upload_ids,
+            user_id,
+            &value.format,
+            &value.data_class,
+        )
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "upload.register",
+        "resource",
+        &value.resource_id,
+        serde_json::json!({"upload_ids":value.upload_ids}),
+    )
+    .await?;
+    Ok(Json(Envelope { data }))
+}
+
+async fn get_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    admin(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .get_settings()
+            .await
+            .map_err(database_error)?,
+    }))
+}
+async fn update_setting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+    Json(value): Json<serde_json::Value>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = admin(&headers, &state).await?;
+    if !matches!(
+        key.as_str(),
+        "general" | "security" | "retention" | "storage" | "telemetry"
+    ) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown settings group".into(),
+        ));
+    }
+    if !value.is_object() {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "settings value must be an object".into(),
+        ));
+    }
+    if key == "security" {
+        let session = setting_u64(&value, "session_lifetime_seconds", 28_800);
+        let minimum = setting_u64(&value, "password_min_length", 12);
+        if !(300..=2_592_000).contains(&session) || !(12..=128).contains(&minimum) {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "security settings are out of range".into(),
+            ));
+        }
+    }
+    if key == "storage" {
+        for field in ["upload_prefix", "backup_prefix"] {
+            let prefix = setting_string(&value, field, field.trim_end_matches("_prefix"));
+            ObjectKey::new(&prefix).map_err(|_| {
+                ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "storage prefix is invalid".into(),
+                )
+            })?;
+        }
+    }
+    if key == "retention" {
+        for field in ["audit_days", "usage_days", "login_history_days"] {
+            if !(1..=3650).contains(&setting_u64(&value, field, 1)) {
+                return Err(ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "retention settings are out of range".into(),
+                ));
+            }
+        }
+    }
+    let data = state
+        .repository
+        .set_setting(&key, &value, actor.user_id.as_deref())
+        .await
+        .map_err(database_error)?;
+    if key == "retention" {
+        state
+            .repository
+            .apply_retention(
+                setting_u64(&value, "audit_days", 365) as i32,
+                setting_u64(&value, "usage_days", 90) as i32,
+                setting_u64(&value, "login_history_days", 180) as i32,
+            )
+            .await
+            .map_err(database_error)?;
+    }
+    audit(
+        &state,
+        &headers,
+        "settings.update",
+        "settings",
+        &key,
+        serde_json::json!({}),
+    )
+    .await?;
+    Ok(Json(Envelope { data }))
+}
+
+#[derive(serde::Deserialize)]
+struct BackupRequest {
+    #[serde(default = "metadata_kind")]
+    kind: String,
+}
+fn metadata_kind() -> String {
+    "metadata".into()
+}
+async fn list_backups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    admin(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_backup_jobs()
+            .await
+            .map_err(database_error)?,
+    }))
+}
+async fn create_backup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<BackupRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = admin(&headers, &state).await?;
+    if value.kind != "metadata" {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "only metadata backups are currently supported".into(),
+        ));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    state
+        .repository
+        .create_backup_job(&id, actor.user_id.as_deref(), &value.kind)
+        .await
+        .map_err(database_error)?;
+    let snapshot = state
+        .repository
+        .metadata_snapshot()
+        .await
+        .map_err(database_error)?;
+    let bytes = serde_json::to_vec(&snapshot).map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backup serialization failed".into(),
+        )
+    })?;
+    let backup_prefix = setting_string(
+        &setting_object(&state, "storage").await?,
+        "backup_prefix",
+        "backups",
+    );
+    let key = ObjectKey::new(&format!("{backup_prefix}/{id}.json")).map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backup key failed".into(),
+        )
+    })?;
+    let mut reader = std::io::Cursor::new(&bytes);
+    match state.storage.put_stream(&key, &mut reader).await {
+        Ok(uri) => state
+            .repository
+            .complete_backup_job(&id, &uri.to_string(), bytes.len() as i64)
+            .await
+            .map_err(database_error)?,
+        Err(_) => {
+            state
+                .repository
+                .fail_backup_job(&id, "storage_failed")
+                .await
+                .map_err(database_error)?;
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "backup storage failed".into(),
+            ));
+        }
+    }
+    audit(
+        &state,
+        &headers,
+        "backup.create",
+        "backup",
+        &id,
+        serde_json::json!({"kind":value.kind}),
+    )
+    .await?;
+    let data = state
+        .repository
+        .get_backup_job(&id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    Ok(Json(Envelope { data }))
+}
+async fn restore_backup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let actor = admin(&headers, &state).await?;
+    let uri = state
+        .repository
+        .backup_uri(&id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    let safety_id = uuid::Uuid::new_v4().to_string();
+    state
+        .repository
+        .create_backup_job(&safety_id, actor.user_id.as_deref(), "metadata")
+        .await
+        .map_err(database_error)?;
+    let safety = serde_json::to_vec(
+        &state
+            .repository
+            .metadata_snapshot()
+            .await
+            .map_err(database_error)?,
+    )
+    .map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backup serialization failed".into(),
+        )
+    })?;
+    let backup_prefix = setting_string(
+        &setting_object(&state, "storage").await?,
+        "backup_prefix",
+        "backups",
+    );
+    let safety_key =
+        ObjectKey::new(&format!("{backup_prefix}/{safety_id}.json")).map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "backup key failed".into(),
+            )
+        })?;
+    let mut safety_reader = std::io::Cursor::new(&safety);
+    let safety_uri = state
+        .storage
+        .put_stream(&safety_key, &mut safety_reader)
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "pre-restore safety backup failed".into(),
+            )
+        })?;
+    state
+        .repository
+        .complete_backup_job(&safety_id, &safety_uri.to_string(), safety.len() as i64)
+        .await
+        .map_err(database_error)?;
+    let artifact_uri = ArtifactUri::parse(&uri).map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "backup URI is invalid".into(),
+        )
+    })?;
+    let reader = state
+        .storage
+        .get_stream(&artifact_uri)
+        .await
+        .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "backup read failed".into()))?;
+    let mut bytes = Vec::new();
+    reader
+        .take(1024 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "backup read failed".into()))?;
+    let snapshot: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "backup JSON is invalid".into(),
+        )
+    })?;
+    state
+        .repository
+        .restore_metadata_snapshot(&snapshot)
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "backup.restore",
+        "backup",
+        &id,
+        serde_json::json!({"safety_backup_id":safety_id}),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+struct UsageQuery {
+    days: Option<i64>,
+}
+async fn get_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<UsageQuery>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let days = query.days.unwrap_or(30).clamp(1, 365);
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .usage_summary(actor.user_id.as_deref(), actor.role == Role::Admin, days)
+            .await
+            .map_err(database_error)?,
+    }))
+}
+async fn admin_overview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    admin(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .admin_overview()
+            .await
+            .map_err(database_error)?,
+    }))
+}
+async fn storage_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    admin(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .storage_summary()
+            .await
+            .map_err(database_error)?,
+    }))
+}
+async fn list_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_auth_sessions(actor.user_id.as_deref().unwrap_or_default())
+            .await
+            .map_err(database_error)?,
+    }))
+}
+async fn revoke_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    if !state
+        .repository
+        .revoke_auth_session(&token_id, actor.user_id.as_deref().unwrap_or_default())
+        .await
+        .map_err(database_error)?
+    {
+        return Err(not_found());
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn login_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_login_events(actor.user_id.as_deref().unwrap_or_default())
+            .await
+            .map_err(database_error)?,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct ProfileRequest {
+    display_name: String,
+    email: Option<String>,
+    #[serde(default = "default_locale")]
+    locale: String,
+    #[serde(default = "default_timezone")]
+    timezone: String,
+}
+fn default_locale() -> String {
+    "en".into()
+}
+fn default_timezone() -> String {
+    "UTC".into()
+}
+async fn get_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let data = state
+        .repository
+        .get_profile(actor.user_id.as_deref().unwrap_or_default())
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    Ok(Json(Envelope { data }))
+}
+async fn update_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<ProfileRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    if value.display_name.trim().is_empty()
+        || value.display_name.len() > 160
+        || value.email.as_ref().is_some_and(|v| v.len() > 320)
+        || value.locale.len() > 32
+        || value.timezone.len() > 128
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid profile".into(),
+        ));
+    }
+    let user_id = actor.user_id.as_deref().unwrap_or_default();
+    let data = state
+        .repository
+        .update_profile(
+            user_id,
+            value.display_name.trim(),
+            value.email.as_deref(),
+            &value.locale,
+            &value.timezone,
+        )
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "profile.update",
+        "user",
+        user_id,
+        serde_json::json!({}),
+    )
+    .await?;
+    Ok(Json(Envelope { data }))
+}
+
+#[derive(serde::Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+async fn change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let user_id = actor.user_id.as_deref().unwrap_or_default();
+    let minimum = setting_u64(
+        &setting_object(&state, "security").await?,
+        "password_min_length",
+        12,
+    )
+    .clamp(12, 128) as usize;
+    if value.new_password.len() < minimum || value.new_password.len() > 1024 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("password must be {minimum}..1024 characters"),
+        ));
+    }
+    let user = state
+        .repository
+        .get_user_security(user_id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    if !user
+        .password_hash
+        .as_deref()
+        .is_some_and(|hash| verify_password(&value.current_password, hash))
+    {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "current password is invalid".into(),
+        ));
+    }
+    state
+        .repository
+        .update_password(user_id, &hash_password(&value.new_password))
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "password.change",
+        "user",
+        user_id,
+        serde_json::json!({}),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+struct ForgotPasswordRequest {
+    email: String,
+}
+async fn forgot_password(
+    State(state): State<AppState>,
+    Json(value): Json<ForgotPasswordRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    if value.email.len() > 320 {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid email".into(),
+        ));
+    }
+    let Some(user) = state
+        .repository
+        .get_user_credentials(&value.email)
+        .await
+        .map_err(database_error)?
+    else {
+        return Ok(Json(Envelope {
+            data: serde_json::json!({"accepted":true}),
+        }));
+    };
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let token_hash = token_fingerprint(&token);
+    state
+        .repository
+        .create_password_reset(
+            &token_hash,
+            &user.id,
+            chrono::Utc::now() + chrono::Duration::minutes(30),
+        )
+        .await
+        .map_err(database_error)?;
+    let reset_base =
+        env::var("SHENNONG_WEB_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".into());
+    let reset_url = format!("{reset_base}/auth/reset-password?token={token}");
+    if let Ok(webhook) = env::var("SHENNONG_PASSWORD_RESET_WEBHOOK_URL") {
+        state
+            .clickhouse_client
+            .post(webhook)
+            .json(&serde_json::json!({"email":value.email,"reset_url":reset_url,"expires_in":1800}))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|_| {
+                ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    "password reset delivery failed".into(),
+                )
+            })?;
+        return Ok(Json(Envelope {
+            data: serde_json::json!({"accepted":true,"delivery":"webhook"}),
+        }));
+    }
+    if env::var("SHENNONG_PASSWORD_RESET_EXPOSE_TOKEN")
+        .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+    {
+        return Ok(Json(Envelope {
+            data: serde_json::json!({"accepted":true,"delivery":"response","reset_token":token,"reset_url":reset_url}),
+        }));
+    }
+    Err(ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "password reset delivery is not configured".into(),
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct ResetPasswordRequest {
+    token: String,
+    new_password: String,
+}
+async fn reset_password(
+    State(state): State<AppState>,
+    Json(value): Json<ResetPasswordRequest>,
+) -> Result<StatusCode, ApiError> {
+    let minimum = setting_u64(
+        &setting_object(&state, "security").await?,
+        "password_min_length",
+        12,
+    )
+    .clamp(12, 128) as usize;
+    if value.new_password.len() < minimum
+        || value.new_password.len() > 1024
+        || value.token.len() > 256
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid password reset".into(),
+        ));
+    }
+    if !state
+        .repository
+        .consume_password_reset(
+            &token_fingerprint(&value.token),
+            &hash_password(&value.new_password),
+        )
+        .await
+        .map_err(database_error)?
+    {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired password reset token".into(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn two_factor_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let user_id = actor.user_id.as_deref().unwrap_or_default();
+    let user = state
+        .repository
+        .get_user_security(user_id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    let count = state
+        .repository
+        .recovery_code_count(user_id)
+        .await
+        .map_err(database_error)?;
+    Ok(Json(Envelope {
+        data: serde_json::json!({"enabled":user.totp_secret.is_some(),"recovery_codes_remaining":count}),
+    }))
+}
+
+fn base32(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut output = String::new();
+    let (mut buffer, mut bits) = (0_u32, 0_u8);
+    for byte in bytes {
+        buffer = (buffer << 8) | u32::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            output.push(ALPHABET[((buffer >> bits) & 31) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        output.push(ALPHABET[((buffer << (5 - bits)) & 31) as usize] as char);
+    }
+    output
+}
+fn hex_bytes(value: &[u8]) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+async fn enroll_two_factor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let user_id = actor.user_id.as_deref().unwrap_or_default();
+    let digest =
+        Sha256::digest(format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).as_bytes());
+    let secret_hex = hex_bytes(&digest[..20]);
+    state
+        .repository
+        .create_totp_enrollment(user_id, &secret_hex)
+        .await
+        .map_err(database_error)?;
+    let secret = base32(&digest[..20]);
+    let profile = state
+        .repository
+        .get_profile(user_id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    let account = profile
+        .get("email")
+        .and_then(|v| v.as_str())
+        .unwrap_or(user_id);
+    let uri = format!(
+        "otpauth://totp/ShennongDB:{}?secret={}&issuer=ShennongDB",
+        account.replace(':', "%3A"),
+        secret
+    );
+    Ok(Json(Envelope {
+        data: serde_json::json!({"secret":secret,"otpauth_uri":uri,"expires_in":600}),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct TotpConfirmRequest {
+    code: String,
+}
+async fn confirm_two_factor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<TotpConfirmRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let user_id = actor.user_id.as_deref().unwrap_or_default();
+    let secret = state
+        .repository
+        .get_totp_enrollment(user_id)
+        .await
+        .map_err(database_error)?
+        .ok_or(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "2FA enrollment expired".into(),
+        ))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if !verify_totp(&secret, &value.code, now) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid verification code".into(),
+        ));
+    }
+    let codes = (0..10)
+        .map(|_| uuid::Uuid::new_v4().simple().to_string()[..10].to_ascii_uppercase())
+        .collect::<Vec<_>>();
+    let hashes = codes
+        .iter()
+        .map(|code| token_fingerprint(code))
+        .collect::<Vec<_>>();
+    state
+        .repository
+        .complete_totp_enrollment(user_id, &secret, &hashes)
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "2fa.enable",
+        "user",
+        user_id,
+        serde_json::json!({}),
+    )
+    .await?;
+    Ok(Json(Envelope {
+        data: serde_json::json!({"enabled":true,"recovery_codes":codes}),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct DisableTotpRequest {
+    password: String,
+}
+async fn disable_two_factor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(value): Json<DisableTotpRequest>,
+) -> Result<StatusCode, ApiError> {
+    let actor = authenticated(&headers, &state).await?;
+    let user_id = actor.user_id.as_deref().unwrap_or_default();
+    let user = state
+        .repository
+        .get_user_security(user_id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    if !user
+        .password_hash
+        .as_deref()
+        .is_some_and(|hash| verify_password(&value.password, hash))
+    {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "password is invalid".into(),
+        ));
+    }
+    state
+        .repository
+        .set_totp_secret(user_id, None)
+        .await
+        .map_err(database_error)?;
+    state
+        .repository
+        .replace_recovery_codes(user_id, &[])
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "2fa.disable",
+        "user",
+        user_id,
+        serde_json::json!({}),
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+struct RecoveryCodeRequest {
+    challenge: String,
+    code: String,
+}
+async fn verify_recovery_code(
+    State(state): State<AppState>,
+    request_headers: HeaderMap,
+    Json(value): Json<RecoveryCodeRequest>,
+) -> Result<Response, ApiError> {
+    let secret = state.jwt_secret.as_deref().ok_or(ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "session signing is unavailable".into(),
+    ))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", value.challenge))
+            .map_err(|_| ApiError(StatusCode::UNAUTHORIZED, "invalid challenge".into()))?,
+    );
+    let challenge = Principal::from_headers(&headers, None, Some(secret));
+    if !challenge.has_scopes(&["auth:2fa".into()]) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired challenge".into(),
+        ));
+    }
+    let user_id = challenge.user_id.ok_or(ApiError(
+        StatusCode::UNAUTHORIZED,
+        "invalid challenge".into(),
+    ))?;
+    if !state
+        .repository
+        .consume_recovery_code(
+            &user_id,
+            &token_fingerprint(&value.code.to_ascii_uppercase()),
+        )
+        .await
+        .map_err(database_error)?
+    {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "invalid recovery code".into(),
+        ));
+    }
+    let user = state
+        .repository
+        .get_user_security(&user_id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    let role = if user.role == "admin" {
+        Role::Admin
+    } else {
+        Role::User
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let session_lifetime = setting_u64(
+        &setting_object(&state, "security").await?,
+        "session_lifetime_seconds",
+        28_800,
+    )
+    .clamp(300, 2_592_000);
+    let token = issue_token(
+        secret,
+        user_id.clone(),
+        role,
+        (now + session_lifetime) as usize,
+        vec!["resource.read".into(), "query.execute".into()],
+    )
+    .map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session signing failed".into(),
+        )
+    })?;
+    let hash = token_fingerprint(&token);
+    state
+        .repository
+        .store_access_token(
+            &hash,
+            &user_id,
+            now + session_lifetime,
+            &serde_json::json!(["resource.read", "query.execute"]),
+        )
+        .await
+        .map_err(database_error)?;
+    state
+        .repository
+        .create_auth_session(
+            &hash,
+            &user_id,
+            chrono::DateTime::from_timestamp((now + session_lifetime) as i64, 0).ok_or(
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session timestamp failed".into(),
+                ),
+            )?,
+            request_ip(&request_headers),
+            request_user_agent(&request_headers),
+        )
+        .await
+        .map_err(database_error)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/json")
+        .header(SET_COOKIE, auth_cookie(&token, session_lifetime))
+        .body(Body::from(
+            serde_json::json!({"data":{"authenticated":true,"user_id":user_id,"role":role}})
+                .to_string(),
+        ))
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "auth response failed".into(),
+            )
+        })
+}
+
 async fn list_resources(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<ResourceListQuery>,
 ) -> Result<Json<Envelope<Vec<shennong_schema::Resource>>>, ApiError> {
     let principal = principal(&headers, &state);
+    if principal.role == Role::Guest
+        && setting_object(&state, "general")
+            .await?
+            .get("public_catalog")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "public catalog is disabled".into(),
+        ));
+    }
     let candidates = state
         .repository
         .list_resources(query.q.as_deref(), principal.role != Role::Guest)
@@ -2279,6 +4148,34 @@ async fn get_user(
         .map_err(database_error)?
         .ok_or_else(not_found)?;
     Ok(Json(Envelope { data }))
+}
+async fn admin_user_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    admin(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_auth_sessions(&id)
+            .await
+            .map_err(database_error)?,
+    }))
+}
+async fn admin_user_login_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
+    admin(&headers, &state).await?;
+    Ok(Json(Envelope {
+        data: state
+            .repository
+            .list_login_events(&id)
+            .await
+            .map_err(database_error)?,
+    }))
 }
 
 async fn upsert_user(

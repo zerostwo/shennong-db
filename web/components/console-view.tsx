@@ -2,7 +2,9 @@
 
 import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import { Check, Upload } from "lucide-react";
+import { getUsage, type JsonRecord } from "@/lib/api/adapter";
 import { AppShell, SectionHeader, TinyBadge, TopBar } from "./app-shell";
 import { ApiAccessView } from "./api-access-view";
 import { AccountView } from "./account-view";
@@ -57,30 +59,35 @@ function ConsolePage({ page }: { page: Page }) {
 }
 
 function Usage() {
+  const [days, setDays] = useState(30);
+  const [usage, setUsage] = useState<JsonRecord | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { void getUsage(days).then(setUsage).catch((reason) => setError(reason instanceof Error ? reason.message : "Usage request failed")); }, [days]);
+  const totals = (usage?.totals ?? {}) as JsonRecord;
+  const series = Array.isArray(usage?.series) ? usage.series as JsonRecord[] : [];
+  const resources = Array.isArray(usage?.resources) ? usage.resources as JsonRecord[] : [];
+  const endpoints = Array.isArray(usage?.endpoints) ? usage.endpoints as JsonRecord[] : [];
   return (
     <>
       <div className="workspace-toolbar">
-        <select aria-label="Date range"><option>Last 30 days</option><option>Last 7 days</option><option>Last 90 days</option></select>
-        <select aria-label="Token"><option>All tokens</option><option>Notebook analysis</option></select>
-        <select aria-label="Endpoint"><option>All endpoints</option><option>/api/v1/resources</option></select>
-        <select aria-label="Resource"><option>All resources</option><option>Toil RNA-seq</option></select>
-        <select aria-label="Status"><option>All status codes</option><option>2xx</option><option>4xx</option><option>5xx</option></select>
+        <select aria-label="Date range" value={days} onChange={(event) => setDays(Number(event.target.value))}><option value={30}>Last 30 days</option><option value={7}>Last 7 days</option><option value={90}>Last 90 days</option></select>
+        <TinyBadge tone="green">Recorded API traffic</TinyBadge>
       </div>
+      {error && <div className="error-banner" role="alert">{error}</div>}
       <div className="api-metrics">
-        {[["Requests", "2.14M"], ["Data transfer", "186.4 GB"], ["Errors", "0.18%"], ["Rate limited", "1,204"]].map(([label, value]) => <div className="console-metric" key={label}><span>{label}</span><strong>{value}</strong></div>)}
+        {[["Requests", String(totals.requests ?? 0)], ["Response bytes", formatBytes(Number(totals.response_bytes ?? 0))], ["Errors", String(totals.errors ?? 0)], ["Rate limited", String(totals.rate_limited ?? 0)]].map(([label, value]) => <div className="console-metric" key={label}><span>{label}</span><strong>{value}</strong></div>)}
       </div>
       <div className="console-panel">
         <SectionHeader title="Request volume" />
-        <AppLineChart label="Request volume for the last 30 days" values={[58, 64, 61, 73, 69, 82, 78, 91]} />
+        <AppLineChart label={`Request volume for the last ${days} days`} values={series.map((row) => Number(row.requests ?? 0))} />
       </div>
-      <RecordTable headings={["Top resource", "Requests", "Transfer", "Errors"]} rows={[["Toil RNA-seq", "1.12M", "82.4 GB", "0.09%"], ["PBMC 3K", "632K", "61.7 GB", "0.22%"], ["TCGA survival", "388K", "42.3 GB", "0.31%"]]} />
-      <div className="usage-grid">
-        <RecordTable headings={["Top endpoint", "Requests", "Median latency"]} rows={[["GET /resources", "881K", "82 ms"], ["POST /query", "743K", "241 ms"], ["GET /artifacts", "516K", "116 ms"]]} />
-        <RecordTable headings={["Token", "Requests", "Errors"]} rows={[["Notebook analysis", "1.48M", "0.12%"], ["RStudio", "421K", "0.21%"], ["CLI", "239K", "0.43%"]]} />
-      </div>
+      <RecordTable headings={["Resource", "Requests", "Transfer", "Errors"]} rows={resources.map((row) => [String(row.resource_id ?? "unscoped"), String(row.requests ?? 0), formatBytes(Number(row.response_bytes ?? 0)), String(row.errors ?? 0)])} />
+      <RecordTable headings={["Endpoint", "Requests", "Errors", "Median latency"]} rows={endpoints.map((row) => [String(row.endpoint ?? ""), String(row.requests ?? 0), String(row.errors ?? 0), `${Number(row.median_latency_ms ?? 0).toFixed(1)} ms`])} />
     </>
   );
 }
+
+function formatBytes(value: number) { const units = ["B", "KB", "MB", "GB", "TB"]; let size = value; let index = 0; while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; } return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`; }
 
 function RecordTable({ headings, rows }: { headings: readonly string[]; rows: readonly (readonly string[])[] }) {
   return (
