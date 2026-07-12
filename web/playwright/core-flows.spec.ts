@@ -117,7 +117,11 @@ test("authenticated mutations persist and reversible QA changes are cleaned up",
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByRole("status")).toHaveText("Saved to PostgreSQL");
 
+  const backupsLoaded = page.waitForResponse((response) =>
+    response.request().method() === "GET" && response.url().includes("/api/v1/backups"),
+  );
   await page.goto("/admin/backups");
+  await backupsLoaded;
   const completed = page.getByRole("cell", { name: "completed" });
   const initialBackups = await completed.count();
   await page.getByRole("button", { name: "Run metadata backup" }).click();
