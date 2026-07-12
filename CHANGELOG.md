@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-12
+
+### Fixed
+
+- Decode source text metadata lossily so isolated non-UTF-8 bytes in the verified UCSC Toil phenotype file do not break context-filtered and survival queries.
+
 ## [0.4.2] - 2026-07-12
 
 ### Fixed
@@ -106,4 +112,5 @@ and [Semantic Versioning](https://semver.org/).
 [0.4.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.0
 [0.4.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.1
 [0.4.2]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.2
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.4.2...HEAD
+[0.4.3]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.3
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.4.3...HEAD

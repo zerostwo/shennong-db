@@ -607,7 +607,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(TraceLayer::new_for_http());
     let address = env::var("SHENNONG_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    tracing::info!(%address, "shennong-db v0.4.2 listening");
+    tracing::info!(%address, "shennong-db v0.4.3 listening");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -630,7 +630,7 @@ fn env_secret(name: &str) -> Option<String> {
 }
 
 async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"status":"ok","service":"ShennongDB","version":"0.4.2"}))
+    Json(serde_json::json!({"status":"ok","service":"ShennongDB","version":"0.4.3"}))
 }
 
 async fn metrics(State(state): State<AppState>) -> Response {
@@ -686,7 +686,7 @@ async fn ready(State(state): State<AppState>) -> Result<Json<serde_json::Value>,
     }
 }
 async fn version() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"service":"ShennongDB","version":"0.4.2","api":"v1"}))
+    Json(serde_json::json!({"service":"ShennongDB","version":"0.4.3","api":"v1"}))
 }
 
 #[derive(serde::Deserialize)]

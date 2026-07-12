@@ -856,8 +856,11 @@ async fn read_small_text(storage: &dyn BlobStore, uri: &ArtifactUri) -> Result<S
     if value.len() as u64 > MAX_METADATA_BYTES {
         return Err(QueryError::ResponseTooLarge);
     }
-    let value = String::from_utf8(value).map_err(|_| QueryError::MalformedArtifact)?;
-    Ok(value)
+    Ok(decode_text(&value))
+}
+
+fn decode_text(value: &[u8]) -> String {
+    String::from_utf8_lossy(value).into_owned()
 }
 
 async fn expression_response_from_blob(
@@ -1145,7 +1148,7 @@ async fn attach_embedding_from_blob(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_QUERY_ROWS, QueryError, QueryPlanner, TiledbExecutor, attach_embedding,
+        MAX_QUERY_ROWS, QueryError, QueryPlanner, TiledbExecutor, attach_embedding, decode_text,
         execute_clickhouse_expression, execute_tiledb_expression, expression_response,
         expression_response_from_file, join_metadata, truncate_response,
     };
@@ -1153,6 +1156,14 @@ mod tests {
     use serde_json::json;
     use shennong_schema::{Resource, ResourceQuery};
     use std::{fs, path::PathBuf, time::Duration};
+
+    #[test]
+    fn text_metadata_replaces_isolated_invalid_utf8() {
+        assert_eq!(
+            decode_text(b"Sympathetic\xcaNervous System"),
+            "Sympathetic\u{fffd}Nervous System"
+        );
+    }
 
     fn tiledb_resource(uri: &str) -> Resource {
         Resource {
