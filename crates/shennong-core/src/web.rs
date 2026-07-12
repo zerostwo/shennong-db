@@ -92,7 +92,7 @@ impl ResourceRepository {
 
     pub async fn list_all_access_tokens(&self) -> Result<Vec<Value>, sqlx::Error> {
         sqlx::query_scalar(
-            "SELECT jsonb_build_object('token_id', t.token_hash, 'user_id', t.user_id, 'owner', u.display_name, 'scopes', t.scopes, 'issued_at', t.issued_at, 'expires_at', t.expires_at, 'revoked_at', t.revoked_at) FROM access_tokens t JOIN users u ON u.id=t.user_id ORDER BY t.issued_at DESC",
+            "SELECT jsonb_build_object('token_id', t.token_hash, 'user_id', t.user_id, 'owner', u.display_name, 'scopes', t.scopes, 'issued_at', t.issued_at, 'expires_at', t.expires_at, 'revoked_at', t.revoked_at) FROM access_tokens t JOIN users u ON u.id=t.user_id WHERE NOT EXISTS (SELECT 1 FROM auth_sessions s WHERE s.token_hash=t.token_hash) ORDER BY t.issued_at DESC",
         ).fetch_all(&self.pool).await
     }
 

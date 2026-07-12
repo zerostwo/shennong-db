@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-auth"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "hmac",
  "http",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clap",
  "serde",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "libc",
@@ -1715,7 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-query"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-schema"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1739,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-server"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1764,7 +1764,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-storage"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "chrono",

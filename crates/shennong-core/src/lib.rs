@@ -1457,7 +1457,7 @@ impl ResourceRepository {
     }
 
     pub async fn list_access_tokens(&self, user_id: &str) -> Result<Vec<AccessToken>, sqlx::Error> {
-        sqlx::query_as("SELECT token_hash, user_id, issued_at, expires_at, revoked_at, scopes FROM access_tokens WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW() ORDER BY issued_at DESC")
+        sqlx::query_as("SELECT token_hash, user_id, issued_at, expires_at, revoked_at, scopes FROM access_tokens t WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW() AND NOT EXISTS (SELECT 1 FROM auth_sessions s WHERE s.token_hash=t.token_hash) ORDER BY issued_at DESC")
             .bind(user_id)
             .fetch_all(&self.pool)
             .await

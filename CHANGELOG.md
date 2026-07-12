@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-12
+
+### Fixed
+
+- Keep revocable browser sessions out of personal and administrator API-token inventories while preserving shared revocation enforcement.
+- Align live-browser sign-in and mutation checks with the real authenticated choice screen and verify reversible favorites, collections, tokens, settings, and backups.
+
 ## [0.5.0] - 2026-07-12
 
 ### Added
@@ -132,4 +139,5 @@ and [Semantic Versioning](https://semver.org/).
 [0.4.2]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.2
 [0.4.3]: https://github.com/zerostwo/shennong-db/releases/tag/v0.4.3
 [0.5.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.0
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.5.0...HEAD
+[0.5.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.1
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.5.1...HEAD

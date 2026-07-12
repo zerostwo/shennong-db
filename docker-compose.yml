@@ -7,7 +7,7 @@ services:
     volumes:
       - ./data:/data
   shennong-db-web:
-    image: shennong-db-web:0.5.0
+    image: shennong-db-web:0.5.1
     build: ./web
     restart: unless-stopped
     depends_on:
