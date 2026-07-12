@@ -1,2 +1,17 @@
 import Link from "next/link";
-export default function AccessDeniedPage() { return <main className="shell" style={{ padding: 40 }}><h1>Access denied</h1><p className="muted">Your current session does not have permission to open this resource.</p><Link className="button primary" href="/auth/sign-in">Sign in</Link></main>; }
+import { Button } from "@/components/ui/button";
+
+export default function AccessDeniedPage() {
+  return (
+    <main className="auth-screen">
+      <div className="auth-card">
+        <h1>You do not have access to this Resource.</h1>
+        <p>Request access or contact an administrator. Private resources are not disclosed without a server-side grant.</p>
+        <div className="dialog-actions">
+          <Button asChild variant="outline"><Link href="/catalog">Return to Catalog</Link></Button>
+          <Button asChild><Link href="/support">Request Access</Link></Button>
+        </div>
+      </div>
+    </main>
+  );
+}

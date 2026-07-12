@@ -27,13 +27,12 @@ async function proxy(request: NextRequest, context: Context): Promise<Response> 
   headers.delete("content-length");
   headers.delete("host");
 
-  const response = await fetch(target, {
-    method,
-    headers,
-    body,
-    redirect: "manual",
-    signal: request.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(target, { method, headers, body, redirect: "manual", signal: request.signal });
+  } catch {
+    return Response.json({ code: "api_unavailable", message: "ShennongDB API is temporarily unavailable" }, { status: 503 });
+  }
 
   return new Response(response.body, {
     status: response.status,
