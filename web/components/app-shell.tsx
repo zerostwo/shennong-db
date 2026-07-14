@@ -17,6 +17,7 @@ import {
   CircleHelp,
   ClipboardList,
   Cloud,
+  FolderKanban,
   Gauge,
   KeyRound,
   LayoutDashboard,
@@ -39,6 +40,12 @@ type ShellProps = {
 };
 
 const publicGroups = [
+  {
+    label: "RESEARCH",
+    items: [
+      ["Projects", "/projects", FolderKanban],
+    ],
+  },
   {
     label: "CATALOG",
     items: [
@@ -184,7 +191,7 @@ function PublicNav({
   return (
     <nav className="sidebar-nav">
       {publicGroups
-        .filter((group) => group.label !== "ACCOUNT" || authenticated)
+        .filter((group) => (group.label !== "ACCOUNT" && group.label !== "RESEARCH") || authenticated)
         .map((group) => (
           <div className="nav-group" key={group.label}>
             <div className="nav-label">{group.label}</div>
@@ -194,7 +201,7 @@ function PublicNav({
                 label={label}
                 href={href}
                 icon={Icon}
-                active={pathname === href}
+                active={pathname === href || pathname.startsWith(`${href}/`)}
               />
             ))}
           </div>
@@ -384,6 +391,7 @@ export function TopBar({
   }, []);
   const commands = [
     ["Open catalog", "/catalog", "Resources, artifacts, and relations"],
+    ["Open projects", "/projects", "Research workspaces, activities, and BioGraph context"],
     ["Upload dataset", "/console/uploads/new", "Register files and metadata"],
     ["View API tokens", "/console/api-access", "Personal API credentials"],
     ["View usage", "/console/usage", "Requests, transfer, and limits"],
@@ -392,7 +400,7 @@ export function TopBar({
     ["Open administrator panel", "/admin/dashboard", "System health and governance"],
   ].filter(([label, , detail]) =>
     `${label} ${detail}`.toLowerCase().includes(commandQuery.toLowerCase()),
-  ).filter(([, href]) => (!href.startsWith("/admin") || role === "admin") && (!href.startsWith("/console") || Boolean(role)));
+  ).filter(([, href]) => (!href.startsWith("/admin") || role === "admin") && ((!href.startsWith("/console") && !href.startsWith("/projects")) || Boolean(role)));
   return (
     <>
       <header className="topbar">
