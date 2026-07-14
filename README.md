@@ -61,3 +61,11 @@ and the current analysis-readiness boundaries. See
 cross-dataset gene coordination. Run the isolated production regression baseline
 with `./scripts/test-platform.sh`; details are in
 [docs/production-hardening.md](docs/production-hardening.md).
+
+## Repository navigation
+
+- [Documentation index](docs/README.md) separates current operational guides,
+  design references, visual evidence, and archived implementation briefs.
+- [CodeGraph map](CODEGRAPH.md) records the source boundaries and the small set
+  of graph queries used to navigate dependencies without rescanning the repo.
+- [WebUI guide](web/README.md) covers the active Next.js App Router application.

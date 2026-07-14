@@ -191,6 +191,454 @@ pub struct RelationUpsert {
     pub provenance: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub owner_user_id: String,
+    pub visibility: String,
+    pub status: String,
+    pub metadata: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectUpsert {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub owner_user_id: String,
+    #[serde(default = "private_visibility")]
+    pub visibility: String,
+    #[serde(default = "active_status")]
+    pub status: String,
+    #[serde(default = "empty_object")]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ProjectMember {
+    pub project_id: String,
+    pub user_id: String,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMemberUpsert {
+    pub project_id: String,
+    pub user_id: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Study {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub description: String,
+    pub design_type: String,
+    pub status: String,
+    pub metadata: Value,
+    pub provenance: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StudyUpsert {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "generic_kind")]
+    pub design_type: String,
+    #[serde(default = "planning_status")]
+    pub status: String,
+    #[serde(default = "empty_object")]
+    pub metadata: Value,
+    #[serde(default = "empty_object")]
+    pub provenance: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ResearchEntity {
+    pub id: String,
+    pub project_id: Option<String>,
+    pub study_id: Option<String>,
+    pub category: String,
+    pub kind: String,
+    pub label: String,
+    pub ontology_id: Option<String>,
+    pub canonical_key: Option<String>,
+    pub status: String,
+    pub metadata: Value,
+    pub provenance: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchEntityUpsert {
+    pub id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub study_id: Option<String>,
+    pub category: String,
+    pub kind: String,
+    pub label: String,
+    #[serde(default)]
+    pub ontology_id: Option<String>,
+    #[serde(default)]
+    pub canonical_key: Option<String>,
+    #[serde(default = "active_status")]
+    pub status: String,
+    #[serde(default = "empty_object")]
+    pub metadata: Value,
+    #[serde(default = "empty_object")]
+    pub provenance: Value,
+}
+
+pub const RESEARCH_ENTITY_CATEGORIES: &[&str] = &[
+    "subject",
+    "cohort",
+    "sample",
+    "biospecimen",
+    "aliquot",
+    "bioentity",
+    "material",
+    "reagent",
+    "model",
+    "data_product",
+    "result",
+    "observation",
+    "claim",
+    "external_reference",
+    "other",
+];
+
+pub fn is_research_entity_category(value: &str) -> bool {
+    RESEARCH_ENTITY_CATEGORIES.contains(&value)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Activity {
+    pub id: String,
+    pub project_id: String,
+    pub study_id: Option<String>,
+    pub kind: String,
+    pub label: String,
+    pub status: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub parameters: Value,
+    pub provenance: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityUpsert {
+    pub id: String,
+    pub project_id: String,
+    #[serde(default)]
+    pub study_id: Option<String>,
+    pub kind: String,
+    pub label: String,
+    #[serde(default = "planned_status")]
+    pub status: String,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub ended_at: Option<DateTime<Utc>>,
+    #[serde(default = "empty_object")]
+    pub parameters: Value,
+    #[serde(default = "empty_object")]
+    pub provenance: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ActivityIo {
+    pub activity_id: String,
+    pub entity_id: String,
+    pub direction: String,
+    pub role: String,
+    pub ordinal: i32,
+    pub metadata: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityIoUpsert {
+    pub activity_id: String,
+    pub entity_id: String,
+    pub direction: String,
+    pub role: String,
+    #[serde(default)]
+    pub ordinal: i32,
+    #[serde(default = "empty_object")]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ActivityActor {
+    pub activity_id: String,
+    pub actor_type: String,
+    pub actor_id: String,
+    pub role: String,
+    pub metadata: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityActorUpsert {
+    pub activity_id: String,
+    pub actor_type: String,
+    pub actor_id: String,
+    pub role: String,
+    #[serde(default = "empty_object")]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ResourceRevision {
+    pub id: String,
+    pub resource_id: String,
+    pub revision: i32,
+    pub parent_revision_id: Option<String>,
+    pub content_sha256: Option<String>,
+    pub metadata: Value,
+    pub spec: Value,
+    pub provenance: Value,
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceRevisionCreate {
+    pub id: String,
+    pub resource_id: String,
+    pub revision: i32,
+    #[serde(default)]
+    pub parent_revision_id: Option<String>,
+    #[serde(default)]
+    pub content_sha256: Option<String>,
+    #[serde(default = "empty_object")]
+    pub metadata: Value,
+    #[serde(default = "empty_object")]
+    pub spec: Value,
+    #[serde(default = "empty_object")]
+    pub provenance: Value,
+    #[serde(default)]
+    pub created_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct GraphAssociation {
+    pub id: String,
+    pub project_id: Option<String>,
+    pub subject_id: String,
+    pub predicate: String,
+    pub object_id: String,
+    pub qualifiers: Value,
+    pub polarity: String,
+    pub knowledge_level: String,
+    pub status: String,
+    pub scope: String,
+    pub provenance: Value,
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphAssociationUpsert {
+    pub id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub subject_id: String,
+    pub predicate: String,
+    pub object_id: String,
+    #[serde(default = "empty_object")]
+    pub qualifiers: Value,
+    #[serde(default = "neutral_polarity")]
+    pub polarity: String,
+    #[serde(default = "observation_level")]
+    pub knowledge_level: String,
+    #[serde(default = "proposed_status")]
+    pub status: String,
+    #[serde(default = "project_scope")]
+    pub scope: String,
+    #[serde(default = "empty_object")]
+    pub provenance: Value,
+    #[serde(default)]
+    pub created_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct EvidenceItem {
+    pub id: String,
+    pub project_id: Option<String>,
+    pub evidence_type: String,
+    pub source_uri: Option<String>,
+    pub source_id: Option<String>,
+    pub locator: Value,
+    pub statistics: Value,
+    pub provenance: Value,
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceItemCreate {
+    pub id: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub evidence_type: String,
+    #[serde(default)]
+    pub source_uri: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default = "empty_object")]
+    pub locator: Value,
+    #[serde(default = "empty_object")]
+    pub statistics: Value,
+    #[serde(default = "empty_object")]
+    pub provenance: Value,
+    #[serde(default)]
+    pub created_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct AssociationEvidence {
+    pub association_id: String,
+    pub evidence_id: String,
+    pub stance: String,
+    pub weight: Option<f64>,
+    pub note: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssociationEvidenceUpsert {
+    pub association_id: String,
+    pub evidence_id: String,
+    pub stance: String,
+    #[serde(default)]
+    pub weight: Option<f64>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ProjectResourceBinding {
+    pub project_id: String,
+    pub resource_id: String,
+    pub role: String,
+    pub added_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectResourceBindingUpsert {
+    pub project_id: String,
+    pub resource_id: String,
+    pub role: String,
+    #[serde(default)]
+    pub added_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ResourceGraphBinding {
+    pub resource_id: String,
+    pub entity_id: String,
+    pub role: String,
+    pub revision_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceGraphBindingUpsert {
+    pub resource_id: String,
+    pub entity_id: String,
+    pub role: String,
+    #[serde(default)]
+    pub revision_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchSubgraph {
+    pub root_entity_id: String,
+    pub depth: u8,
+    pub truncated: bool,
+    pub entities: Vec<ResearchEntity>,
+    pub associations: Vec<GraphAssociation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectContextPack {
+    pub project: Project,
+    pub studies: Vec<Study>,
+    pub entities: Vec<ResearchEntity>,
+    pub activities: Vec<Activity>,
+    pub activity_io: Vec<ActivityIo>,
+    pub activity_actors: Vec<ActivityActor>,
+    pub associations: Vec<GraphAssociation>,
+    pub evidence: Vec<EvidenceItem>,
+    pub association_evidence: Vec<AssociationEvidence>,
+    pub resources: Vec<Resource>,
+    pub project_resources: Vec<ProjectResourceBinding>,
+    pub resource_revisions: Vec<ResourceRevision>,
+    pub resource_graph_bindings: Vec<ResourceGraphBinding>,
+    pub truncated: bool,
+}
+
+fn private_visibility() -> String {
+    "private".into()
+}
+
+fn active_status() -> String {
+    "active".into()
+}
+
+fn planning_status() -> String {
+    "planning".into()
+}
+
+fn planned_status() -> String {
+    "planned".into()
+}
+
+fn proposed_status() -> String {
+    "proposed".into()
+}
+
+fn generic_kind() -> String {
+    "generic".into()
+}
+
+fn neutral_polarity() -> String {
+    "neutral".into()
+}
+
+fn observation_level() -> String {
+    "observation".into()
+}
+
+fn project_scope() -> String {
+    "project".into()
+}
+
+fn empty_object() -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct AuditEvent {
     pub event_id: String,
@@ -375,7 +823,10 @@ pub fn default_permissions() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResourcePermissions, ResourceUpsert, Visibility};
+    use super::{
+        GraphAssociationUpsert, ProjectUpsert, ResourcePermissions, ResourceUpsert, Visibility,
+        is_research_entity_category,
+    };
     use serde_json::json;
 
     #[test]
@@ -405,5 +856,40 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn research_graph_defaults_are_stable_and_object_shaped() {
+        let project: ProjectUpsert = serde_json::from_value(json!({
+            "id":"project-1",
+            "name":"Project 1"
+        }))
+        .unwrap();
+        assert!(project.owner_user_id.is_empty());
+        assert_eq!(project.visibility, "private");
+        assert_eq!(project.status, "active");
+        assert_eq!(project.metadata, json!({}));
+
+        let association: GraphAssociationUpsert = serde_json::from_value(json!({
+            "id":"association-1",
+            "project_id":"project-1",
+            "subject_id":"sample-1",
+            "predicate":"derived_from",
+            "object_id":"subject-1"
+        }))
+        .unwrap();
+        assert_eq!(association.polarity, "neutral");
+        assert_eq!(association.knowledge_level, "observation");
+        assert_eq!(association.status, "proposed");
+        assert_eq!(association.scope, "project");
+        assert_eq!(association.qualifiers, json!({}));
+    }
+
+    #[test]
+    fn research_entity_categories_include_structured_observations() {
+        assert!(is_research_entity_category("subject"));
+        assert!(is_research_entity_category("data_product"));
+        assert!(is_research_entity_category("observation"));
+        assert!(!is_research_entity_category("resource"));
     }
 }

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { UploadView } from "./upload-view";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/console/uploads/new", useRouter: () => ({ push: vi.fn() }) }));
-vi.mock("@/lib/api/adapter", () => ({ getSession: async () => ({ authenticated:false, user_id:"", role:"", scopes:[] }), getHealth:async()=>({status:"ok"}), signOut: async () => undefined, uploadFile:async()=>({id:"upload-1"}),registerUploads:async()=>({id:"resource-1"}) }));
+vi.mock("@/lib/api/adapter", () => ({ getSession: async () => ({ authenticated:false, user_id:"", role:"", scopes:[] }), getHealth:async()=>({status:"ok"}), listIngestionJobs:async()=>[], signOut: async () => undefined, uploadFile:async()=>({id:"upload-1"}),registerUploads:async()=>({id:"resource-1"}),registerProjectUploads:async()=>({id:"resource-1"}) }));
 
 describe("UploadView", () => {
   it("moves through the dataset registration steps", async () => {

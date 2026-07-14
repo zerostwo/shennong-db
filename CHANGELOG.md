@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a PostgreSQL-backed Research Graph/BioGraph for Projects, Studies, typed Entities, Activities with explicit inputs, outputs, and actors, immutable Resource revisions, scoped Associations, Evidence, and Resource bindings.
+- Add permission-filtered Project, Graph, and Context Pack APIs with bounded four-level Agent discovery across catalog, graph, evidence, and project context.
+- Add live WebUI Projects, project-bound uploads, structured Observation capture with Activity I/O, and an evidence-aware BioGraph explorer.
+
+### Changed
+
+- Add a repository CodeGraph index and navigation map for dependency-aware code exploration.
+- Group current guides, architecture references, and completed implementation prompts under a documentation index.
+- Replace the obsolete Vite application scaffold with a focused Vitest configuration for the active Next.js WebUI.
+
+### Removed
+
+- Remove the unreferenced `web/src` component duplicate, Vite entry page, and Vite-only development dependencies.
+
 ## [0.5.2] - 2026-07-12
 
 ### Fixed

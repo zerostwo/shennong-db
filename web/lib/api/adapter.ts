@@ -1,5 +1,6 @@
 export type ResourceVisibility = "Public" | "Private";
 export type ResourceKind = "Resource" | "Artifact" | "Relation";
+export type JsonRecord = Record<string, unknown>;
 
 export type ResourceRecord = {
   id: string;
@@ -18,6 +19,130 @@ export type ResourceRecord = {
   provenance: string;
   size: string;
   raw?: unknown;
+};
+
+export type ProjectRecord = {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  visibility: "public" | "private";
+  ownerUserId: string;
+  createdAt: string;
+  updatedAt: string;
+  counts: {
+    studies?: number;
+    entities?: number;
+    activities?: number;
+    resources?: number;
+  };
+  raw: JsonRecord;
+};
+
+export type ProjectEntityRecord = {
+  id: string;
+  label: string;
+  category: string;
+  kind: string;
+  state: string;
+  properties: JsonRecord;
+  createdAt: string;
+  raw: JsonRecord;
+};
+
+export type ProjectActivityRecord = {
+  id: string;
+  label: string;
+  kind: string;
+  status: string;
+  startedAt: string;
+  endedAt: string;
+  metadata: JsonRecord;
+  raw: JsonRecord;
+};
+
+export type ProjectContextPack = {
+  projectId: string;
+  project: ProjectRecord;
+  studies: JsonRecord[];
+  entities: ProjectEntityRecord[];
+  activities: ProjectActivityRecord[];
+  activityIo: JsonRecord[];
+  activityActors: JsonRecord[];
+  associations: BioGraphEdge[];
+  evidence: JsonRecord[];
+  associationEvidence: JsonRecord[];
+  resources: ResourceRecord[];
+  projectResources: JsonRecord[];
+  resourceRevisions: JsonRecord[];
+  resourceGraphBindings: JsonRecord[];
+  truncated: boolean;
+  raw: JsonRecord;
+};
+
+export type BioGraphState =
+  | "observed"
+  | "computed"
+  | "hypothesis"
+  | "validated"
+  | "refuted"
+  | "unknown";
+
+export type BioGraphNode = {
+  id: string;
+  label: string;
+  kind: string;
+  state: BioGraphState;
+  summary: string;
+  metadata: JsonRecord;
+  raw: JsonRecord;
+};
+
+export type BioGraphEdge = {
+  id: string;
+  subjectId: string;
+  predicate: string;
+  objectId: string;
+  state: BioGraphState;
+  polarity: "positive" | "negative" | "neutral" | "mixed" | "unknown";
+  qualifiers: JsonRecord;
+  evidence: JsonRecord[];
+  raw: JsonRecord;
+};
+
+export type BioGraphSubgraph = {
+  root: string;
+  depth: number;
+  nodes: BioGraphNode[];
+  edges: BioGraphEdge[];
+  snapshotId: string;
+  asOf: string;
+  truncated: boolean;
+  raw: JsonRecord;
+};
+
+export type ObservationDraft = {
+  sampleEntityId: string;
+  measurementType: string;
+  value: number;
+  unit: string;
+};
+
+export type ObservationSubmissionFailure = {
+  phase: "activity" | "entity" | "activity_io" | "association" | "evidence" | "evidence_link";
+  row: number | null;
+  message: string;
+};
+
+export type ObservationSubmissionReport = {
+  activity: ProjectActivityRecord | null;
+  entities: ProjectEntityRecord[];
+  activityIo: JsonRecord[];
+  associations: JsonRecord[];
+  evidence: JsonRecord[];
+  associationEvidence: JsonRecord[];
+  failures: ObservationSubmissionFailure[];
+  complete: boolean;
 };
 
 export type ApiError = {
@@ -45,6 +170,8 @@ export class ShennongApiError extends Error {
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_SHENNONG_API_URL ?? "/api/v1";
+const PROJECTS_PATH = "/projects";
+const GRAPH_SUBGRAPH_PATH = "/graph/subgraph";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
@@ -84,6 +211,28 @@ function formatSize(value: unknown): string {
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[index]}`;
 }
 
+function jsonRecord(value: unknown): JsonRecord {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as JsonRecord
+    : {};
+}
+
+function recordArray(value: unknown): JsonRecord[] {
+  return Array.isArray(value) ? value.map(jsonRecord) : [];
+}
+
+function valueText(value: unknown, fallback = "—"): string {
+  return typeof value === "string" && value.length > 0
+    ? value
+    : typeof value === "number"
+      ? String(value)
+      : fallback;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function toResource(value: Record<string, unknown>): ResourceRecord {
   const metadata = (value.metadata ?? {}) as Record<string, unknown>;
   const spec = (value.spec ?? {}) as Record<string, unknown>;
@@ -109,6 +258,136 @@ function toResource(value: Record<string, unknown>): ResourceRecord {
     size: formatSize(value.size ?? spec.size),
     raw: value
   };
+}
+
+function toProject(value: JsonRecord): ProjectRecord {
+  const metadata = jsonRecord(value.metadata);
+  const counts = jsonRecord(value.counts);
+  const visibility = String(value.visibility ?? metadata.visibility ?? "private").toLowerCase() === "public"
+    ? "public"
+    : "private";
+  return {
+    id: valueText(value.id),
+    name: valueText(value.name ?? metadata.name ?? metadata.title, valueText(value.id)),
+    description: valueText(value.description ?? metadata.description, ""),
+    status: valueText(value.status, "unknown"),
+    visibility,
+    ownerUserId: valueText(value.owner_user_id ?? value.owner_id ?? metadata.owner, ""),
+    createdAt: valueText(value.created_at, ""),
+    updatedAt: valueText(value.updated_at, ""),
+    counts: {
+      studies: optionalNumber(value.study_count ?? counts.studies),
+      entities: optionalNumber(value.entity_count ?? counts.entities),
+      activities: optionalNumber(value.activity_count ?? counts.activities),
+      resources: optionalNumber(value.resource_count ?? counts.resources),
+    },
+    raw: value,
+  };
+}
+
+function toProjectEntity(value: JsonRecord): ProjectEntityRecord {
+  const properties = jsonRecord(value.properties ?? value.metadata);
+  return {
+    id: valueText(value.id),
+    label: valueText(value.label ?? value.name, valueText(value.id)),
+    category: valueText(value.category, "entity"),
+    kind: valueText(value.kind ?? value.entity_type, "unknown"),
+    state: valueText(value.state ?? value.status, "unknown"),
+    properties,
+    createdAt: valueText(value.created_at, ""),
+    raw: value,
+  };
+}
+
+function toProjectActivity(value: JsonRecord): ProjectActivityRecord {
+  return {
+    id: valueText(value.id),
+    label: valueText(value.label ?? value.name, valueText(value.id)),
+    kind: valueText(value.kind ?? value.activity_type, "unknown"),
+    status: valueText(value.status, "unknown"),
+    startedAt: valueText(value.started_at ?? value.created_at, ""),
+    endedAt: valueText(value.ended_at, ""),
+    metadata: jsonRecord(value.parameters ?? value.metadata),
+    raw: value,
+  };
+}
+
+function toContextPack(value: JsonRecord, projectId: string): ProjectContextPack {
+  const projectValue = jsonRecord(value.project);
+  const associationRows = recordArray(value.associations);
+  return {
+    projectId: valueText(projectValue.id, projectId),
+    project: toProject(projectValue),
+    studies: recordArray(value.studies),
+    entities: recordArray(value.entities).map(toProjectEntity),
+    activities: recordArray(value.activities).map(toProjectActivity),
+    activityIo: recordArray(value.activity_io),
+    activityActors: recordArray(value.activity_actors),
+    associations: associationRows.map(toGraphEdge),
+    evidence: recordArray(value.evidence),
+    associationEvidence: recordArray(value.association_evidence),
+    resources: recordArray(value.resources).map(toResource),
+    projectResources: recordArray(value.project_resources),
+    resourceRevisions: recordArray(value.resource_revisions),
+    resourceGraphBindings: recordArray(value.resource_graph_bindings),
+    truncated: value.truncated === true,
+    raw: value,
+  };
+}
+
+function graphState(knowledge: unknown, status?: unknown, category?: unknown): BioGraphState {
+  if (status === "validated") return "validated";
+  if (status === "refuted") return "refuted";
+  if (knowledge === "observation" || category === "observation") return "observed";
+  if (knowledge === "prediction" || knowledge === "assertion") return "computed";
+  if (knowledge === "hypothesis") return "hypothesis";
+  return "unknown";
+}
+
+function toGraphNode(value: JsonRecord): BioGraphNode {
+  return {
+    id: valueText(value.id),
+    label: valueText(value.label ?? value.name, valueText(value.id)),
+    kind: valueText(value.kind ?? value.category ?? value.type, "entity"),
+    state: graphState(value.knowledge_level ?? value.state, value.status, value.category),
+    summary: valueText(value.summary ?? value.description, ""),
+    metadata: jsonRecord(value.metadata ?? value.properties),
+    raw: value,
+  };
+}
+
+function toGraphEdge(value: JsonRecord, index: number): BioGraphEdge {
+  const subjectId = valueText(value.subject_id ?? value.subject ?? value.source);
+  const objectId = valueText(value.object_id ?? value.object ?? value.target);
+  const predicate = valueText(value.predicate ?? value.type, "related_to");
+  const evidenceValue = value.evidence;
+  const evidence = Array.isArray(evidenceValue)
+    ? recordArray(evidenceValue)
+    : Object.keys(jsonRecord(evidenceValue)).length > 0
+      ? [jsonRecord(evidenceValue)]
+      : [];
+  const polarity = value.polarity === "positive" || value.polarity === "negative" || value.polarity === "neutral" || value.polarity === "mixed"
+    ? value.polarity
+    : "unknown";
+  return {
+    id: valueText(value.id, `${subjectId}-${predicate}-${objectId}-${index}`),
+    subjectId,
+    predicate,
+    objectId,
+    state: graphState(value.knowledge_level ?? value.state, value.status),
+    polarity,
+    qualifiers: jsonRecord(value.qualifiers),
+    evidence,
+    raw: value,
+  };
+}
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : "Request failed";
+}
+
+function mutationId(prefix: string): string {
+  return `${prefix}-${globalThis.crypto.randomUUID()}`;
 }
 
 export type ApiResult<T> = { data: T; source: "live" };
@@ -191,7 +470,6 @@ export async function getSession(): Promise<{ authenticated: boolean; user_id: s
   return request("/auth/session");
 }
 
-export type JsonRecord = Record<string, unknown>;
 export async function listGrants(): Promise<JsonRecord[]> { return request("/grants"); }
 export async function createGrant(value: JsonRecord): Promise<JsonRecord> { return request("/grants", { method: "POST", body: JSON.stringify(value) }); }
 export async function deleteGrant(resourceId: string, userId: string): Promise<void> { await request(`/grants/${encodeURIComponent(resourceId)}/${encodeURIComponent(userId)}`, { method: "DELETE" }); }
@@ -212,6 +490,245 @@ export async function uploadFile(file: File): Promise<JsonRecord> {
   return ("data" in payload ? payload.data : payload) as JsonRecord;
 }
 export async function registerUploads(value: JsonRecord): Promise<JsonRecord> { return request("/uploads/register", { method: "POST", body: JSON.stringify(value) }); }
+export async function registerProjectUploads(projectId: string, value: JsonRecord): Promise<JsonRecord> {
+  return registerUploads({ ...value, project_id: projectId });
+}
+
+export async function listProjects(): Promise<ProjectRecord[]> {
+  return (await request<JsonRecord[]>(PROJECTS_PATH)).map(toProject);
+}
+
+export async function createProject(value: { name: string; description: string; visibility: "public" | "private" }): Promise<ProjectRecord> {
+  return toProject(await request<JsonRecord>(PROJECTS_PATH, { method: "POST", body: JSON.stringify({ id: mutationId("project"), ...value }) }));
+}
+
+export async function getProject(projectId: string): Promise<ProjectRecord> {
+  return toProject(await request<JsonRecord>(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}`));
+}
+
+export async function getProjectContextPack(projectId: string): Promise<ProjectContextPack> {
+  const value = await request<JsonRecord>(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/context-pack`);
+  return toContextPack(value, projectId);
+}
+
+export async function listProjectEntities(projectId: string): Promise<ProjectEntityRecord[]> {
+  return (await request<JsonRecord[]>(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/entities`)).map(toProjectEntity);
+}
+
+export async function listProjectActivities(projectId: string): Promise<ProjectActivityRecord[]> {
+  return (await request<JsonRecord[]>(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/activities`)).map(toProjectActivity);
+}
+
+export async function listProjectResources(projectId: string): Promise<ResourceRecord[]> {
+  const rows = await request<JsonRecord[]>(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/resources`);
+  return rows.map((row) => toResource(jsonRecord(row.resource ?? row)));
+}
+
+export async function createProjectEntity(projectId: string, value: JsonRecord): Promise<ProjectEntityRecord> {
+  return toProjectEntity(await request<JsonRecord>(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/entities`, {
+    method: "POST",
+    body: JSON.stringify({ id: mutationId("entity"), project_id: projectId, ...value }),
+  }));
+}
+
+export async function createProjectActivity(projectId: string, value: JsonRecord): Promise<ProjectActivityRecord> {
+  return toProjectActivity(await request<JsonRecord>(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/activities`, {
+    method: "POST",
+    body: JSON.stringify({ id: mutationId("activity"), project_id: projectId, ...value }),
+  }));
+}
+
+export async function createProjectActivityIo(projectId: string, activityId: string, value: JsonRecord): Promise<JsonRecord> {
+  return request(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/activities/${encodeURIComponent(activityId)}/io`, {
+    method: "POST",
+    body: JSON.stringify({ activity_id: activityId, ...value }),
+  });
+}
+
+export async function createProjectAssociation(projectId: string, value: JsonRecord): Promise<JsonRecord> {
+  return request(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/associations`, {
+    method: "POST",
+    body: JSON.stringify({ id: mutationId("association"), project_id: projectId, scope: "project", ...value }),
+  });
+}
+
+export async function createProjectEvidence(projectId: string, value: JsonRecord): Promise<JsonRecord> {
+  return request(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/evidence`, {
+    method: "POST",
+    body: JSON.stringify({ id: mutationId("evidence"), project_id: projectId, ...value }),
+  });
+}
+
+export async function listProjectAssociationEvidence(projectId: string, associationId: string): Promise<JsonRecord[]> {
+  return request(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/associations/${encodeURIComponent(associationId)}/evidence`);
+}
+
+export async function setProjectAssociationEvidence(
+  projectId: string,
+  associationId: string,
+  evidenceId: string,
+  value: { stance: "supporting" | "contradicting" | "neutral"; weight?: number; note?: string },
+): Promise<JsonRecord> {
+  return request(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/associations/${encodeURIComponent(associationId)}/evidence/${encodeURIComponent(evidenceId)}`, {
+    method: "PUT",
+    body: JSON.stringify(value),
+  });
+}
+
+export async function setProjectResource(projectId: string, resourceId: string, add: boolean): Promise<void> {
+  await request(`${PROJECTS_PATH}/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(resourceId)}`, { method: add ? "PUT" : "DELETE" });
+}
+
+export async function getBioGraphSubgraph(root: string, depth = 1, limit = 80): Promise<BioGraphSubgraph> {
+  const params = new URLSearchParams({ root, depth: String(Math.min(3, Math.max(1, depth))), limit: String(Math.min(80, Math.max(1, limit))) });
+  const value = await request<JsonRecord>(`${GRAPH_SUBGRAPH_PATH}?${params}`);
+  const graph = jsonRecord(value.graph);
+  const nodes = recordArray(value.entities ?? value.nodes ?? graph.entities ?? graph.nodes).map(toGraphNode);
+  const edgeRows = recordArray(value.edges ?? value.associations ?? graph.edges ?? graph.associations);
+  return {
+    root: valueText(value.root_entity_id ?? value.root, root),
+    depth: optionalNumber(value.depth) ?? depth,
+    nodes,
+    edges: edgeRows.map(toGraphEdge),
+    snapshotId: valueText(value.graph_snapshot_id ?? value.snapshot_id, ""),
+    asOf: valueText(value.as_of, ""),
+    truncated: value.truncated === true,
+    raw: value,
+  };
+}
+
+export async function getResourceGraphContext(resourceId: string): Promise<JsonRecord> {
+  return request(`/resources/${encodeURIComponent(resourceId)}/graph-context`);
+}
+
+export async function submitProjectObservations(projectId: string, rows: ObservationDraft[]): Promise<ObservationSubmissionReport> {
+  const failures: ObservationSubmissionFailure[] = [];
+  let activity: ProjectActivityRecord | null = null;
+  try {
+    activity = await createProjectActivity(projectId, {
+      kind: "observation_capture",
+      label: `Structured observation capture (${rows.length} rows)`,
+      status: "completed",
+      parameters: { source: "webui", row_count: rows.length },
+      provenance: { actor_type: "user", interface: "webui" },
+    });
+  } catch (reason) {
+    failures.push({ phase: "activity", row: null, message: errorMessage(reason) });
+    return { activity, entities: [], activityIo: [], associations: [], evidence: [], associationEvidence: [], failures, complete: false };
+  }
+
+  const entityResults = await Promise.allSettled(rows.map((row) => createProjectEntity(projectId, {
+    category: "observation",
+    kind: row.measurementType,
+    label: `${row.sampleEntityId} · ${row.measurementType}`,
+    metadata: {
+      sample_id: row.sampleEntityId,
+      value: row.value,
+      unit: row.unit,
+    },
+    provenance: { activity_id: activity.id, interface: "webui" },
+  })));
+  const created: Array<{ entity: ProjectEntityRecord; row: ObservationDraft; rowIndex: number }> = [];
+  entityResults.forEach((result, index) => {
+    if (result.status === "fulfilled" && result.value.id !== "—") {
+      created.push({ entity: result.value, row: rows[index], rowIndex: index });
+    } else {
+      failures.push({
+        phase: "entity",
+        row: index,
+        message: result.status === "rejected" ? errorMessage(result.reason) : "Entity response did not contain an id",
+      });
+    }
+  });
+
+  const ioResults = await Promise.allSettled(created.map(({ entity, rowIndex }) => createProjectActivityIo(projectId, activity.id, {
+    entity_id: entity.id,
+    direction: "output",
+    role: "observation",
+    ordinal: rowIndex,
+    metadata: { row_index: rowIndex },
+  })));
+  const linked: Array<{ entity: ProjectEntityRecord; row: ObservationDraft; rowIndex: number }> = [];
+  const activityIo: JsonRecord[] = [];
+  ioResults.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      activityIo.push(result.value);
+      linked.push(created[index]);
+    } else {
+      failures.push({ phase: "activity_io", row: created[index].rowIndex, message: errorMessage(result.reason) });
+    }
+  });
+
+  const associationResults = await Promise.allSettled(linked.map(({ entity, row }) => createProjectAssociation(projectId, {
+    subject_id: row.sampleEntityId,
+    predicate: "shennong:has_observation",
+    object_id: entity.id,
+    qualifiers: { measurement_type: row.measurementType, unit: row.unit },
+    knowledge_level: "observation",
+    polarity: "neutral",
+    status: "proposed",
+    provenance: { activity_id: activity.id, interface: "webui" },
+  })));
+  const associations: Array<{ association: JsonRecord; row: ObservationDraft; rowIndex: number }> = [];
+  associationResults.forEach((result, index) => {
+    if (result.status === "fulfilled" && typeof result.value.id === "string") {
+      associations.push({ association: result.value, row: linked[index].row, rowIndex: linked[index].rowIndex });
+    } else {
+      failures.push({
+        phase: "association",
+        row: linked[index].rowIndex,
+        message: result.status === "rejected" ? errorMessage(result.reason) : "Association response did not contain an id",
+      });
+    }
+  });
+
+  const evidenceResults = await Promise.allSettled(associations.map(({ association, row }) => createProjectEvidence(projectId, {
+    evidence_type: "direct_observation",
+    source_id: activity.id,
+    locator: {
+      activity_id: activity.id,
+      observation_entity_id: association.object_id,
+      sample_entity_id: row.sampleEntityId,
+    },
+    statistics: { value: row.value, unit: row.unit },
+    provenance: { interface: "webui" },
+  })));
+  const evidence: Array<{ item: JsonRecord; association: JsonRecord; rowIndex: number }> = [];
+  evidenceResults.forEach((result, index) => {
+    if (result.status === "fulfilled" && typeof result.value.id === "string") {
+      evidence.push({ item: result.value, association: associations[index].association, rowIndex: associations[index].rowIndex });
+    } else {
+      failures.push({
+        phase: "evidence",
+        row: associations[index].rowIndex,
+        message: result.status === "rejected" ? errorMessage(result.reason) : "Evidence response did not contain an id",
+      });
+    }
+  });
+
+  const linkResults = await Promise.allSettled(evidence.map(({ item, association }) => setProjectAssociationEvidence(
+    projectId,
+    String(association.id),
+    String(item.id),
+    { stance: "supporting", note: `Captured by activity ${activity.id}` },
+  )));
+  const associationEvidence: JsonRecord[] = [];
+  linkResults.forEach((result, index) => {
+    if (result.status === "fulfilled") associationEvidence.push(result.value);
+    else failures.push({ phase: "evidence_link", row: evidence[index].rowIndex, message: errorMessage(result.reason) });
+  });
+
+  return {
+    activity,
+    entities: created.map(({ entity }) => entity),
+    activityIo,
+    associations: associations.map(({ association }) => association),
+    evidence: evidence.map(({ item }) => item),
+    associationEvidence,
+    failures,
+    complete: failures.length === 0 && associationEvidence.length === rows.length,
+  };
+}
 export async function getSettings(): Promise<JsonRecord> { return request("/settings"); }
 export async function updateSetting(key: string, value: JsonRecord): Promise<JsonRecord> { return request(`/settings/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify(value) }); }
 export async function listBackups(): Promise<JsonRecord[]> { return request("/backups"); }

@@ -21,7 +21,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod research_graph;
 mod web;
+pub use research_graph::{MAX_RESEARCH_GRAPH_DEPTH, MAX_RESEARCH_GRAPH_LIMIT};
 pub use web::{LoginEventWrite, UploadWrite, UsageEventWrite};
 
 #[derive(Debug, Error)]
