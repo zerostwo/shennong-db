@@ -1,5 +1,9 @@
 # Changelog
 
+All notable changes to this project are documented in this file. This project
+follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
+[Semantic Versioning](https://semver.org/).
+
 ## [Unreleased]
 
 ### Added
@@ -7,12 +11,22 @@
 - Add a PostgreSQL-backed Research Graph/BioGraph for Projects, Studies, typed Entities, Activities with explicit inputs, outputs, and actors, immutable Resource revisions, scoped Associations, Evidence, and Resource bindings.
 - Add permission-filtered Project, Graph, and Context Pack APIs with bounded four-level Agent discovery across catalog, graph, evidence, and project context.
 - Add live WebUI Projects, project-bound uploads, structured Observation capture with Activity I/O, and an evidence-aware BioGraph explorer.
+- Add reproducible HTTP concurrency, data-access, and browser performance benchmarks with raw results and production/publication measurement guidance.
+- Add a read-only Rust MCP server and versioned ShennongDB skill for agent Resource discovery, gene resolution, bounded queries, Project Context Packs, and Research Graph search.
+- Add a complete current user guide covering first-run setup, WebUI workflows, authentication, data access, uploads, Projects, administration, recovery, and troubleshooting.
 
 ### Changed
 
-- Add a repository CodeGraph index and navigation map for dependency-aware code exploration.
+- Organize repository navigation around a CodeGraph index and dependency-aware source map.
 - Group current guides, architecture references, and completed implementation prompts under a documentation index.
 - Replace the obsolete Vite application scaffold with a focused Vitest configuration for the active Next.js WebUI.
+- Align default and production Compose configuration with the all-in-one image, port `18080`, `.env` substitution, and the optional standalone WebUI development profile.
+- Replace obsolete multi-service production and backup instructions with the current single-volume topology and a consistent full-data restore workflow.
+- Move the ShennongDB Skill to `.agents/skills/shennong-db` for repository-level Codex discovery and document current Codex MCP/Skill installation and use.
+
+### Fixed
+
+- Proxy `/metrics` and `/version` through the public WebUI gateway so the documented all-in-one endpoint exposes monitoring and release metadata.
 
 ### Removed
 
@@ -105,9 +119,6 @@
 - Replace WebUI catalog and token mock data with live API calls, expose authentication, and make sidebar navigation collapsible and route-aware.
 - Include endpoint ports in S3 signatures and remove provider staging data after publication.
 - Fetch full Git history for the GitHub Actions secret scan so gitleaks can resolve push ranges.
-
-This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
-and [Semantic Versioning](https://semver.org/).
 
 ## [0.2.0] - 2026-07-11
 

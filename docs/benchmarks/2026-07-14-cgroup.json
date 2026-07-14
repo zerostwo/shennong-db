@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "measurement": "container cgroup snapshots around 2026-07-14-http.json",
+  "wall_seconds": 8.0,
+  "cgroup": "system.slice/docker-54acb2dfe9a51011ad5ed2f1ece0a58f21599bb4f3d06883dfa92e489885c75b.scope",
+  "before": {
+    "cpu": {
+      "usage_usec": 15266982552,
+      "user_usec": 9102499487,
+      "system_usec": 6164483064,
+      "nr_throttled": 0,
+      "throttled_usec": 0
+    },
+    "memory_current_bytes": 3606339584,
+    "io": {
+      "rbytes": 7766016,
+      "wbytes": 114558054400,
+      "rios": 578,
+      "wios": 10862538
+    }
+  },
+  "after": {
+    "cpu": {
+      "usage_usec": 15282471374,
+      "user_usec": 9116422635,
+      "system_usec": 6166048739,
+      "nr_throttled": 0,
+      "throttled_usec": 0
+    },
+    "memory_current_bytes": 4799885312,
+    "memory_peak_bytes": 4858912768,
+    "io": {
+      "rbytes": 7766016,
+      "wbytes": 114581872640,
+      "rios": 578,
+      "wios": 10866646
+    }
+  },
+  "delta": {
+    "cpu_usage_usec": 15488822,
+    "memory_current_bytes": 1193545728,
+    "rbytes": 0,
+    "wbytes": 23818240,
+    "rios": 0,
+    "wios": 4108
+  },
+  "limitations": [
+    "memory_peak is the cgroup lifetime peak because a pre-run peak baseline was not captured",
+    "memory current includes anonymous memory and filesystem or database page cache",
+    "the cgroup contains Next.js, Rust, PostgreSQL, ClickHouse, and object-storage processes"
+  ]
+}

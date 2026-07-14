@@ -6,7 +6,7 @@ ARG VERSION=0.1.0
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
-RUN cargo build --release --package shennong-server --package shennong-cli
+RUN cargo build --release --package shennong-server --package shennong-cli --package shennong-mcp
 
 FROM mirror.gcr.io/library/node:24-bookworm-slim AS web-builder
 WORKDIR /app/web
@@ -46,6 +46,7 @@ COPY --from=web-builder /app/web/.next/standalone /app/web
 COPY --from=web-builder /app/web/.next/static /app/web/.next/static
 COPY --from=builder /app/target/release/shennong-server /usr/local/bin/shennong-server
 COPY --from=builder /app/target/release/shennong-cli /usr/local/bin/shennong-cli
+COPY --from=builder /app/target/release/shennong-mcp /usr/local/bin/shennong-mcp
 COPY providers /app/providers
 COPY seed /app/seed
 COPY docker/entrypoint.sh /usr/local/bin/shennong-entrypoint

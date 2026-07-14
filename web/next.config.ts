@@ -20,7 +20,9 @@ const nextConfig: NextConfig = {
     return internal ? [
       { source: "/.well-known/:path*", destination: `${internal}/.well-known/:path*` },
       { source: "/health", destination: `${internal}/health` },
-      { source: "/healthz", destination: `${internal}/healthz` }
+      { source: "/healthz", destination: `${internal}/healthz` },
+      { source: "/metrics", destination: `${internal}/metrics` },
+      { source: "/version", destination: `${internal}/version` }
     ] : [];
   },
   poweredByHeader: false,

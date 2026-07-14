@@ -1,5 +1,10 @@
 # Query Performance and Analysis Readiness
 
+This page preserves the original single-request query and analysis-readiness
+record. See [Benchmark Results and Performance Plan](benchmark-results.md) for
+the current reproducible concurrency, data-access, WebUI, production, and
+publication benchmark baseline.
+
 ## Production measurements
 
 Measured on 2026-07-11 against `http://192.168.3.10:18080` after installing the

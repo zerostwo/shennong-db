@@ -1,0 +1,494 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-14T13:52:19.615693+00:00",
+  "base_url": "http://127.0.0.1:18080",
+  "host": {
+    "hostname": "miga",
+    "platform": "Linux-7.0.0-27-generic-x86_64-with-glibc2.43",
+    "python": "3.14.4",
+    "logical_cpus": 24
+  },
+  "methodology": {
+    "connection_model": "one persistent HTTP/1.1 connection per worker",
+    "warmup_requests_per_scenario": 3,
+    "timeout_seconds": 30.0,
+    "latency_clock": "time.perf_counter_ns"
+  },
+  "results": [
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/health",
+      "requests": 200,
+      "concurrency": 1,
+      "elapsed_seconds": 0.162135,
+      "requests_per_second": 1233.538,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 11200,
+      "latency_ms": {
+        "min": 0.379,
+        "mean": 0.804,
+        "p50": 0.764,
+        "p90": 1.321,
+        "p95": 1.404,
+        "p99": 1.725,
+        "max": 2.843
+      },
+      "errors": {}
+    },
+    {
+      "name": "readiness",
+      "method": "GET",
+      "path": "/healthz",
+      "requests": 200,
+      "concurrency": 1,
+      "elapsed_seconds": 0.338651,
+      "requests_per_second": 590.578,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 16400,
+      "latency_ms": {
+        "min": 0.85,
+        "mean": 1.689,
+        "p50": 1.659,
+        "p90": 2.2,
+        "p95": 2.453,
+        "p99": 2.878,
+        "max": 2.997
+      },
+      "errors": {}
+    },
+    {
+      "name": "catalog",
+      "method": "GET",
+      "path": "/api/v1/resources",
+      "requests": 200,
+      "concurrency": 1,
+      "elapsed_seconds": 0.614703,
+      "requests_per_second": 325.36,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 327000,
+      "latency_ms": {
+        "min": 1.507,
+        "mean": 3.067,
+        "p50": 2.927,
+        "p90": 3.805,
+        "p95": 4.124,
+        "p99": 5.472,
+        "max": 6.001
+      },
+      "errors": {}
+    },
+    {
+      "name": "agent-discovery",
+      "method": "GET",
+      "path": "/.well-known/shennong-agent.json",
+      "requests": 200,
+      "concurrency": 1,
+      "elapsed_seconds": 0.216668,
+      "requests_per_second": 923.069,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 192400,
+      "latency_ms": {
+        "min": 0.463,
+        "mean": 1.079,
+        "p50": 0.938,
+        "p90": 1.817,
+        "p95": 2.236,
+        "p99": 2.988,
+        "max": 3.657
+      },
+      "errors": {}
+    },
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/health",
+      "requests": 200,
+      "concurrency": 8,
+      "elapsed_seconds": 0.081703,
+      "requests_per_second": 2447.897,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 11200,
+      "latency_ms": {
+        "min": 1.163,
+        "mean": 3.16,
+        "p50": 2.735,
+        "p90": 5.121,
+        "p95": 6.241,
+        "p99": 7.192,
+        "max": 7.686
+      },
+      "errors": {}
+    },
+    {
+      "name": "readiness",
+      "method": "GET",
+      "path": "/healthz",
+      "requests": 200,
+      "concurrency": 8,
+      "elapsed_seconds": 0.069948,
+      "requests_per_second": 2859.266,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 16400,
+      "latency_ms": {
+        "min": 1.045,
+        "mean": 2.693,
+        "p50": 2.752,
+        "p90": 3.309,
+        "p95": 3.953,
+        "p99": 4.942,
+        "max": 5.331
+      },
+      "errors": {}
+    },
+    {
+      "name": "catalog",
+      "method": "GET",
+      "path": "/api/v1/resources",
+      "requests": 200,
+      "concurrency": 8,
+      "elapsed_seconds": 0.150764,
+      "requests_per_second": 1326.578,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 327000,
+      "latency_ms": {
+        "min": 2.268,
+        "mean": 5.788,
+        "p50": 5.714,
+        "p90": 7.609,
+        "p95": 8.484,
+        "p99": 9.607,
+        "max": 10.839
+      },
+      "errors": {}
+    },
+    {
+      "name": "agent-discovery",
+      "method": "GET",
+      "path": "/.well-known/shennong-agent.json",
+      "requests": 200,
+      "concurrency": 8,
+      "elapsed_seconds": 0.068777,
+      "requests_per_second": 2907.939,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 192400,
+      "latency_ms": {
+        "min": 0.872,
+        "mean": 2.639,
+        "p50": 2.4,
+        "p90": 3.652,
+        "p95": 4.566,
+        "p99": 6.493,
+        "max": 6.557
+      },
+      "errors": {}
+    },
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/health",
+      "requests": 200,
+      "concurrency": 32,
+      "elapsed_seconds": 0.062481,
+      "requests_per_second": 3200.969,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 11200,
+      "latency_ms": {
+        "min": 0.908,
+        "mean": 8.325,
+        "p50": 8.364,
+        "p90": 11.401,
+        "p95": 12.622,
+        "p99": 13.713,
+        "max": 14.895
+      },
+      "errors": {}
+    },
+    {
+      "name": "readiness",
+      "method": "GET",
+      "path": "/healthz",
+      "requests": 200,
+      "concurrency": 32,
+      "elapsed_seconds": 0.071406,
+      "requests_per_second": 2800.884,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 16400,
+      "latency_ms": {
+        "min": 1.802,
+        "mean": 9.801,
+        "p50": 10.9,
+        "p90": 11.954,
+        "p95": 12.048,
+        "p99": 12.473,
+        "max": 13.23
+      },
+      "errors": {}
+    },
+    {
+      "name": "catalog",
+      "method": "GET",
+      "path": "/api/v1/resources",
+      "requests": 200,
+      "concurrency": 32,
+      "elapsed_seconds": 0.164407,
+      "requests_per_second": 1216.495,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 327000,
+      "latency_ms": {
+        "min": 1.903,
+        "mean": 19.728,
+        "p50": 14.753,
+        "p90": 28.318,
+        "p95": 75.266,
+        "p99": 118.125,
+        "max": 127.113
+      },
+      "errors": {}
+    },
+    {
+      "name": "agent-discovery",
+      "method": "GET",
+      "path": "/.well-known/shennong-agent.json",
+      "requests": 200,
+      "concurrency": 32,
+      "elapsed_seconds": 0.06445,
+      "requests_per_second": 3103.184,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 192400,
+      "latency_ms": {
+        "min": 0.741,
+        "mean": 8.252,
+        "p50": 9.086,
+        "p90": 9.682,
+        "p95": 10.372,
+        "p99": 11.484,
+        "max": 11.876
+      },
+      "errors": {}
+    },
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/health",
+      "requests": 200,
+      "concurrency": 64,
+      "elapsed_seconds": 0.062717,
+      "requests_per_second": 3188.906,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 11200,
+      "latency_ms": {
+        "min": 1.069,
+        "mean": 13.899,
+        "p50": 15.918,
+        "p90": 20.796,
+        "p95": 21.371,
+        "p99": 33.297,
+        "max": 35.634
+      },
+      "errors": {}
+    },
+    {
+      "name": "readiness",
+      "method": "GET",
+      "path": "/healthz",
+      "requests": 200,
+      "concurrency": 64,
+      "elapsed_seconds": 0.077518,
+      "requests_per_second": 2580.047,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 16400,
+      "latency_ms": {
+        "min": 1.731,
+        "mean": 18.599,
+        "p50": 16.782,
+        "p90": 29.974,
+        "p95": 31.071,
+        "p99": 32.19,
+        "max": 33.605
+      },
+      "errors": {}
+    },
+    {
+      "name": "catalog",
+      "method": "GET",
+      "path": "/api/v1/resources",
+      "requests": 200,
+      "concurrency": 64,
+      "elapsed_seconds": 0.149537,
+      "requests_per_second": 1337.462,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 327000,
+      "latency_ms": {
+        "min": 2.15,
+        "mean": 25.647,
+        "p50": 8.071,
+        "p90": 90.637,
+        "p95": 109.097,
+        "p99": 123.178,
+        "max": 128.698
+      },
+      "errors": {}
+    },
+    {
+      "name": "agent-discovery",
+      "method": "GET",
+      "path": "/.well-known/shennong-agent.json",
+      "requests": 200,
+      "concurrency": 64,
+      "elapsed_seconds": 0.063387,
+      "requests_per_second": 3155.199,
+      "successes": 200,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 200
+      },
+      "response_bytes_total": 192400,
+      "latency_ms": {
+        "min": 1.365,
+        "mean": 9.557,
+        "p50": 9.027,
+        "p90": 16.13,
+        "p95": 16.596,
+        "p99": 16.84,
+        "max": 17.742
+      },
+      "errors": {}
+    },
+    {
+      "name": "toil-expression",
+      "method": "POST",
+      "path": "/api/v1/query",
+      "requests": 20,
+      "concurrency": 1,
+      "elapsed_seconds": 2.36455,
+      "requests_per_second": 8.458,
+      "successes": 20,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 20
+      },
+      "response_bytes_total": 439520,
+      "latency_ms": {
+        "min": 107.62,
+        "mean": 118.184,
+        "p50": 113.617,
+        "p90": 130.611,
+        "p95": 133.652,
+        "p99": 153.184,
+        "max": 158.067
+      },
+      "errors": {}
+    },
+    {
+      "name": "toil-expression",
+      "method": "POST",
+      "path": "/api/v1/query",
+      "requests": 20,
+      "concurrency": 4,
+      "elapsed_seconds": 1.045059,
+      "requests_per_second": 19.138,
+      "successes": 20,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 20
+      },
+      "response_bytes_total": 439520,
+      "latency_ms": {
+        "min": 155.982,
+        "mean": 203.718,
+        "p50": 204.322,
+        "p90": 236.76,
+        "p95": 239.921,
+        "p99": 267.587,
+        "max": 274.503
+      },
+      "errors": {}
+    },
+    {
+      "name": "toil-expression",
+      "method": "POST",
+      "path": "/api/v1/query",
+      "requests": 20,
+      "concurrency": 8,
+      "elapsed_seconds": 0.748284,
+      "requests_per_second": 26.728,
+      "successes": 20,
+      "error_rate": 0.0,
+      "status_counts": {
+        "200": 20
+      },
+      "response_bytes_total": 439520,
+      "latency_ms": {
+        "min": 166.729,
+        "mean": 248.053,
+        "p50": 246.825,
+        "p90": 312.332,
+        "p95": 347.34,
+        "p99": 359.045,
+        "max": 361.971
+      },
+      "errors": {}
+    }
+  ]
+}

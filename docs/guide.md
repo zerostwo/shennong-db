@@ -1,138 +1,225 @@
-# ShennongDB Docker and API Guide
+# ShennongDB user guide
 
-## 1. Production installation
+This guide describes the current `0.5.2` all-in-one deployment, WebUI, HTTP API,
+data workflows, administration, and day-two operations. The checked-in
+[`openapi/shennongdb.json`](../openapi/shennongdb.json) remains the field-level
+API contract.
+
+## 1. What ShennongDB runs
+
+The release image contains five cooperating components behind one published
+HTTP port:
+
+- the Next.js WebUI and API gateway on container port `8000`;
+- the Rust API on loopback port `8001`;
+- PostgreSQL metadata and authentication storage;
+- ClickHouse query cache;
+- SeaweedFS object storage and embedded TileDB access.
+
+All persistent state is under `/data`. PostgreSQL, ClickHouse, object storage,
+uploaded files, derived arrays, and the generated secret file are therefore
+preserved by one host mount. None of the internal services publishes a host
+port.
+
+## 2. Install with Docker Compose
 
 Requirements:
 
-- Linux with Docker Engine and Docker Compose v2
-- one host port for the HTTP API
-- enough disk for the source datasets, TileDB arrays, ClickHouse cache, and PostgreSQL metadata
+- Linux with Docker Engine and Docker Compose v2;
+- at least 2 CPU cores and 4 GiB RAM for evaluation;
+- substantially more disk than the compressed source data for production
+  ingestion, indexes, derived arrays, and backups.
 
-Create the deployment directory and data layout:
+Create a deployment directory:
 
 ```bash
-sudo mkdir -p /srv/shennong-db/data/pbmc
+sudo mkdir -p /srv/shennong-db
+sudo chown "$USER":"$USER" /srv/shennong-db
 cd /srv/shennong-db
-curl -fsSLO https://raw.githubusercontent.com/zerostwo/shennong-db/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/zerostwo/shennong-db/main/docker-compose.production.yml
+curl -fsSLo .env.example https://raw.githubusercontent.com/zerostwo/shennong-db/main/.env.example
+cp .env.example .env
 ```
 
-PBMC files are not inspected during container startup. Install a PBMC Provider
-explicitly; its manifest owns the source URL, checksum, Resource version, and
-TileDB materializer. This keeps a clean deployment fast and makes missing or
-corrupt input fail as an ingestion job instead of creating an `available`
-Resource.
+Generate two independent secrets and edit `.env`:
 
-Create `/srv/shennong-db/.env`:
+```bash
+openssl rand -hex 32
+openssl rand -hex 32
+```
+
+The minimum production configuration is:
 
 ```dotenv
-SHENNONG_ADMIN_API_KEY=replace-with-openssl-rand-hex-32
-SHENNONG_JWT_SECRET=replace-with-a-different-openssl-rand-hex-32
+SHENNONG_ADMIN_API_KEY=<first-random-value>
+SHENNONG_JWT_SECRET=<second-random-value>
 SHENNONG_DATA_PATH=/srv/shennong-db/data
 SHENNONG_BIND_ADDRESS=127.0.0.1
-SHENNONG_PORT=8000
-SHENNONG_IMAGE=zerostwo/shennong-db:0.1.0
+SHENNONG_PORT=18080
+SHENNONG_IMAGE=zerostwo/shennong-db:0.5.2
 ```
 
-On a restricted or slow outbound network, optionally set
-`SHENNONG_DOWNLOAD_PROXY=http://host.docker.internal:7890`. Compose maps
-`host.docker.internal` to the Docker host gateway.
+Bind to `127.0.0.1` when a TLS reverse proxy runs on the same host. Use a LAN
+address or `0.0.0.0` only when direct network access is intentional and is
+protected by a firewall.
 
-Generate each secret with `openssl rand -hex 32`. Start the single service and
-import the bundled Resource metadata:
+Start and verify the service:
 
 ```bash
-docker compose pull
-docker compose up -d
-docker compose exec shennong-db shennong-cli import /app/seed/toil-pbmc.json
-curl -fsS http://127.0.0.1:8000/healthz
+docker compose -f docker-compose.production.yml pull
+docker compose -f docker-compose.production.yml up -d
+docker compose -f docker-compose.production.yml ps
+curl -fsS http://127.0.0.1:18080/health
+curl -fsS http://127.0.0.1:18080/healthz
+curl -fsS http://127.0.0.1:18080/version
 ```
 
-HTTP safety defaults deny cross-origin requests, cap request bodies at 1 MiB,
-limit total/query concurrency, apply per-IP query and download rate limits, and
-time out non-health requests. Configure `SHENNONG_CORS_ORIGINS` with a
-comma-separated allowlist when a browser client is required. Set
-`SHENNONG_TRUST_PROXY_HEADERS=1` only behind a trusted reverse proxy; otherwise
-rate limiting uses the direct peer address. HSTS is opt-in through
-`SHENNONG_ENABLE_HSTS=1` after TLS is confirmed at the proxy.
+`/health` proves the HTTP process is alive. `/healthz` succeeds only when
+PostgreSQL and ClickHouse are ready. The first start can take longer because it
+initializes all persistent stores.
 
-Install or refresh the complete built-in Toil cohort directly from UCSC Xena:
+For repository development, `docker compose up -d` starts the same all-in-one
+service. The separate `shennong-db-web` service is under the
+`development-web` profile and is needed only when testing a standalone WebUI on
+port `3000`:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/resources/install \
+docker compose --profile development-web up -d
+```
+
+## 3. First-run administrator
+
+Open `http://HOST:18080`. When no users exist, the sign-in page offers the
+one-time administrator setup. Supply a display name, email address, and a
+password of 12 to 1024 characters. The setup endpoint is locked after the first
+user is created.
+
+The equivalent API flow is:
+
+```bash
+BASE_URL=http://127.0.0.1:18080
+curl -fsS "$BASE_URL/api/v1/setup/status" | jq
+
+curl -fsS -X POST "$BASE_URL/api/v1/setup/admin" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "display_name":"Shennong Administrator",
+    "email":"admin@example.org",
+    "password":"replace-with-a-long-password"
+  }' | jq
+```
+
+The `.env` administrator key and the WebUI administrator account are different
+credentials:
+
+- `X-Shennong-Admin-Key` is for bootstrap automation and emergency API
+  administration;
+- the account password creates a browser session;
+- personal access tokens are the preferred credential for scripts and MCP.
+
+Do not place any of these credentials in source control, shell history, prompts,
+or benchmark result files.
+
+## 4. WebUI map
+
+The WebUI uses the same origin as the API. The principal areas are:
+
+| Area | What users can do |
+|---|---|
+| Home and Catalog | Browse readable Resources, inspect metadata, Artifacts, relations, readiness, and examples |
+| Projects | Create research Projects, bind Resources, upload project files, inspect the Research Graph and Context Pack |
+| Console | View profile, usage, collections, favorites, uploads, active sessions, login history, and personal API tokens |
+| Administration | Manage users, grants, provider ingestion, tokens, audit events, storage, settings, metadata backups, and monitoring |
+| Authentication | Sign in/out, complete 2FA, recover an account, reset or change a password |
+| Docs and Support | Read in-product guidance and diagnostic entry points |
+
+Public Resources may be browsed anonymously. Collections, favorites, uploads,
+Projects, profile data, sessions, and tokens require sign-in. Administration
+pages require an administrator account.
+
+## 5. Authentication for scripts
+
+Sign in with email and password and retain the HTTP-only session cookie:
+
+```bash
+COOKIE_JAR=$(mktemp)
+curl -fsS -c "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/auth/sign-in" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.org","password":"replace-with-a-long-password"}' | jq
+```
+
+Browser sign-in normally creates an HTTP-only session. For CLI and agent use,
+open **Console → API access** and create a personal token, or call:
+
+```bash
+TOKEN=$(curl -fsS -b "$COOKIE_JAR" -X POST "$BASE_URL/api/v1/auth/tokens" \
+  -H 'Content-Type: application/json' \
+  -d '{"expires_in":86400,"scopes":["resource.read","query.execute"]}' \
+  | jq -r '.data.token')
+rm -f "$COOKIE_JAR"
+```
+
+Token lifetimes are 60 seconds to 365 days. A returned token is shown only when
+issued; save it in a secret manager. Use it as:
+
+```bash
+curl -fsS "$BASE_URL/api/v1/resources" \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
+Users can list and revoke their own tokens and sessions. Administrators can
+inspect and revoke tokens globally. Disabling a user invalidates access from
+already-issued tokens immediately.
+
+## 6. Discover and install Resources
+
+List the lightweight agent catalog, regular Resource catalog, capabilities, and
+available providers:
+
+```bash
+curl -fsS "$BASE_URL/.well-known/shennong-agent.json" | jq
+curl -fsS "$BASE_URL/api/v1/resources" | jq
+curl -fsS "$BASE_URL/api/v1/capabilities" | jq
+curl -fsS "$BASE_URL/api/v1/providers" | jq
+```
+
+After selecting a Resource, inspect the complete machine-readable description:
+
+```bash
+curl -fsS "$BASE_URL/api/v1/agent/resources/toil" | jq
+curl -fsS "$BASE_URL/api/v1/agent/resources/toil/metadata" | jq
+curl -fsS "$BASE_URL/api/v1/resources/toil/artifacts" | jq
+curl -fsS "$BASE_URL/api/v1/resources/toil/relations" | jq
+```
+
+Only operations under `analysis_capabilities.ready` are safe to plan. Items
+under `requires_additional_resources` describe missing annotations or data; the
+presence of a related Resource is not proof that an analysis is supported.
+
+An administrator can install a built-in provider from the WebUI or API:
+
+```bash
+curl -fsS -X POST "$BASE_URL/api/v1/resources/install" \
   -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"toil"}'
+  -d '{"name":"toil"}' | jq
 ```
 
-The request streams and resumes the 1.32 GB compressed TPM matrix, decompresses
-it, builds the gene-row index, and installs phenotype, category, TCGA survival,
-and GENCODE v23 mapping Artifacts. The completed Resource occupies about 9 GB
-plus the small annotation files.
+Provider installation is an ingestion operation: it downloads resumably,
+verifies declared SHA-256 checksums, materializes derived representations, and
+records provenance. Check **Administration → Ingestion** or
+`GET /api/v1/ingestion-jobs`. `SHENNONG_PROVIDER_ALLOW_UNVERIFIED=1` is only for
+isolated development fixtures and must not be used for publishable results.
 
-The one container starts PostgreSQL, internal-only ClickHouse, embedded TileDB,
-and the HTTP API. TileDB targets are created only by an explicit Provider
-materializer under `$SHENNONG_DATA_PATH/resources/<resource>/<version>/derived`;
-ClickHouse data is stored under `$SHENNONG_DATA_PATH/clickhouse`.
+## 7. Query expression data
 
-Provider installation requires a SHA-256 checksum for every source file.
-Downloaded compressed raw files are retained beside canonical files, and
-canonical plus gene-index checksums are recorded in Artifact provenance.
-`SHENNONG_PROVIDER_ALLOW_UNVERIFIED=1` is reserved for isolated development
-fixtures and marks those Artifacts as unverified.
+Inspect the Resource first because feature identifiers, context labels, and
+ready operations differ by Resource.
 
-Upgrade with:
+Single-gene expression query:
 
 ```bash
-cd /srv/shennong-db
-docker compose pull
-docker compose up -d --force-recreate
-docker compose exec shennong-db shennong-cli import /app/seed/toil-pbmc.json
-```
-
-Back up both metadata and analytical data:
-
-```bash
-docker compose exec -T shennong-db pg_dump -U shennong shennong > shennong-metadata.sql
-rsync -a /srv/shennong-db/data/ /backup/shennong-db-data/
-```
-
-## 2. Agent discovery
-
-Discovery is deliberately two-level.
-
-First, read the small catalog:
-
-```bash
-curl -sS http://127.0.0.1:8000/.well-known/shennong-agent.json | jq
-```
-
-Each entry contains only selection metadata and a `details_url`. After choosing
-a candidate Resource, retrieve its complete metadata, dimensions, fields,
-analysis readiness, missing annotation requirements, Artifacts, Relations, and
-query example:
-
-```bash
-curl -sS http://127.0.0.1:8000/api/v1/agent/resources/toil | jq
-curl -sS http://127.0.0.1:8000/api/v1/agent/resources/pbmc-3k | jq
-```
-
-An agent must plan only operations listed under
-`metadata.analysis_capabilities.ready`. Items under
-`requires_additional_resources` identify the exact missing Resources needed for
-the requested analysis.
-
-For a melanoma CAR-T target task, the current catalog correctly reports only
-Toil and PBMC expression Resources. A complete plan additionally requires a
-melanoma single-cell Resource, TCGA sample and clinical annotations, GTEx tissue
-annotations, and an OpenTargets Resource. ShennongDB does not advertise data
-that has not been installed.
-
-## 3. Expression queries
-
-Toil accepts the versioned Ensembl identifier present in the matrix:
-
-```bash
-curl -sS http://127.0.0.1:8000/api/v1/query \
+curl -fsS -X POST "$BASE_URL/api/v1/query" \
   -H 'Content-Type: application/json' \
   -d '{
     "resource":"toil",
@@ -142,119 +229,244 @@ curl -sS http://127.0.0.1:8000/api/v1/query \
   }' | jq
 ```
 
-Toil reads only the requested indexed gene row, then joins the bounded result
-to phenotype or survival metadata when the query supplies context.
-
-PBMC accepts a gene symbol or Ensembl identifier and reads the sparse TileDB
-array:
+Exact phenotype filters and survival fields:
 
 ```bash
-curl -sS http://127.0.0.1:8000/api/v1/query \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "resource":"pbmc-3k",
-    "operation":"expression",
-    "feature":{"type":"gene","name":"YTHDF2"},
-    "options":{"limit":100}
-  }' | jq
-```
-
-Filter Toil by installed phenotype labels:
-
-```bash
-curl -sS http://127.0.0.1:8000/api/v1/query \
+curl -fsS -X POST "$BASE_URL/api/v1/query" \
   -H 'Content-Type: application/json' \
   -d '{
     "resource":"toil",
-    "operation":"expression",
+    "operation":"survival_expression",
     "feature":{"type":"gene","name":"ENSG00000198492.14"},
-    "context":{"disease":"Skin Cutaneous Melanoma","sample_type":"Primary Tumor"},
+    "context":{
+      "disease":"Skin Cutaneous Melanoma",
+      "sample_type":"Primary Tumor"
+    },
     "options":{"limit":1000}
   }' | jq
 ```
 
-Use `"operation":"survival_expression"` to attach OS, DSS, DFI, and PFI
-endpoints to the filtered expression rows.
-
-Context filters are rejected until the selected Resource declares the required
-annotations. This prevents an agent from mistaking unfiltered results for a
-cancer cohort, tumor/normal comparison, survival analysis, or cell-type result.
-
-## 4. Resources, Artifacts, and Relations
+Batch up to 100 features:
 
 ```bash
-curl -sS http://127.0.0.1:8000/api/v1/resources | jq
-curl -sS http://127.0.0.1:8000/api/v1/resources/toil/artifacts | jq
-curl -sS http://127.0.0.1:8000/api/v1/resources/pbmc-3k/relations | jq
-curl -o matrix.h5 http://127.0.0.1:8000/api/v1/resources/pbmc-3k/artifacts/pbmc-3k-matrix/download
-curl -r 0-1048575 -o matrix.part http://127.0.0.1:8000/api/v1/resources/pbmc-3k/artifacts/pbmc-3k-matrix/download
-```
-
-Artifact downloads are streamed, support one `Range: bytes=...` request, and
-return `416` for invalid ranges. Set `SHENNONG_DOWNLOAD_CONCURRENCY` and
-`SHENNONG_DOWNLOAD_TIMEOUT_SECS` to bound simultaneous downloads and a stalled
-file read.
-
-TileDB subprocesses use `SHENNONG_TILEDB_MAX_CONCURRENCY`,
-`SHENNONG_TILEDB_TIMEOUT_SECS`, `SHENNONG_TILEDB_MAX_STDOUT_BYTES`, and
-`SHENNONG_TILEDB_MAX_STDERR_BYTES`. ClickHouse uses one shared client with the
-`SHENNONG_CLICKHOUSE_*` timeout and idle-connection settings.
-
-Queries accept at most 10,000 rows, a 256-byte gene feature name, 20 context
-fields with 256-byte string values, and a 10 MiB serialized response.
-
-Write operations require the bootstrap administrator key:
-
-```bash
-curl -X PUT http://127.0.0.1:8000/api/v1/resources/example \
-  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
+curl -fsS -X POST "$BASE_URL/api/v1/query/batch" \
   -H 'Content-Type: application/json' \
-  -d '{"id":"example","kind":"Dataset","metadata":{},"spec":{},"status":"available","provenance":{},"permissions":{"visibility":"private","read_scopes":["resource.read"]}}'
+  -d '{
+    "resource":"toil",
+    "operation":"expression",
+    "features":[
+      {"type":"gene","name":"ENSG00000198492.14"},
+      {"type":"gene","name":"ENSG00000141510.18"}
+    ],
+    "options":{"limit":50}
+  }' | jq
 ```
 
-## 5. Users and private Resources
+For newline-delimited output, send the same batch shape to
+`/api/v1/query/stream` with `"options":{"limit":50,"format":"jsonl"}`.
+Arrow IPC streaming is not enabled.
 
-Create a user and issue a JWT:
+Important limits:
+
+- each normal API query returns at most 10,000 rows;
+- MCP queries return at most 1,000 rows;
+- a batch contains 1 to 100 features;
+- serialized query responses are capped at 10 MiB;
+- pagination uses `options.cursor` when `meta.next_cursor` is returned;
+- unsupported operations, labels, or identifiers return `422` rather than
+  silently broadening the query.
+
+## 8. Resolve gene identifiers
+
+Use the resolver before combining Resources with different annotation releases:
 
 ```bash
-curl -X PUT http://127.0.0.1:8000/api/v1/users/analyst \
-  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"id":"analyst","display_name":"Analyst","email":"analyst@example.org","role":"user","status":"active"}'
-
-curl -X POST http://127.0.0.1:8000/api/v1/users/analyst/tokens \
-  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"expires_in":86400}'
-
-curl -X PUT http://127.0.0.1:8000/api/v1/resources/private-dataset/grants/analyst \
-  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY"
+curl -fsS "$BASE_URL/api/v1/genes/resolve?q=YTHDF2&resources=toil,pbmc-3k" | jq
 ```
 
-Use the returned token as `Authorization: Bearer TOKEN`. Private Resources
-require an active user, an explicit grant, and every scope in
-`permissions.read_scopes`; an admin user can use the `*` scope. Resource
-permissions are fail-closed: omitted `visibility` defaults to `private`, and
-unknown values or invalid scopes are rejected with `422`. Setting the user's
-status to `disabled` revokes access immediately, including already-issued JWTs.
+Use the unversioned stable Ensembl gene ID as the cross-Resource join key, while
+retaining each original versioned ID and annotation release in the result. Gene
+symbols are search and display values, not reliable primary join keys. See
+[gene-identifiers.md](gene-identifiers.md).
 
-## 6. Gene identifiers across annotation releases
-
-Use `/api/v1/genes/resolve` before cross-dataset analysis. ShennongDB joins
-GENCODE v23 Toil and GENCODE v37 PBMC features by the unversioned stable Ensembl
-gene ID while retaining each original versioned ID and annotation release.
-Symbols are search/display values, not join keys. See
-[gene-identifiers.md](gene-identifiers.md) for the complete policy.
-
-## 7. Operations
+## 9. Artifacts and downloads
 
 ```bash
-docker compose ps
-docker compose logs --tail=200 shennong-db
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/healthz
-curl -fsS http://127.0.0.1:8000/version
+curl -fsS "$BASE_URL/api/v1/resources/pbmc-3k/artifacts" | jq
+curl -fL -o matrix.h5 \
+  "$BASE_URL/api/v1/resources/pbmc-3k/artifacts/pbmc-3k-matrix/download"
+curl -fL -r 0-1048575 -o matrix.part \
+  "$BASE_URL/api/v1/resources/pbmc-3k/artifacts/pbmc-3k-matrix/download"
 ```
 
-`/healthz` succeeds only when PostgreSQL and ClickHouse are ready. TileDB is
-reported as embedded because it has no separate daemon.
+Downloads are streamed and support one `Range: bytes=...` interval. Invalid
+ranges return `416`. Private Resource downloads require the same Bearer token
+and grant as metadata reads.
+
+## 10. Upload and register data
+
+Signed-in users can upload in **Console → Uploads** or a Project upload page.
+The API accepts a raw request body and requires `X-Filename`:
+
+```bash
+UPLOAD_ID=$(curl -fsS -X POST "$BASE_URL/api/v1/uploads" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'X-Filename: counts.tsv.gz' \
+  -H 'Content-Type: application/gzip' \
+  --data-binary @counts.tsv.gz | jq -r '.data.id')
+```
+
+Register one to 100 completed uploads as a governed Resource:
+
+```bash
+curl -fsS -X POST "$BASE_URL/api/v1/uploads/register" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"upload_ids\":[\"$UPLOAD_ID\"],
+    \"resource_id\":\"my-counts-v1\",
+    \"name\":\"My counts\",
+    \"description\":\"Uploaded count matrix\",
+    \"organism\":\"Homo sapiens\",
+    \"modality\":\"transcriptomics\",
+    \"assay\":\"bulk RNA-seq\",
+    \"reference\":\"GRCh38\",
+    \"annotation\":\"GENCODE v47\",
+    \"format\":\"tsv.gz\",
+    \"data_class\":\"raw\",
+    \"visibility\":\"private\"
+  }" | jq
+```
+
+The default upload limit is 50 GiB per request and can be changed with
+`SHENNONG_MAX_UPLOAD_BYTES`. Registration records the file checksum and
+provenance, but does not invent analysis operations that the uploaded format
+cannot support.
+
+## 11. Collections, favorites, and Projects
+
+Collections and favorites are personal organization features. Create a
+collection, then add a readable Resource:
+
+```bash
+COLLECTION_ID=$(curl -fsS -X POST "$BASE_URL/api/v1/collections" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Melanoma resources","description":"Working set","visibility":"private"}' \
+  | jq -r '.data.id')
+
+curl -fsS -X PUT \
+  "$BASE_URL/api/v1/collections/$COLLECTION_ID/resources/toil" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -fsS -X PUT "$BASE_URL/api/v1/favorites/toil" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Projects connect studies, entities, activities, evidence, hypotheses, and
+Resources. A minimal Project request is:
+
+```bash
+curl -fsS -X POST "$BASE_URL/api/v1/projects" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "id":"melanoma-targets",
+    "name":"Melanoma target discovery",
+    "description":"Evidence and analysis workspace",
+    "visibility":"private",
+    "status":"active",
+    "metadata":{}
+  }' | jq
+```
+
+Bind a Resource and fetch the bounded Project Context Pack:
+
+```bash
+curl -fsS -X PUT \
+  "$BASE_URL/api/v1/projects/melanoma-targets/resources/toil" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"project_id":"melanoma-targets","resource_id":"toil","role":"analysis-input"}'
+curl -fsS "$BASE_URL/api/v1/projects/melanoma-targets/context-pack" \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
+Graph search accepts `q`, an optional `project_id`, and a limit up to 200 for
+the HTTP graph endpoints. Subgraphs allow depth 1 to 3. See
+[research-biograph.md](research-biograph.md) for entity, activity, association,
+evidence, and provenance semantics.
+
+## 12. Administration
+
+Administrators can use the WebUI for routine work. The corresponding API areas
+are:
+
+| Task | Endpoints |
+|---|---|
+| Users and access | `/api/v1/users`, `/api/v1/grants`, `/api/v1/admin/tokens` |
+| Providers and ingestion | `/api/v1/providers`, `/api/v1/resources/install`, `/api/v1/ingestion-jobs` |
+| Audit and monitoring | `/api/v1/audit-events`, `/api/v1/usage`, `/api/v1/admin/overview`, `/metrics` |
+| Storage and cache | `/api/v1/storage`, `/api/v1/cache/stats`, `DELETE /api/v1/cache` |
+| Settings | `/api/v1/settings/{general,security,retention,storage,telemetry}` |
+| Metadata backup | `/api/v1/backups`, `/api/v1/backups/{id}/restore` |
+
+The WebUI backup feature captures application metadata as JSON in object
+storage. It is useful for logical recovery but is not a complete `/data`
+backup. Full deployment backup and restore are documented in
+[backup-recovery.md](backup-recovery.md).
+
+Prometheus-compatible metrics are exposed at `/metrics`. Monitor readiness,
+request and error rates, query latency percentiles, saturation, cache hit rate,
+ingestion failures, disk use, backup age, and upload/download failures. The
+measured baseline and publication plan are in
+[benchmark-results.md](benchmark-results.md).
+
+## 13. Upgrade and rollback
+
+Before an upgrade, create a consistent full backup. Then change
+`SHENNONG_IMAGE` to an immutable semantic-version tag or digest:
+
+```bash
+cd /srv/shennong-db
+docker compose -f docker-compose.production.yml pull
+docker compose -f docker-compose.production.yml up -d --force-recreate
+curl -fsS http://127.0.0.1:18080/healthz
+curl -fsS http://127.0.0.1:18080/version
+```
+
+Keep the previous image digest and pre-upgrade data backup until validation is
+complete. Never use `latest` as the only production rollback reference.
+
+## 14. Troubleshooting
+
+```bash
+docker compose -f docker-compose.production.yml ps
+docker compose -f docker-compose.production.yml logs --tail=300 shennong-db
+docker compose -f docker-compose.production.yml config
+curl -i http://127.0.0.1:18080/healthz
+```
+
+| Symptom | Check |
+|---|---|
+| Connection refused | Published bind address/port, firewall, container status |
+| `/health` works but `/healthz` fails | Startup logs for PostgreSQL or ClickHouse; disk ownership and free space |
+| Browser receives `401` on session check | Normal for anonymous pages; sign in for private console functions |
+| API returns `401` | Missing, expired, revoked, or malformed credential |
+| API returns `403` | Credential is valid but lacks role, scope, or Resource grant |
+| API returns `404` for a private object | It may be absent or intentionally undisclosed; do not infer existence |
+| API returns `422` | Request violates the current Resource/schema contract; inspect first |
+| API returns `429` | Lower concurrency/request rate and wait before bounded retries |
+| Provider install fails | Check checksum, outbound network/proxy, free disk, and ingestion job details |
+| MCP starts but tools fail | Verify `SHENNONG_URL`, token scope, `/healthz`, and the MCP timeout |
+
+## 15. Agent and developer entry points
+
+- [Agent integrations](agent-integrations.md): install, configure, verify, and
+  use the MCP server and Codex Skill.
+- [OpenAPI contract](../openapi/shennongdb.json): request and response schema.
+- [Provider authoring](../providers/README.md): add reproducible data sources.
+- [Production topology](production-compose.md): persistence and network model.
+- [Backup and recovery](backup-recovery.md): complete backup and restore drill.
+- [WebUI developer guide](../web/README.md): local frontend development and
+  test commands.

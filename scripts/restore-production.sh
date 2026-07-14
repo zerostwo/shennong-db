@@ -2,14 +2,40 @@
 set -eu
 
 compose=${COMPOSE_FILE:-docker-compose.production.yml}
+service=${SHENNONG_SERVICE:-shennong-db}
 backup=${1:?usage: restore-production.sh BACKUP_DIR}
-[ -f "$backup/shennong.dump" ]
-(cd "$backup" && sha256sum -c MANIFEST.sha256)
-docker compose -f "$compose" exec -T postgres dropdb -U shennong --if-exists shennong
-docker compose -f "$compose" exec -T postgres createdb -U shennong shennong
-docker compose -f "$compose" exec -T postgres pg_restore -U shennong -d shennong --exit-on-error < "$backup/shennong.dump"
-if [ -n "${S3_URI:-}" ]; then
-  aws s3 sync "$backup/raw" "${S3_URI%/}/raw" --only-show-errors
-  aws s3 sync "$backup/canonical" "${S3_URI%/}/canonical" --only-show-errors
+
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
 fi
-echo "Restore complete; run verify-production.sh against the API."
+data=${SHENNONG_DATA_PATH:-./data}
+
+[ -f "$backup/data.tar" ] || {
+  echo "missing backup archive: $backup/data.tar" >&2
+  exit 1
+}
+[ -f "$backup/MANIFEST.sha256" ] || {
+  echo "missing checksum manifest" >&2
+  exit 1
+}
+(cd "$backup" && sha256sum -c MANIFEST.sha256)
+
+if [ -e "$data" ] && [ "${ALLOW_REPLACE:-0}" != 1 ]; then
+  echo "refusing to replace existing data directory: $data" >&2
+  echo "set ALLOW_REPLACE=1 after verifying the backup and target" >&2
+  exit 1
+fi
+
+docker compose -f "$compose" stop "$service" >/dev/null 2>&1 || true
+if [ -e "$data" ]; then
+  previous="${data}.before-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "$data" "$previous"
+  echo "previous data preserved at: $previous" >&2
+fi
+mkdir -p "$data"
+tar --acls --xattrs --numeric-owner -C "$data" -xpf "$backup/data.tar"
+docker compose -f "$compose" up -d "$service"
+echo "restore complete; verify health, authentication, catalog, objects, and queries"

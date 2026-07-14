@@ -1,0 +1,771 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-14T14:06:19.218Z",
+  "baseUrl": "http://127.0.0.1:18080",
+  "host": {
+    "hostname": "miga",
+    "platform": "linux",
+    "release": "7.0.0-27-generic",
+    "node": "v24.16.0"
+  },
+  "methodology": {
+    "browser": "Playwright Chromium",
+    "cache": "disabled; new browser context for each run",
+    "waitUntil": "networkidle plus 250 ms",
+    "note": "Lab measurements; INP requires field interaction data and is not estimated here."
+  },
+  "results": [
+    {
+      "route": "/",
+      "runs": 5,
+      "successRate": 1,
+      "metrics": {
+        "ttfb_ms": {
+          "median": 9.6,
+          "p95": 10.98,
+          "min": 9.2,
+          "max": 11.1
+        },
+        "fcp_ms": {
+          "median": 912,
+          "p95": 1077.6,
+          "min": 780,
+          "max": 1080
+        },
+        "lcp_ms": {
+          "median": 992,
+          "p95": 1136.8,
+          "min": 852,
+          "max": 1140
+        },
+        "cls": {
+          "median": 0.01,
+          "p95": 0.01,
+          "min": 0.01,
+          "max": 0.01
+        },
+        "dom_content_loaded_ms": {
+          "median": 904.7,
+          "p95": 1074.46,
+          "min": 777.7,
+          "max": 1076.3
+        },
+        "load_ms": {
+          "median": 2489.2,
+          "p95": 2977.58,
+          "min": 2095.2,
+          "max": 3051.9
+        },
+        "transfer_bytes": {
+          "median": 217237,
+          "p95": 217237,
+          "min": 217237,
+          "max": 217237
+        },
+        "resource_count": {
+          "median": 34,
+          "p95": 34,
+          "min": 34,
+          "max": 34
+        }
+      },
+      "requestFailures": [],
+      "httpErrors": [
+        "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+      ],
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+      ],
+      "samples": [
+        {
+          "run": 1,
+          "status": 200,
+          "ttfb": 11.099999994039536,
+          "domContentLoaded": 904.6999999880791,
+          "load": 2356.5,
+          "fcp": 912,
+          "lcp": 992,
+          "cls": 0.014247215112050375,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+          ]
+        },
+        {
+          "run": 2,
+          "status": 200,
+          "ttfb": 9.5,
+          "domContentLoaded": 902.1000000238419,
+          "load": 2680.300000011921,
+          "fcp": 904,
+          "lcp": 964,
+          "cls": 0.014247215112050375,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+          ]
+        },
+        {
+          "run": 3,
+          "status": 200,
+          "ttfb": 9.599999994039536,
+          "domContentLoaded": 1076.2999999821186,
+          "load": 2489.199999988079,
+          "fcp": 1080,
+          "lcp": 1140,
+          "cls": 0.014247215112050375,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+          ]
+        },
+        {
+          "run": 4,
+          "status": 200,
+          "ttfb": 9.200000017881393,
+          "domContentLoaded": 1067.1000000238419,
+          "load": 3051.9000000059605,
+          "fcp": 1068,
+          "lcp": 1124,
+          "cls": 0.014247215112050375,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+          ]
+        },
+        {
+          "run": 5,
+          "status": 200,
+          "ttfb": 10.5,
+          "domContentLoaded": 777.6999999880791,
+          "load": 2095.199999988079,
+          "fcp": 780,
+          "lcp": 852,
+          "cls": 0.014247215112050375,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+          ]
+        }
+      ]
+    },
+    {
+      "route": "/catalog",
+      "runs": 5,
+      "successRate": 1,
+      "metrics": {
+        "ttfb_ms": {
+          "median": 3.1,
+          "p95": 3.28,
+          "min": 2.5,
+          "max": 3.3
+        },
+        "fcp_ms": {
+          "median": 872,
+          "p95": 891.2,
+          "min": 848,
+          "max": 896
+        },
+        "lcp_ms": {
+          "median": 928,
+          "p95": 943.2,
+          "min": 912,
+          "max": 944
+        },
+        "cls": {
+          "median": 0.01,
+          "p95": 0.01,
+          "min": 0.01,
+          "max": 0.01
+        },
+        "dom_content_loaded_ms": {
+          "median": 868.1,
+          "p95": 887.88,
+          "min": 846.5,
+          "max": 892
+        },
+        "load_ms": {
+          "median": 2298.9,
+          "p95": 3320.26,
+          "min": 1737.8,
+          "max": 3526.5
+        },
+        "transfer_bytes": {
+          "median": 217237,
+          "p95": 217237,
+          "min": 217237,
+          "max": 217237
+        },
+        "resource_count": {
+          "median": 34,
+          "p95": 34,
+          "min": 34,
+          "max": 34
+        }
+      },
+      "requestFailures": [
+        "GET https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2: net::ERR_NETWORK_CHANGED",
+        "GET https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbv2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKwBNntkaToggR7BYRbKPxDcwg.woff2: net::ERR_NETWORK_CHANGED"
+      ],
+      "httpErrors": [
+        "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+      ],
+      "consoleErrors": [
+        "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+        "Failed to load resource: net::ERR_NETWORK_CHANGED"
+      ],
+      "samples": [
+        {
+          "run": 1,
+          "status": 200,
+          "ttfb": 3.199999988079071,
+          "domContentLoaded": 866.6999999880791,
+          "load": 1737.800000011921,
+          "fcp": 868,
+          "lcp": 928,
+          "cls": 0.012087707519531251,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [
+            "GET https://fonts.gstatic.com/s/inter/v20/UcC73FwrK3iLTeHuS_nVMrMxCp50SjIa1ZL7.woff2: net::ERR_NETWORK_CHANGED",
+            "GET https://fonts.gstatic.com/s/jetbrainsmono/v24/tDbv2o-flEEny0FZhsfKu5WU4zr3E_BX0PnT8RD8yKwBNntkaToggR7BYRbKPxDcwg.woff2: net::ERR_NETWORK_CHANGED"
+          ],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: net::ERR_NETWORK_CHANGED",
+            "Failed to load resource: net::ERR_NETWORK_CHANGED"
+          ]
+        },
+        {
+          "run": 2,
+          "status": 200,
+          "ttfb": 2.5,
+          "domContentLoaded": 892,
+          "load": 2214.199999988079,
+          "fcp": 896,
+          "lcp": 940,
+          "cls": 0.014247215112050375,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+          ]
+        },
+        {
+          "run": 3,
+          "status": 200,
+          "ttfb": 3.0999999940395355,
+          "domContentLoaded": 846.5,
+          "load": 3526.5,
+          "fcp": 848,
+          "lcp": 912,
+          "cls": 0.014247215112050375,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+          ]
+        },
+        {
+          "run": 4,
+          "status": 200,
+          "ttfb": 3.0999999940395355,
+          "domContentLoaded": 868.0999999940395,
+          "load": 2298.9000000059605,
+          "fcp": 872,
+          "lcp": 916,
+          "cls": 0.014247215112050375,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+          ]
+        },
+        {
+          "run": 5,
+          "status": 200,
+          "ttfb": 3.300000011920929,
+          "domContentLoaded": 871.4000000059605,
+          "load": 2495.300000011921,
+          "fcp": 872,
+          "lcp": 944,
+          "cls": 0.014247215112050375,
+          "transferBytes": 217237,
+          "resourceCount": 34,
+          "requestFailures": [],
+          "httpErrors": [
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session",
+            "401 GET http://127.0.0.1:18080/api/v1/auth/session"
+          ],
+          "consoleErrors": [
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+            "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+          ]
+        }
+      ]
+    },
+    {
+      "route": "/docs",
+      "runs": 5,
+      "successRate": 1,
+      "metrics": {
+        "ttfb_ms": {
+          "median": 2.9,
+          "p95": 3.26,
+          "min": 2.7,
+          "max": 3.3
+        },
+        "fcp_ms": {
+          "median": 856,
+          "p95": 948,
+          "min": 780,
+          "max": 964
+        },
+        "lcp_ms": {
+          "median": 884,
+          "p95": 976,
+          "min": 820,
+          "max": 992
+        },
+        "cls": {
+          "median": 0,
+          "p95": 0,
+          "min": 0,
+          "max": 0
+        },
+        "dom_content_loaded_ms": {
+          "median": 847.5,
+          "p95": 944.46,
+          "min": 775.8,
+          "max": 960.4
+        },
+        "load_ms": {
+          "median": 2161.4,
+          "p95": 2640.5,
+          "min": 1986.1,
+          "max": 2684.4
+        },
+        "transfer_bytes": {
+          "median": 188878,
+          "p95": 188878,
+          "min": 188878,
+          "max": 188878
+        },
+        "resource_count": {
+          "median": 18,
+          "p95": 18,
+          "min": 18,
+          "max": 18
+        }
+      },
+      "requestFailures": [],
+      "httpErrors": [],
+      "consoleErrors": [],
+      "samples": [
+        {
+          "run": 1,
+          "status": 200,
+          "ttfb": 2.7999999821186066,
+          "domContentLoaded": 847.5,
+          "load": 2011.0999999940395,
+          "fcp": 856,
+          "lcp": 880,
+          "cls": 0.0006501197814941407,
+          "transferBytes": 188878,
+          "resourceCount": 18,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 2,
+          "status": 200,
+          "ttfb": 2.9000000059604645,
+          "domContentLoaded": 775.8000000119209,
+          "load": 2684.4000000059605,
+          "fcp": 780,
+          "lcp": 820,
+          "cls": 0.0006501197814941407,
+          "transferBytes": 188878,
+          "resourceCount": 18,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 3,
+          "status": 200,
+          "ttfb": 3.100000023841858,
+          "domContentLoaded": 880.7000000178814,
+          "load": 2161.4000000059605,
+          "fcp": 884,
+          "lcp": 912,
+          "cls": 0.0006501197814941407,
+          "transferBytes": 188878,
+          "resourceCount": 18,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 4,
+          "status": 200,
+          "ttfb": 3.300000011920929,
+          "domContentLoaded": 844.5999999940395,
+          "load": 1986.0999999940395,
+          "fcp": 848,
+          "lcp": 884,
+          "cls": 0.0006501197814941407,
+          "transferBytes": 188878,
+          "resourceCount": 18,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 5,
+          "status": 200,
+          "ttfb": 2.7000000178813934,
+          "domContentLoaded": 960.4000000059605,
+          "load": 2464.9000000059605,
+          "fcp": 964,
+          "lcp": 992,
+          "cls": 0.0006501197814941407,
+          "transferBytes": 188878,
+          "resourceCount": 18,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        }
+      ]
+    },
+    {
+      "route": "/support",
+      "runs": 5,
+      "successRate": 1,
+      "metrics": {
+        "ttfb_ms": {
+          "median": 3.1,
+          "p95": 3.46,
+          "min": 2.5,
+          "max": 3.5
+        },
+        "fcp_ms": {
+          "median": 1468,
+          "p95": 1620.8,
+          "min": 848,
+          "max": 1636
+        },
+        "lcp_ms": {
+          "median": 1496,
+          "p95": 1644,
+          "min": 868,
+          "max": 1660
+        },
+        "cls": {
+          "median": 0,
+          "p95": 0,
+          "min": 0,
+          "max": 0
+        },
+        "dom_content_loaded_ms": {
+          "median": 1466.7,
+          "p95": 1618.56,
+          "min": 845.5,
+          "max": 1633.2
+        },
+        "load_ms": {
+          "median": 2960.2,
+          "p95": 3532.36,
+          "min": 2145.1,
+          "max": 3640.4
+        },
+        "transfer_bytes": {
+          "median": 187736,
+          "p95": 187736,
+          "min": 187736,
+          "max": 187736
+        },
+        "resource_count": {
+          "median": 17,
+          "p95": 17,
+          "min": 17,
+          "max": 17
+        }
+      },
+      "requestFailures": [],
+      "httpErrors": [],
+      "consoleErrors": [],
+      "samples": [
+        {
+          "run": 1,
+          "status": 200,
+          "ttfb": 3.0999999940395355,
+          "domContentLoaded": 1466.699999988079,
+          "load": 2960.199999988079,
+          "fcp": 1468,
+          "lcp": 1496,
+          "cls": 0.00035775502522786463,
+          "transferBytes": 187736,
+          "resourceCount": 17,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 2,
+          "status": 200,
+          "ttfb": 3.5,
+          "domContentLoaded": 1560,
+          "load": 3640.4000000059605,
+          "fcp": 1560,
+          "lcp": 1580,
+          "cls": 0.00035775502522786463,
+          "transferBytes": 187736,
+          "resourceCount": 17,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 3,
+          "status": 200,
+          "ttfb": 3.2999999821186066,
+          "domContentLoaded": 1633.199999988079,
+          "load": 3100.199999988079,
+          "fcp": 1636,
+          "lcp": 1660,
+          "cls": 0.00035775502522786463,
+          "transferBytes": 187736,
+          "resourceCount": 17,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 4,
+          "status": 200,
+          "ttfb": 2.699999988079071,
+          "domContentLoaded": 845.5,
+          "load": 2191.9000000059605,
+          "fcp": 848,
+          "lcp": 868,
+          "cls": 0.00035775502522786463,
+          "transferBytes": 187736,
+          "resourceCount": 17,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 5,
+          "status": 200,
+          "ttfb": 2.5,
+          "domContentLoaded": 897.9000000059605,
+          "load": 2145.0999999940395,
+          "fcp": 900,
+          "lcp": 920,
+          "cls": 0.00035775502522786463,
+          "transferBytes": 187736,
+          "resourceCount": 17,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        }
+      ]
+    },
+    {
+      "route": "/auth/sign-in",
+      "runs": 5,
+      "successRate": 1,
+      "metrics": {
+        "ttfb_ms": {
+          "median": 3.1,
+          "p95": 3.48,
+          "min": 2.9,
+          "max": 3.5
+        },
+        "fcp_ms": {
+          "median": 888,
+          "p95": 1179.2,
+          "min": 796,
+          "max": 1252
+        },
+        "lcp_ms": {
+          "median": 920,
+          "p95": 1208,
+          "min": 816,
+          "max": 1280
+        },
+        "cls": {
+          "median": 0,
+          "p95": 0,
+          "min": 0,
+          "max": 0
+        },
+        "dom_content_loaded_ms": {
+          "median": 884.7,
+          "p95": 1176.74,
+          "min": 793.1,
+          "max": 1249.7
+        },
+        "load_ms": {
+          "median": 2069.7,
+          "p95": 2370.72,
+          "min": 2012.4,
+          "max": 2405.1
+        },
+        "transfer_bytes": {
+          "median": 196234,
+          "p95": 196234,
+          "min": 196234,
+          "max": 196234
+        },
+        "resource_count": {
+          "median": 20,
+          "p95": 20,
+          "min": 20,
+          "max": 20
+        }
+      },
+      "requestFailures": [],
+      "httpErrors": [],
+      "consoleErrors": [],
+      "samples": [
+        {
+          "run": 1,
+          "status": 200,
+          "ttfb": 3,
+          "domContentLoaded": 1249.699999988079,
+          "load": 2405.0999999940395,
+          "fcp": 1252,
+          "lcp": 1280,
+          "cls": 0,
+          "transferBytes": 196234,
+          "resourceCount": 20,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 2,
+          "status": 200,
+          "ttfb": 3.399999976158142,
+          "domContentLoaded": 868.3999999761581,
+          "load": 2012.3999999761581,
+          "fcp": 872,
+          "lcp": 900,
+          "cls": 0,
+          "transferBytes": 196234,
+          "resourceCount": 20,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 3,
+          "status": 200,
+          "ttfb": 3.0999999940395355,
+          "domContentLoaded": 793.0999999940395,
+          "load": 2233.199999988079,
+          "fcp": 796,
+          "lcp": 816,
+          "cls": 0,
+          "transferBytes": 196234,
+          "resourceCount": 20,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 4,
+          "status": 200,
+          "ttfb": 2.9000000059604645,
+          "domContentLoaded": 884.6999999880791,
+          "load": 2058.9000000059605,
+          "fcp": 888,
+          "lcp": 920,
+          "cls": 0,
+          "transferBytes": 196234,
+          "resourceCount": 20,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        },
+        {
+          "run": 5,
+          "status": 200,
+          "ttfb": 3.5,
+          "domContentLoaded": 884.9000000059605,
+          "load": 2069.7000000178814,
+          "fcp": 888,
+          "lcp": 920,
+          "cls": 0,
+          "transferBytes": 196234,
+          "resourceCount": 20,
+          "requestFailures": [],
+          "httpErrors": [],
+          "consoleErrors": []
+        }
+      ]
+    }
+  ]
+}

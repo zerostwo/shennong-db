@@ -1,0 +1,10 @@
+interface:
+  display_name: "ShennongDB"
+  short_description: "Query governed biomedical data with ShennongDB"
+  default_prompt: "Use $shennong-db to discover suitable biomedical Resources and run a provenance-aware bounded query."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "shennong-db"
+      description: "Read-only ShennongDB Resource, query, and Research Graph tools"
+      transport: "stdio"

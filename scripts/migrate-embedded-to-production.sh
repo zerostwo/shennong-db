@@ -3,26 +3,27 @@ set -eu
 
 old_compose=${OLD_COMPOSE_FILE:-docker-compose.yml}
 old_service=${OLD_SERVICE:-shennong-db}
-backup_dir=${BACKUP_DIR:-./migration-backup-$(date +%Y%m%d-%H%M%S)}
+backup_dir=${BACKUP_DIR:-./migration-backup-$(date -u +%Y%m%dT%H%M%SZ)}
 
-mkdir -p "$backup_dir/data"
-echo "Exporting PostgreSQL metadata from $old_service..." >&2
-docker compose -f "$old_compose" exec -T "$old_service" \
-  pg_dump -U "${POSTGRES_USER:-shennong}" "${POSTGRES_DB:-shennong}" \
-  > "$backup_dir/shennong.sql"
-echo "Copying the legacy /data volume without deleting it..." >&2
-docker compose -f "$old_compose" cp "$old_service:/data/." "$backup_dir/data/"
+echo "Current development and production Compose files use the same all-in-one /data layout." >&2
+echo "Creating a consistent full backup before switching Compose files..." >&2
+COMPOSE_FILE=$old_compose \
+SHENNONG_SERVICE=$old_service \
+BACKUP_DIR=$backup_dir \
+  ./scripts/backup-production.sh
+
 cat <<EOF
 Backup written to: $backup_dir
 
 Next steps (after reviewing the backup):
-  1. Create the production secret files, especially database_url.
-  2. Start docker-compose.production.yml.
-  3. Restore metadata:
-     docker compose -f docker-compose.production.yml exec -T postgres \
-       psql -U shennong -d shennong < $backup_dir/shennong.sql
-  4. Upload retained raw/canonical objects from $backup_dir/data to the
-     configured S3 bucket, preserving their storage_uri and checksums.
+  1. Copy .env.example to .env and set independent production secrets.
+  2. Point SHENNONG_DATA_PATH at the existing data directory, or restore this
+     backup into the production data path with scripts/restore-production.sh.
+  3. Start the current one-container deployment:
+     docker compose -f docker-compose.production.yml up -d
+  4. Run scripts/verify-production.sh and verify login, catalog, objects, and
+     representative biological queries.
 
-The legacy deployment is left running and no source data is removed.
+The source data is not converted or removed. The backup includes PostgreSQL,
+ClickHouse, TileDB, object storage, and WebUI metadata under /data.
 EOF

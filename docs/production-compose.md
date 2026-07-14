@@ -1,46 +1,97 @@
 # Production topology
 
-Development keeps the single-image Compose workflow. Production uses
-`docker-compose.production.yml`, where the API, PostgreSQL, ClickHouse,
-SeaweedFS object store, TileDB worker, and reverse proxy are separate services.
-Only the reverse proxy publishes ports; the `private` network is internal.
+The current production topology is intentionally one all-in-one container, one
+published HTTP port, and one persistent `/data` mount. The checked-in
+`docker-compose.production.yml` is the production reference.
 
-Create secret files before starting:
+## Service boundary
 
-```sh
-mkdir -m 700 secrets
-openssl rand -hex 32 > secrets/admin_api_key
-openssl rand -hex 32 > secrets/jwt_secret
-touch secrets/jwt_secret_previous
-openssl rand -hex 32 > secrets/postgres_password
-openssl rand -hex 32 > secrets/clickhouse_password
-printf 'postgres://shennong:%s@postgres:5432/shennong\n' "$(cat secrets/postgres_password)" > secrets/database_url
-printf 'http://shennong:%s@clickhouse:8123\n' "$(cat secrets/clickhouse_password)" > secrets/clickhouse_url
-chmod 600 secrets/*
-docker compose -f docker-compose.production.yml up -d
+```text
+client / TLS reverse proxy
+          |
+          v
+HOST:18080 -> Next.js WebUI and same-origin API gateway (:8000)
+                         |
+                         v
+                 Rust API (127.0.0.1:8001)
+                    /        |        \
+          PostgreSQL     ClickHouse   SeaweedFS + TileDB
+                    \        |        /
+                         /data
 ```
 
-The API container runs as UID 10001 with a read-only root filesystem, dropped
-capabilities, and `no-new-privileges`. It does not mount database volumes.
-TileDB requests use the internal HTTP worker, while object data uses the
-internal S3-compatible SeaweedFS service. Caddy is the only public ingress and
-enforces the request body limit and upstream timeouts; configure a real domain
-and TLS certificates before exposing it publicly.
+PostgreSQL, ClickHouse, SeaweedFS, and the Rust API bind only inside the
+container. The standalone `shennong-db-web` service in `docker-compose.yml` is
+an optional frontend-development profile; it is not part of production.
 
-To migrate an existing embedded deployment, run
-`scripts/migrate-embedded-to-production.sh`. It creates a PostgreSQL dump and
-an untouched `/data` backup. Review and upload retained objects before restoring
-the dump; the script never deletes the old volume. Rollback is the reverse:
-stop the production stack and start the original single-container Compose file
-with its original volumes.
+## Persistent data
 
-Release images are immutable semantic-version tags plus a `sha-<git-sha>` tag.
-Verify the recorded digest and signature before deployment:
+The host path selected by `SHENNONG_DATA_PATH` is mounted at `/data` and holds:
 
-```sh
-cosign verify zerostwo/shennong-db@sha256:<digest>
-docker pull zerostwo/shennong-db@sha256:<digest>
+| Path | Content |
+|---|---|
+| `/data/postgresql` | catalog, users, sessions, grants, audit, Projects, settings |
+| `/data/clickhouse` | analytical cache |
+| `/data/objects` | uploads, backup objects, and managed files |
+| `/data/tiledb` and `/data/work` | derived arrays, indexes, and ingestion work |
+| `/data/.shennong-secrets` | generated fallback secrets for this data volume |
+
+When explicit `SHENNONG_ADMIN_API_KEY` and `SHENNONG_JWT_SECRET` values are
+provided, back up `.env` separately and securely because those values are not
+replaced by the generated fallback file.
+
+## Network and TLS
+
+The recommended same-host reverse-proxy binding is:
+
+```dotenv
+SHENNONG_BIND_ADDRESS=127.0.0.1
+SHENNONG_PORT=18080
 ```
 
-Never deploy `latest` in production; keep the previous digest available for a
-one-command rollback in the Compose `SHENNONG_IMAGE` variable.
+Terminate TLS at a maintained reverse proxy and forward to
+`http://127.0.0.1:18080`. Set `SHENNONG_TRUST_PROXY_HEADERS=1` only when every
+request reaches ShennongDB through a trusted proxy that overwrites forwarded
+headers. Enable `SHENNONG_ENABLE_HSTS=1` only after HTTPS is confirmed. If a
+TLS proxy is the only browser entry point, also set `SHENNONG_COOKIE_SECURE=1`.
+If a browser on another origin calls the API directly, configure an explicit
+comma-separated `SHENNONG_CORS_ORIGINS` allowlist.
+
+## Images and upgrades
+
+Use a semantic-version tag or immutable digest:
+
+```dotenv
+SHENNONG_IMAGE=zerostwo/shennong-db:0.5.2
+```
+
+Record the deployed digest with `docker image inspect`, retain the previous
+digest, and take a full consistent backup before upgrading. `latest` is useful
+for local evaluation but is not a rollback strategy.
+
+## Capacity and isolation
+
+The all-in-one topology simplifies installation and backup but shares CPU,
+memory, disk bandwidth, and failure scope among all stores. Production sizing
+must therefore monitor container CPU and memory, filesystem capacity and IOPS,
+query concurrency, upload/download activity, and ingestion jobs together.
+
+The current measured concurrency baseline is in
+[benchmark-results.md](benchmark-results.md). Before a public service or paper,
+repeat the benchmark on the intended hardware, pinned image digest, fixed data
+snapshot, and both warm- and cold-cache states.
+
+## Security checklist
+
+- keep the host bind private unless direct access is intended;
+- use TLS and a firewall at public ingress;
+- generate independent administrator and JWT secrets;
+- store `.env` with mode `0600` and outside source control;
+- use personal tokens with only needed scopes for scripts and MCP;
+- leave unverified providers disabled;
+- preserve audit and login history according to policy;
+- test full restore on an isolated host;
+- monitor dependency and image vulnerabilities before each release.
+
+For exact installation commands, see [guide.md](guide.md). For backup scope and
+restore steps, see [backup-recovery.md](backup-recovery.md).

@@ -22,7 +22,7 @@ building, set `SHENNONG_TEST_IMAGE` to that local image tag. When combining it
 with sudo, preserve that variable explicitly:
 
 ```bash
-SHENNONG_TEST_IMAGE=zerostwo/shennong-db:0.1.0 \
+SHENNONG_TEST_IMAGE=zerostwo/shennong-db:0.5.2 \
   COMPOSE_COMMAND='sudo --preserve-env=SHENNONG_TEST_IMAGE docker compose' \
   DOCKER_COMMAND='sudo docker' \
   ./scripts/test-platform.sh
@@ -69,7 +69,7 @@ The quality baseline recorded for `main@f6f8441` on 2026-07-11 was:
 | `docker compose config` | passed |
 | `docker build --pull -t shennong-db:test .` | blocked locally by a 30-second `auth.docker.io` timeout; application compilation did not fail |
 | GitHub main image build for `f6f8441` | passed ([run 29137753896](https://github.com/zerostwo/shennong-db/actions/runs/29137753896)) |
-| `scripts/test-platform.sh` with the published `0.1.0` image | passed; isolated containers and volumes removed on exit |
+| `scripts/test-platform.sh` with the then-current published `0.1.0` image | passed; isolated containers and volumes removed on exit |
 
 Run the Rust checks separately when changing application code:
 

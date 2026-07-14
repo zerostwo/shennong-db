@@ -6,8 +6,8 @@ material. Runtime behavior is defined by the checked-in code and
 
 ## Start here
 
-- [Docker and API guide](guide.md) — installation, discovery, API examples, and
-  operations.
+- [Complete user guide](guide.md) — installation, first-run setup, WebUI, API,
+  data access, Projects, administration, and troubleshooting.
 - [Production topology](production-compose.md) — container and persistence
   boundaries.
 - [Production hardening](production-hardening.md) — regression baseline and
@@ -24,6 +24,9 @@ material. Runtime behavior is defined by the checked-in code and
 - [ClickHouse cache lifecycle](clickhouse-cache.md)
 - [Gene identifiers](gene-identifiers.md)
 - [Performance and analysis readiness](performance.md)
+- [Benchmark results and performance plan](benchmark-results.md)
+- [Agent integrations: MCP and Skill](agent-integrations.md) — Codex and generic
+  MCP installation, verification, prompts, and troubleshooting.
 - [Resource providers](../providers/README.md)
 
 ## Design records and evidence
