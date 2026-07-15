@@ -8,5 +8,6 @@ __pycache__
 .ruff_cache
 data
 target
-web/node_modules
-web/.next
+webui/node_modules
+webui/.next
+web-archive

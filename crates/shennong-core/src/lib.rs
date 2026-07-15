@@ -21,8 +21,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod agent;
 mod research_graph;
 mod web;
+pub use agent::ModelProviderRecord;
 pub use research_graph::{MAX_RESEARCH_GRAPH_DEPTH, MAX_RESEARCH_GRAPH_LIMIT};
 pub use web::{LoginEventWrite, UploadWrite, UsageEventWrite};
 

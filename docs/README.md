@@ -6,13 +6,17 @@ material. Runtime behavior is defined by the checked-in code and
 
 ## Start here
 
+- [Product core](product-core.md) — core business capabilities, primary WebUI
+  surfaces, and the governed Agent data flow.
 - [Complete user guide](guide.md) — installation, first-run setup, WebUI, API,
   data access, Projects, administration, and troubleshooting.
 - [Production topology](production-compose.md) — container and persistence
   boundaries.
 - [Production hardening](production-hardening.md) — regression baseline and
   verification commands.
-- [WebUI](../web/README.md) — active Next.js application and frontend checks.
+- [WebUI](../webui/README.md) — active Next.js application and frontend checks.
+- [Archived v0.6.0 WebUI](../web-archive/README.md) — frozen,
+  excluded from builds, and retained only for historical reference.
 - [WebUI API boundaries](web-api-boundaries.md) — persisted product surfaces
   and the explicit backup boundary.
 

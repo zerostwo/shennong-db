@@ -1,7 +1,7 @@
 FROM rust:1.97-bookworm AS builder
 
 ARG VCS_REF=unknown
-ARG VERSION=0.1.0
+ARG VERSION=0.7.0
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -11,9 +11,9 @@ RUN cargo build --release --package shennong-server --package shennong-cli --pac
 FROM mirror.gcr.io/library/node:24-bookworm-slim AS web-builder
 WORKDIR /app/web
 RUN corepack enable && corepack prepare pnpm@10.17.1 --activate
-COPY web/package.json web/pnpm-lock.yaml web/.npmrc ./
+COPY webui/package.json webui/pnpm-lock.yaml webui/.npmrc ./
 RUN pnpm install --frozen-lockfile
-COPY web .
+COPY webui .
 ENV SHENNONG_API_INTERNAL_URL=http://127.0.0.1:8001
 RUN pnpm build
 
@@ -38,7 +38,7 @@ RUN chmod u+w /out/* \
 FROM postgres:17-bookworm
 
 ARG VCS_REF=unknown
-ARG VERSION=0.1.0
+ARG VERSION=0.7.0
 LABEL org.opencontainers.image.source="https://github.com/zerostwo/shennong-db" \
       org.opencontainers.image.revision="$VCS_REF" \
       org.opencontainers.image.version="$VERSION" \

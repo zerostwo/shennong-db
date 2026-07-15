@@ -57,6 +57,7 @@ use tower_http::{
 };
 use tracing_subscriber::EnvFilter;
 
+mod agent_chat;
 mod research_graph_api;
 
 use research_graph_api::*;
@@ -66,6 +67,7 @@ struct AppState {
     repository: Arc<ResourceRepository>,
     providers: Arc<ProviderInstaller>,
     storage: Arc<dyn BlobStore>,
+    upload_staging_dir: PathBuf,
     admin_key: Option<String>,
     jwt_secret: Option<String>,
     jwt_previous: Option<String>,
@@ -77,13 +79,18 @@ struct AppState {
     query_requests: Arc<Semaphore>,
     global_requests: Arc<Semaphore>,
     query_rate: RateLimiter,
+    agent_rate: RateLimiter,
     download_rate: RateLimiter,
     download_timeout: Duration,
     request_timeout: Duration,
+    agent_run_timeout: Duration,
     provider_install_timeout: Duration,
     trust_proxy_headers: bool,
     cache_fill: Arc<AsyncMutex<()>>,
     setup_lock: Arc<AsyncMutex<()>>,
+    agent_crypto: agent_chat::AgentCrypto,
+    agent_client: reqwest::Client,
+    agent_requests: Arc<Semaphore>,
     cache_hits: Arc<AtomicU64>,
     cache_misses: Arc<AtomicU64>,
     cache_max_bytes: u64,
@@ -172,6 +179,15 @@ async fn request_limits(State(state): State<AppState>, request: Request, next: N
         )
         .into_response();
     }
+    if matches!(path, "/api/v1/auth/register")
+        && !state.download_rate.allow(&format!("register:{key}"))
+    {
+        return ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "registration rate limit exceeded".into(),
+        )
+        .into_response();
+    }
     if path.ends_with("/download") && !state.download_rate.allow(&key) {
         return ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -215,8 +231,13 @@ async fn request_timeout_middleware(
     if matches!(request.uri().path(), "/health" | "/healthz") {
         return next.run(request).await;
     }
+    let agent_run = request.method() == Method::POST
+        && request.uri().path().starts_with("/api/v1/chat/threads/")
+        && (request.uri().path().ends_with("/messages") || request.uri().path().ends_with("/run"));
     let timeout = if request.uri().path() == "/api/v1/resources/install" {
         state.provider_install_timeout
+    } else if agent_run {
+        state.agent_run_timeout
     } else {
         state.request_timeout
     };
@@ -432,6 +453,7 @@ struct GeneResolveQuery {
     resources: Option<String>,
 }
 
+#[derive(Debug)]
 struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
@@ -493,6 +515,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let data_root =
         PathBuf::from(env::var("SHENNONG_LOCAL_DATA_ROOT").unwrap_or_else(|_| "/data".into()));
+    let upload_staging_dir = PathBuf::from(
+        env::var("SHENNONG_UPLOAD_STAGING_DIR").unwrap_or_else(|_| "/data/work/uploads".into()),
+    );
+    tokio::fs::create_dir_all(&upload_staging_dir).await?;
     let repository = ResourceRepository::connect(&database_url).await?;
     repository.migrate().await?;
     for resource_id in repository.reconcile_local_availability(&data_root).await? {
@@ -515,11 +541,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(300),
     );
     let request_timeout = env_duration("SHENNONG_REQUEST_TIMEOUT_SECS", 30);
+    let agent_run_timeout = env_duration("SHENNONG_AGENT_RUN_TIMEOUT_SECS", 600);
     let provider_install_timeout = env_duration("SHENNONG_PROVIDER_INSTALL_TIMEOUT_SECS", 14_400);
     let max_body_bytes = env_usize("SHENNONG_MAX_BODY_BYTES", 1024 * 1024);
     let global_concurrency = env_usize("SHENNONG_MAX_CONCURRENCY", 64);
     let query_concurrency = env_usize("SHENNONG_QUERY_MAX_CONCURRENCY", 8);
     let query_rate = RateLimiter::new(env_usize("SHENNONG_QUERY_RATE_LIMIT_PER_MINUTE", 120));
+    let agent_rate = RateLimiter::new(env_usize("SHENNONG_AGENT_RATE_LIMIT_PER_MINUTE", 20));
     let download_rate = RateLimiter::new(env_usize("SHENNONG_DOWNLOAD_RATE_LIMIT_PER_MINUTE", 60));
     let trust_proxy_headers = env::var("SHENNONG_TRUST_PROXY_HEADERS")
         .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
@@ -572,6 +600,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Arc::new(LocalObjectStorage::new(&data_root))
     };
+    let agent_crypto = agent_chat::AgentCrypto::new(
+        &env_secret("SHENNONG_AGENT_ENCRYPTION_KEY")
+            .ok_or("SHENNONG_AGENT_ENCRYPTION_KEY is required")?,
+    );
     let state = AppState {
         repository: Arc::new(repository),
         providers: Arc::new(if s3_storage {
@@ -589,6 +621,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }),
         storage,
+        upload_staging_dir,
         admin_key,
         jwt_secret,
         jwt_previous: env_secret("SHENNONG_JWT_SECRET_PREVIOUS"),
@@ -612,13 +645,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         query_requests: Arc::new(Semaphore::new(query_concurrency)),
         global_requests: Arc::new(Semaphore::new(global_concurrency)),
         query_rate,
+        agent_rate,
         download_rate,
         download_timeout,
         request_timeout,
+        agent_run_timeout,
         provider_install_timeout,
         trust_proxy_headers,
         cache_fill: Arc::new(AsyncMutex::new(())),
         setup_lock: Arc::new(AsyncMutex::new(())),
+        agent_crypto,
+        agent_client: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(env_duration("SHENNONG_AGENT_TIMEOUT_SECS", 120))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?,
+        agent_requests: Arc::new(Semaphore::new(env_usize(
+            "SHENNONG_AGENT_MAX_CONCURRENCY",
+            4,
+        ))),
         cache_hits: Arc::new(AtomicU64::new(0)),
         cache_misses: Arc::new(AtomicU64::new(0)),
         cache_max_bytes: env::var("SHENNONG_CLICKHOUSE_CACHE_MAX_BYTES")
@@ -806,6 +851,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/query", post(query))
         .route("/api/v1/query/batch", post(query_batch))
         .route("/api/v1/query/stream", post(query_stream))
+        .merge(agent_chat::routes())
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
         // Uploads are streamed and bounded inside `upload_file` by
         // SHENNONG_MAX_UPLOAD_BYTES, independently of the small JSON limit.
@@ -1465,6 +1511,7 @@ async fn public_config(
             "instance_name": general.get("instance_name").and_then(serde_json::Value::as_str).unwrap_or("ShennongDB"),
             "support_email": general.get("support_email").and_then(serde_json::Value::as_str).unwrap_or(""),
             "public_catalog": general.get("public_catalog").and_then(serde_json::Value::as_bool).unwrap_or(true),
+            "registration_mode": general.get("registration_mode").and_then(serde_json::Value::as_str).unwrap_or("open"),
             "api_version": "v1",
             "service_version": env!("CARGO_PKG_VERSION")
         }),
@@ -2555,7 +2602,17 @@ async fn upload_file(
         .unwrap_or("application/octet-stream")
         .to_owned();
     let id = uuid::Uuid::new_v4().to_string();
-    let temp = env::temp_dir().join(format!("shennong-upload-{id}.part"));
+    tokio::fs::create_dir_all(&state.upload_staging_dir)
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "upload staging is unavailable".into(),
+            )
+        })?;
+    let temp = state
+        .upload_staging_dir
+        .join(format!("shennong-upload-{id}.part"));
     let mut file = tokio::fs::File::create(&temp).await.map_err(|_| {
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2732,7 +2789,13 @@ async fn register_uploads(
             &value.data_class,
         )
         .await
-        .map_err(database_error)?;
+        .map_err(|error| {
+            if matches!(&error, sqlx::Error::Protocol(message) if message == "upload resource already exists") {
+                ApiError(StatusCode::CONFLICT, "resource id already exists".into())
+            } else {
+                database_error(error)
+            }
+        })?;
     audit(
         &state,
         &headers,

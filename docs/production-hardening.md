@@ -22,7 +22,7 @@ building, set `SHENNONG_TEST_IMAGE` to that local image tag. When combining it
 with sudo, preserve that variable explicitly:
 
 ```bash
-SHENNONG_TEST_IMAGE=zerostwo/shennong-db:0.6.0 \
+SHENNONG_TEST_IMAGE=zerostwo/shennong-db:0.7.0 \
   COMPOSE_COMMAND='sudo --preserve-env=SHENNONG_TEST_IMAGE docker compose' \
   DOCKER_COMMAND='sudo docker' \
   ./scripts/test-platform.sh

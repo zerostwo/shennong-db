@@ -1,6 +1,6 @@
 # ShennongDB user guide
 
-This guide describes the current `0.6.0` all-in-one deployment, WebUI, HTTP API,
+This guide describes the current `0.7.0` all-in-one deployment, WebUI, HTTP API,
 data workflows, administration, and day-two operations. The checked-in
 [`openapi/shennongdb.json`](../openapi/shennongdb.json) remains the field-level
 API contract.
@@ -25,7 +25,7 @@ port.
 
 Requirements:
 
-- Linux with Docker Engine and Docker Compose v2;
+- Linux with Docker Engine and Docker Compose 2.24 or newer;
 - at least 2 CPU cores and 4 GiB RAM for evaluation;
 - substantially more disk than the compressed source data for production
   ingestion, indexes, derived arrays, and backups.
@@ -41,23 +41,28 @@ curl -fsSLo .env.example https://raw.githubusercontent.com/zerostwo/shennong-db/
 cp .env.example .env
 ```
 
-Generate two independent secrets and edit `.env`:
-
-```bash
-openssl rand -hex 32
-openssl rand -hex 32
-```
-
-The minimum production configuration is:
+The normal deployment configuration has four values. Edit them only when the
+defaults do not match the host:
 
 ```dotenv
-SHENNONG_ADMIN_API_KEY=<first-random-value>
-SHENNONG_JWT_SECRET=<second-random-value>
+SHENNONG_IMAGE=zerostwo/shennong-db:0.7.0
 SHENNONG_DATA_PATH=/srv/shennong-db/data
 SHENNONG_BIND_ADDRESS=127.0.0.1
 SHENNONG_PORT=18080
-SHENNONG_IMAGE=zerostwo/shennong-db:0.6.0
 ```
+
+For a restricted outbound network, the only additional normal setting is an
+optional download proxy:
+
+```dotenv
+SHENNONG_DOWNLOAD_PROXY=http://host.docker.internal:7890
+```
+
+No administrator, session, Agent credential, S3, or database secret is needed
+in `.env`. The container generates those credentials on first start and
+persists them in `/data/.shennong-secrets`. Keep that file with the data volume
+during restarts, backups, and upgrades. Advanced capacity and ingress overrides
+are documented in [production-compose.md](production-compose.md).
 
 Bind to `127.0.0.1` when a TLS reverse proxy runs on the same host. Use a LAN
 address or `0.0.0.0` only when direct network access is intentional and is
@@ -87,12 +92,17 @@ port `3000`:
 docker compose --profile development-web up -d
 ```
 
-## 3. First-run administrator
+## 3. First-run administrator and registration
 
 Open `http://HOST:18080`. When no users exist, the sign-in page offers the
 one-time administrator setup. Supply a display name, email address, and a
 password of 12 to 1024 characters. The setup endpoint is locked after the first
 user is created.
+
+After setup, the sign-in page also provides **Create account** for ordinary
+users while registration is open. New registrations receive the regular user
+role; they do not inherit administrator access. An administrator can change the
+registration policy later without changing deployment environment variables.
 
 The equivalent API flow is:
 
@@ -109,16 +119,11 @@ curl -fsS -X POST "$BASE_URL/api/v1/setup/admin" \
   }' | jq
 ```
 
-The `.env` administrator key and the WebUI administrator account are different
-credentials:
-
-- `X-Shennong-Admin-Key` is for bootstrap automation and emergency API
-  administration;
-- the account password creates a browser session;
-- personal access tokens are the preferred credential for scripts and MCP.
-
-Do not place any of these credentials in source control, shell history, prompts,
-or benchmark result files.
+The account password is the only credential chosen during normal setup. The
+container keeps its generated bootstrap and service credentials inside the
+persistent data volume. Personal access tokens created in the WebUI are the
+preferred credentials for scripts and MCP. Do not place account passwords or
+personal tokens in source control, shell history, prompts, or benchmark files.
 
 ## 4. WebUI map
 
@@ -126,16 +131,26 @@ The WebUI uses the same origin as the API. The principal areas are:
 
 | Area | What users can do |
 |---|---|
-| Home and Catalog | Browse readable Resources, inspect metadata, Artifacts, relations, readiness, and examples |
+| Agent Chat | Ask questions over permitted data, attach files, review tool progress and citations, and approve data-changing actions |
+| Search | Open a centered search dialog for chats, Resources, and Projects from the sidebar or `Cmd/Ctrl+K` |
+| Resources | Browse readable Resources and inspect metadata, Artifacts, relations, provenance, readiness, and query examples |
 | Projects | Create research Projects, bind Resources, upload project files, inspect the Research Graph and Context Pack |
-| Console | View profile, usage, collections, favorites, uploads, active sessions, login history, and personal API tokens |
-| Administration | Manage users, grants, provider ingestion, tokens, audit events, storage, settings, metadata backups, and monitoring |
+| My Data | Manage uploads, ingestion status, owned Resources, collections, and favorites |
+| Settings | Configure general preferences, AI models, Agent data policy, security, personal API tokens, and account details |
+| Administration | Open User Management and manage grants, provider ingestion, audit events, storage, settings, backups, and monitoring |
 | Authentication | Sign in/out, complete 2FA, recover an account, reset or change a password |
 | Docs and Support | Read in-product guidance and diagnostic entry points |
 
 Public Resources may be browsed anonymously. Collections, favorites, uploads,
 Projects, profile data, sessions, and tokens require sign-in. Administration
 pages require an administrator account.
+
+Each user adds their own OpenAI, DeepSeek, Ollama, or OpenAI-compatible provider
+under **Settings → Models**. API keys are encrypted user settings and are not
+deployment environment variables. Agent Chat can inspect and query permitted
+Resources. Attachments can be inspected as metadata and, with explicit approval,
+registered as private raw Resources. This release does not claim scientific
+normalization of arbitrary uploads.
 
 ## 5. Authentication for scripts
 
@@ -196,14 +211,10 @@ Only operations under `analysis_capabilities.ready` are safe to plan. Items
 under `requires_additional_resources` describe missing annotations or data; the
 presence of a related Resource is not proof that an analysis is supported.
 
-An administrator can install a built-in provider from the WebUI or API:
-
-```bash
-curl -fsS -X POST "$BASE_URL/api/v1/resources/install" \
-  -H "X-Shennong-Admin-Key: $SHENNONG_ADMIN_API_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"toil"}' | jq
-```
+An administrator can install a built-in provider from **Administration → Data
+Operations**. The equivalent `POST /api/v1/resources/install` API accepts an
+active administrator session or administrator credential; normal deployments
+do not need to expose the generated bootstrap key.
 
 Provider installation is an ingestion operation: it downloads resumably,
 verifies declared SHA-256 checksums, materializes derived representations, and
@@ -462,11 +473,13 @@ curl -i http://127.0.0.1:18080/healthz
 
 ## 15. Agent and developer entry points
 
+- [Product core](product-core.md): core business capabilities, primary WebUI
+  surfaces, and the governed Agent data flow.
 - [Agent integrations](agent-integrations.md): install, configure, verify, and
   use the MCP server and Codex Skill.
 - [OpenAPI contract](../openapi/shennongdb.json): request and response schema.
 - [Provider authoring](../providers/README.md): add reproducible data sources.
 - [Production topology](production-compose.md): persistence and network model.
 - [Backup and recovery](backup-recovery.md): complete backup and restore drill.
-- [WebUI developer guide](../web/README.md): local frontend development and
+- [WebUI developer guide](../webui/README.md): local frontend development and
   test commands.

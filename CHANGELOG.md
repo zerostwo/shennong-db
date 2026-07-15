@@ -6,6 +6,29 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-15
+
+### Added
+
+- Add an Agent-first ChatGPT-style WebUI with persistent conversations, centered workspace Search, Resources, Projects, My Data, Settings, and a five-destination administrator center with first-class User Management.
+- Add ordinary user registration controlled by the instance registration policy while retaining first-run administrator setup and existing sign-in and 2FA flows.
+- Add encrypted per-user OpenAI, DeepSeek, Ollama, and OpenAI-compatible model connections with connection testing, model discovery, rate limits, concurrency limits, and an explicit public-only or private-data policy.
+- Add permission-checked Agent tools for Resource discovery, inspection, bounded queries, gene resolution, citations, uploaded-file metadata inspection, private raw Resource registration, and administrator-approved curated Provider installation.
+- Add PostgreSQL-backed chat threads, messages, tool events, model-provider records, and a durable upload staging area.
+
+### Changed
+
+- Make Agent Chat the default product screen and rename the catalog-facing navigation to Resources while preserving the existing governed Resource and Project workflows.
+- Archive the exact v0.6.0 WebUI under `web-archive/v0.6.0` and move the active application to the independent `webui` source tree.
+- Reduce the normal deployment configuration to the image, data path, bind address, port, and optional outbound proxy; generate runtime secrets inside the persistent data volume on first start.
+- Treat uploaded Agent attachments as metadata-and-raw-registration inputs only; scientific normalization and arbitrary model-directed downloads remain outside this release boundary.
+
+### Fixed
+
+- Prevent private Resource metadata and attachments from reaching external models unless the user explicitly enables private-data access for that model connection.
+- Restrict local Ollama connections to the expected local endpoint, reject unsafe remote provider addresses, redact sensitive tool-result fields, and keep Agent runs outside the short ordinary-request timeout.
+- Keep anonymous Search limited to public Resources and prevent ordinary registration from creating privileged roles.
+
 ## [0.6.0] - 2026-07-15
 
 ### Added
@@ -184,4 +207,5 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [0.5.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.1
 [0.5.2]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.2
 [0.6.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.6.0
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.6.0...HEAD
+[0.7.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.7.0
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.7.0...HEAD

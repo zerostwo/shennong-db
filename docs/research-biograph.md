@@ -140,9 +140,9 @@ publication or destructive operations.
 
 ## Current Observation UI contract
 
-The current [Observation table](../web/components/project-observation-table.tsx)
+The current [Observation table](../webui/components/project-observation-table.tsx)
 is a structured vertical slice, not a generic spreadsheet database. Its
-[API adapter](../web/lib/api/adapter.ts) performs the following sequence:
+[API adapter](../webui/lib/api/adapter.ts) performs the following sequence:
 
 1. create one completed `observation_capture` Activity for the submitted batch;
 2. create one `category=observation` Entity for each successfully persisted

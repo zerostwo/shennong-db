@@ -21,7 +21,7 @@ case "${SHENNONG_ROLE:-all}" in
     ;;
 esac
 
-mkdir -p "$PGDATA" /data/work /data/clickhouse /data/tiledb /data/objects /var/log/clickhouse-server /var/lib/clickhouse
+mkdir -p "$PGDATA" /data/work/uploads /data/clickhouse /data/tiledb /data/objects /var/log/clickhouse-server /var/lib/clickhouse
 chmod 755 /data
 chown -R postgres:postgres "$PGDATA" /data/work /data/clickhouse /data/tiledb /data/objects /var/log/clickhouse-server /var/lib/clickhouse
 
@@ -31,8 +31,12 @@ if [ ! -s "$secret_file" ]; then
   {
     printf 'SHENNONG_DEFAULT_ADMIN_API_KEY=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)"
     printf 'SHENNONG_DEFAULT_JWT_SECRET=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)"
+    printf 'SHENNONG_DEFAULT_AGENT_ENCRYPTION_KEY=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)"
     printf 'SHENNONG_DEFAULT_S3_SECRET=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)"
   } > "$secret_file"
+fi
+if ! grep -q '^SHENNONG_DEFAULT_AGENT_ENCRYPTION_KEY=' "$secret_file"; then
+  printf 'SHENNONG_DEFAULT_AGENT_ENCRYPTION_KEY=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)" >> "$secret_file"
 fi
 if ! grep -q '^SHENNONG_DEFAULT_S3_SECRET=' "$secret_file"; then
   printf 'SHENNONG_DEFAULT_S3_SECRET=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)" >> "$secret_file"
@@ -40,6 +44,7 @@ fi
 . "$secret_file"
 export SHENNONG_ADMIN_API_KEY="${SHENNONG_ADMIN_API_KEY:-$SHENNONG_DEFAULT_ADMIN_API_KEY}"
 export SHENNONG_JWT_SECRET="${SHENNONG_JWT_SECRET:-$SHENNONG_DEFAULT_JWT_SECRET}"
+export SHENNONG_AGENT_ENCRYPTION_KEY="${SHENNONG_AGENT_ENCRYPTION_KEY:-$SHENNONG_DEFAULT_AGENT_ENCRYPTION_KEY}"
 export AWS_ACCESS_KEY_ID=shennong
 export AWS_SECRET_ACCESS_KEY="$SHENNONG_DEFAULT_S3_SECRET"
 cat > /data/s3.json <<EOF

@@ -238,7 +238,23 @@ impl ResourceRepository {
         if uploads.len() != upload_ids.len() {
             return Err(sqlx::Error::RowNotFound);
         }
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(&resource.id)
+            .execute(&mut *tx)
+            .await?;
+        let resource_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1)")
+                .bind(&resource.id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if resource_exists {
+            return Err(sqlx::Error::Protocol(
+                "upload resource already exists".into(),
+            ));
+        }
         let stored = upsert_resource_transaction(&mut tx, resource).await?;
+        sqlx::query("INSERT INTO resource_grants(resource_id,user_id,scopes,granted_by,reason) VALUES($1,$2,'[\"resource.read\"]'::jsonb,$2,'upload owner') ON CONFLICT(resource_id,user_id) DO UPDATE SET scopes=EXCLUDED.scopes,granted_by=EXCLUDED.granted_by,reason=EXCLUDED.reason,expires_at=NULL")
+            .bind(&resource.id).bind(user_id).execute(&mut *tx).await?;
         for row in uploads {
             let id: String = row.get("id");
             let filename: String = row.get("filename");

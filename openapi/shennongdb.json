@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "ShennongDB API", "version": "0.6.0", "description": "WebUI-facing Rust API contract. All product data is owned by the Rust service and persisted in PostgreSQL or object storage." },
+  "info": { "title": "ShennongDB API", "version": "0.7.0", "description": "WebUI-facing Rust API contract. All product data is owned by the Rust service and persisted in PostgreSQL or object storage." },
   "servers": [{ "url": "/api/v1" }],
   "paths": {
     "/resources": { "get": { "operationId": "listResources", "responses": { "200": { "description": "Visible resources" } } } },
@@ -57,6 +57,7 @@
     "/providers": { "get": { "operationId": "listProviders", "responses": { "200": { "description": "Providers" } } } },
     "/users": { "get": { "operationId": "listUsers", "responses": { "200": { "description": "Users" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } },
     "/audit-events": { "get": { "operationId": "listAuditEvents", "responses": { "200": { "description": "Audit events" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } },
+    "/auth/register": { "post": { "operationId": "registerUser", "description": "Creates an ordinary user only when instance registration is open, then starts an HttpOnly web session.", "responses": { "200": { "description": "Registered ordinary user session" }, "403": { "description": "Registration is disabled" }, "409": { "description": "Email already exists" } } } },
     "/auth/sign-in": { "post": { "operationId": "signIn", "responses": { "200": { "description": "Session or 2FA challenge" }, "401": { "$ref": "#/components/responses/Unauthorized" } } } },
     "/auth/verify-2fa": { "post": { "operationId": "verify2fa", "responses": { "200": { "description": "Authenticated session" } } } },
     "/auth/session": { "get": { "operationId": "getSession", "responses": { "200": { "description": "Current HttpOnly web session" } } } },
@@ -70,6 +71,32 @@
     "/auth/2fa": { "get": { "operationId": "getTwoFactorStatus", "responses": { "200": { "description": "2FA status" } } }, "delete": { "operationId": "disableTwoFactor", "responses": { "204": { "description": "2FA disabled" } } } },
     "/auth/2fa/enroll": { "post": { "operationId": "enrollTwoFactor", "responses": { "200": { "description": "Pending TOTP enrollment" } } } },
     "/auth/2fa/confirm": { "post": { "operationId": "confirmTwoFactor", "responses": { "200": { "description": "Enabled TOTP and one-time recovery codes" } } } },
+    "/ai/providers": {
+      "get": { "operationId": "listModelProviders", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "responses": { "200": { "description": "Current user's model connections without credential material" }, "401": { "$ref": "#/components/responses/Unauthorized" } } },
+      "post": { "operationId": "createModelProvider", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "responses": { "200": { "description": "Encrypted per-user model connection" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "422": { "$ref": "#/components/responses/InvalidRequest" } } }
+    },
+    "/ai/providers/{id}": {
+      "get": { "operationId": "getModelProvider", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Owned model connection without credential material" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "put": { "operationId": "updateModelProvider", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Updated encrypted model connection" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "delete": { "operationId": "deleteModelProvider", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "204": { "description": "Deleted model connection" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/ai/providers/{id}/test": { "post": { "operationId": "testModelProvider", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Connection test result" }, "404": { "$ref": "#/components/responses/NotFound" }, "422": { "$ref": "#/components/responses/InvalidRequest" } } } },
+    "/ai/providers/{id}/models": { "get": { "operationId": "listModelProviderModels", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Models reported by the owned provider" }, "404": { "$ref": "#/components/responses/NotFound" } } } },
+    "/chat/threads": {
+      "get": { "operationId": "listChatThreads", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "responses": { "200": { "description": "Current user's conversations" } } },
+      "post": { "operationId": "createChatThread", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "responses": { "200": { "description": "Created conversation" } } }
+    },
+    "/chat/threads/{id}": {
+      "get": { "operationId": "getChatThread", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Owned conversation" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "put": { "operationId": "updateChatThread", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Updated conversation" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "delete": { "operationId": "deleteChatThread", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "204": { "description": "Deleted conversation" }, "404": { "$ref": "#/components/responses/NotFound" } } }
+    },
+    "/chat/threads/{id}/messages": {
+      "get": { "operationId": "listChatMessages", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Persisted messages, tool events, and citations" }, "404": { "$ref": "#/components/responses/NotFound" } } },
+      "post": { "operationId": "runChat", "description": "Runs a bounded Agent turn. Attachments and private Resources require a provider whose data policy explicitly allows private data.", "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Persisted assistant response with tool events and citations" }, "404": { "$ref": "#/components/responses/NotFound" }, "422": { "$ref": "#/components/responses/InvalidRequest" }, "429": { "description": "Per-user Agent rate or concurrency limit reached" } } }
+    },
+    "/chat/threads/{id}/run": { "post": { "operationId": "runChatCompatibility", "deprecated": true, "security": [{ "bearerAuth": [] }, { "sessionCookie": [] }], "parameters": [{ "$ref": "#/components/parameters/Id" }], "responses": { "200": { "description": "Persisted assistant response" }, "429": { "description": "Per-user Agent rate or concurrency limit reached" } } } },
+    "/search": { "get": { "operationId": "searchWorkspace", "description": "Searches public Resources for guests and the caller's permitted chats, Resources, and Projects when authenticated.", "responses": { "200": { "description": "Permission-filtered workspace search results" } } } },
     "/collections": { "get": { "operationId": "listCollections", "responses": { "200": { "description": "Visible persisted collections" } } }, "post": { "operationId": "createCollection", "responses": { "200": { "description": "Created collection" } } } },
     "/favorites": { "get": { "operationId": "listFavorites", "responses": { "200": { "description": "Current user's favorites" } } } },
     "/uploads": { "get": { "operationId": "listUploads", "responses": { "200": { "description": "Visible upload records" } } }, "post": { "operationId": "uploadFile", "responses": { "200": { "description": "Object stored with verified SHA-256" } } } },

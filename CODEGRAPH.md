@@ -25,7 +25,7 @@ codegraph explore -p . "catalog resources live API"
 codegraph node -p . listResources
 codegraph callers -p . listResources
 codegraph impact -p . listResources
-codegraph affected -p . web/lib/api/adapter.ts
+codegraph affected -p . webui/lib/api/adapter.ts
 codegraph files -p . --filter crates --max-depth 3
 ```
 
@@ -37,9 +37,9 @@ main token-saving path for future repository work.
 
 ```text
 Browser
-  -> web/app + web/components
-  -> web/lib/api/adapter.ts
-  -> web/app/api/v1/[...path]/route.ts
+  -> webui/app + webui/components
+  -> webui/lib/api/adapter.ts
+  -> webui/app/api/v1/[...path]/route.ts
   -> crates/shennong-server/src/main.rs
        -> shennong-auth     authentication and token primitives
        -> shennong-core     metadata, migrations, and product persistence
@@ -55,14 +55,14 @@ same domain and service boundaries.
 ## Repository boundaries
 
 - `crates/` — authoritative Rust application source.
-- `web/app`, `web/components`, `web/features`, `web/lib` — authoritative WebUI
+- `webui/app`, `webui/components`, `webui/features`, `webui/lib` — authoritative WebUI
   source. There is no second Vite application tree.
 - `docker/`, `docker-compose*.yml`, `Dockerfile` — build and deployment wiring.
 - `providers/`, `seed/`, `tests/fixtures/` — versioned input definitions and
   test data; these are not runtime output.
 - `docs/` and `openapi/` — human guidance, design history, evidence, and the API
   contract.
-- `data/`, `target/`, `web/.next/`, `web/dist/`, `web/node_modules/`, caches,
+- `data/`, `target/`, `webui/.next/`, `webui/dist/`, `webui/node_modules/`, caches,
   and `.codegraph/codegraph.db` — generated or machine-local; never treat these
   as source.
 

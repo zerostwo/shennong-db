@@ -90,7 +90,7 @@ python3 scripts/benchmark_http.py \
 Run browser measurements after installing WebUI dependencies and Playwright Chromium:
 
 ```bash
-cd web
+cd webui
 node scripts/benchmark-web.mjs \
   --base-url http://127.0.0.1:18080 \
   --runs 5 \

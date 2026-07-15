@@ -85,7 +85,7 @@ The main request and data paths are:
    `shennong-cli` is a separate operator entry point for migrations, atomic
    imports, token creation, and provider inspection.
 
-The source tree follows the same boundaries: `web/` owns the Next.js UI and
+The source tree follows the same boundaries: `webui/` owns the active Next.js UI and
 BFF; `crates/shennong-server` owns HTTP composition; `crates/shennong-core`,
 `shennong-auth`, `shennong-query`, `shennong-storage`, and `shennong-schema`
 hold reusable domain layers; `crates/shennong-mcp` and `crates/shennong-cli`
@@ -101,14 +101,20 @@ server.
 
 ```bash
 cp .env.example .env
-# Set SHENNONG_ADMIN_API_KEY and SHENNONG_JWT_SECRET.
+# Optionally adjust the image, data path, bind address, port, or download proxy.
 docker compose pull
 docker compose up -d
 ```
 
 The WebUI and API are available on `http://HOST:18080` with the checked-in
-`.env.example`. Use `/health` for process health,
+defaults. On first start, the container generates and persists its administrator,
+session, agent-credential-encryption, and object-storage secrets under `/data`;
+none of them need to be supplied in `.env`. Use `/health` for process health,
 `/healthz` for database readiness, and `/version` for release metadata.
+
+Each user configures OpenAI, DeepSeek, Ollama, or another OpenAI-compatible
+model from **Settings → Models** in the WebUI. Model credentials are user
+settings, not deployment environment variables.
 
 ## API overview
 
@@ -123,6 +129,10 @@ The WebUI and API are available on `http://HOST:18080` with the checked-in
 - `/api/v1/projects/*` and `/api/v1/graph/*` for Research Graph workspaces
 - `/api/v1/collections`, `/api/v1/favorites`, and `/api/v1/uploads*`
 - `/api/v1/auth/*` for sessions, personal tokens, profile, password, and 2FA
+- `POST /api/v1/auth/register` for policy-controlled ordinary registration
+- `/api/v1/ai/providers/*` for encrypted per-user model connections
+- `/api/v1/chat/threads/*` for Agent conversations, tools, and citations
+- `GET /api/v1/search` for permission-filtered workspace Search
 - `/api/v1/settings`, `/api/v1/backups`, `/api/v1/usage`, and `/api/v1/storage`
 - `GET /.well-known/shennong-agent.json` for machine-readable agent discovery
 - `GET /api/v1/genes/resolve` for release-aware cross-Resource gene resolution
@@ -139,14 +149,16 @@ An agent first reads `/.well-known/shennong-agent.json`, which contains only the
 Resource inventory and selection metadata. It then follows the selected
 Resource's `details_url` to retrieve dimensions, fields, identifiers, analysis
 readiness, missing annotation requirements, Artifacts, Relations, and a bounded
-query example. Catalog metadata is marked as untrusted descriptive data.
+query example. Resource metadata is marked as untrusted descriptive data.
 
 PBMC 10x HDF5 inputs are materialized as sparse TileDB arrays on first startup.
 Toil expression queries read only the indexed source row and can join installed
 phenotype and survival metadata. ClickHouse remains available for analytical
 caches and tabular workloads.
 
-See [docs/guide.md](docs/guide.md) for the complete user guide: installation,
+See [docs/product-core.md](docs/product-core.md) for the core business
+capabilities, primary interfaces, and Agent data flow. See
+[docs/guide.md](docs/guide.md) for the complete user guide: installation,
 first-run setup, WebUI, API, data access, uploads, Projects, administration, and
 troubleshooting. See [docs/performance.md](docs/performance.md) for measured query latency
 and the current analysis-readiness boundaries. See
@@ -166,4 +178,5 @@ with `./scripts/test-platform.sh`; details are in
   design references, visual evidence, and archived implementation briefs.
 - [CodeGraph map](CODEGRAPH.md) records the source boundaries and the small set
   of graph queries used to navigate dependencies without rescanning the repo.
-- [WebUI guide](web/README.md) covers the active Next.js App Router application.
+- [WebUI guide](webui/README.md) covers the active Next.js App Router application.
+- [Archived v0.6.0 WebUI](web-archive/README.md) preserves the retired interface and is not built.

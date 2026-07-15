@@ -41,7 +41,7 @@ if [ -f .env ]; then
   cp .env "$out/environment.env"
   chmod 600 "$out/environment.env"
 fi
-docker image inspect "${SHENNONG_IMAGE:-zerostwo/shennong-db:0.6.0}" \
+docker image inspect "${SHENNONG_IMAGE:-zerostwo/shennong-db:0.7.0}" \
   --format '{{json .RepoDigests}}' > "$out/image-digests.json" 2>/dev/null || true
 date -u +%Y-%m-%dT%H:%M:%SZ > "$out/created-at.txt"
 (cd "$out" && find . -type f ! -name MANIFEST.sha256 -print0 \
