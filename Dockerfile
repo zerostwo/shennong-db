@@ -21,6 +21,20 @@ FROM clickhouse/clickhouse-server:26.4.4.38 AS clickhouse
 
 FROM chrislusf/seaweedfs:4.39 AS seaweedfs
 
+FROM debian:bookworm-slim AS runtime-binaries
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes binutils \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=clickhouse /usr/bin/clickhouse /out/clickhouse
+COPY --from=seaweedfs /usr/bin/weed /out/weed
+COPY --from=web-builder /usr/local/bin/node /out/node
+COPY --from=builder /app/target/release/shennong-server /out/shennong-server
+COPY --from=builder /app/target/release/shennong-cli /out/shennong-cli
+COPY --from=builder /app/target/release/shennong-mcp /out/shennong-mcp
+RUN chmod u+w /out/* \
+    && strip --strip-unneeded /out/* \
+    && chmod 755 /out/*
+
 FROM postgres:17-bookworm
 
 ARG VCS_REF=unknown
@@ -38,15 +52,15 @@ RUN apt-get update \
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin shennong
 
-COPY --from=clickhouse /usr/bin/clickhouse /usr/bin/clickhouse
+COPY --from=runtime-binaries /out/clickhouse /usr/bin/clickhouse
 COPY --from=clickhouse /etc/clickhouse-server /etc/clickhouse-server
-COPY --from=seaweedfs /usr/bin/weed /usr/local/bin/weed
-COPY --from=web-builder /usr/local/bin/node /usr/local/bin/node
+COPY --from=runtime-binaries /out/weed /usr/local/bin/weed
+COPY --from=runtime-binaries /out/node /usr/local/bin/node
 COPY --from=web-builder /app/web/.next/standalone /app/web
 COPY --from=web-builder /app/web/.next/static /app/web/.next/static
-COPY --from=builder /app/target/release/shennong-server /usr/local/bin/shennong-server
-COPY --from=builder /app/target/release/shennong-cli /usr/local/bin/shennong-cli
-COPY --from=builder /app/target/release/shennong-mcp /usr/local/bin/shennong-mcp
+COPY --from=runtime-binaries /out/shennong-server /usr/local/bin/shennong-server
+COPY --from=runtime-binaries /out/shennong-cli /usr/local/bin/shennong-cli
+COPY --from=runtime-binaries /out/shennong-mcp /usr/local/bin/shennong-mcp
 COPY providers /app/providers
 COPY seed /app/seed
 COPY docker/entrypoint.sh /usr/local/bin/shennong-entrypoint

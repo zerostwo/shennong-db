@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-15
+
 ### Added
 
 - Add a PostgreSQL-backed Research Graph/BioGraph for Projects, Studies, typed Entities, Activities with explicit inputs, outputs, and actors, immutable Resource revisions, scoped Associations, Evidence, and Resource bindings.
@@ -15,6 +17,7 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - Add a read-only Rust MCP server and versioned ShennongDB skill for agent Resource discovery, gene resolution, bounded queries, Project Context Packs, and Research Graph search.
 - Add a complete current user guide covering first-run setup, WebUI workflows, authentication, data access, uploads, Projects, administration, recovery, and troubleshooting.
 - Add a README architecture diagram covering the public gateway, Rust application layers, agent and operator entry points, query engines, and persistent data paths.
+- Add a Docker Hub-specific README and an automated description-sync workflow so the image page always includes tags, deployment, persistence, health-check, and supply-chain guidance.
 
 ### Changed
 
@@ -24,11 +27,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - Align default and production Compose configuration with the all-in-one image, port `18080`, `.env` substitution, and the optional standalone WebUI development profile.
 - Replace obsolete multi-service production and backup instructions with the current single-volume topology and a consistent full-data restore workflow.
 - Move the ShennongDB Skill to `.agents/skills/shennong-db` for repository-level Codex discovery and document current Codex MCP/Skill installation and use.
+- Generate Docker image tags and OCI labels with Docker Metadata Action: stable releases now publish `MAJOR.MINOR.PATCH`, `latest`, `stable`, and immutable `sha-COMMIT` tags from the same digest.
+- Strip debug and symbol tables from bundled ClickHouse, SeaweedFS, Node.js, and ShennongDB runtime binaries in a disposable build stage to reduce the final image without removing runtime features.
 
 ### Fixed
 
 - Proxy `/metrics` and `/version` through the public WebUI gateway so the documented all-in-one endpoint exposes monitoring and release metadata.
 - Raise the `rmcp` dependency floor to `1.4.0` and refresh the lockfile to a patched 1.x release, resolving the high-severity `RUSTSEC-2026-0189` DNS rebinding advisory reported by `cargo audit`.
+- Validate semantic-version release tags and verify every expected Docker Hub tag after publishing, preventing manual-dispatch ref names or incomplete tag sets from masquerading as successful releases.
 
 ### Removed
 
@@ -177,4 +183,5 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [0.5.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.0
 [0.5.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.1
 [0.5.2]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.2
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.5.2...HEAD
+[0.6.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.6.0
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.6.0...HEAD

@@ -1,6 +1,6 @@
 # ShennongDB user guide
 
-This guide describes the current `0.5.2` all-in-one deployment, WebUI, HTTP API,
+This guide describes the current `0.6.0` all-in-one deployment, WebUI, HTTP API,
 data workflows, administration, and day-two operations. The checked-in
 [`openapi/shennongdb.json`](../openapi/shennongdb.json) remains the field-level
 API contract.
@@ -56,7 +56,7 @@ SHENNONG_JWT_SECRET=<second-random-value>
 SHENNONG_DATA_PATH=/srv/shennong-db/data
 SHENNONG_BIND_ADDRESS=127.0.0.1
 SHENNONG_PORT=18080
-SHENNONG_IMAGE=zerostwo/shennong-db:0.5.2
+SHENNONG_IMAGE=zerostwo/shennong-db:0.6.0
 ```
 
 Bind to `127.0.0.1` when a TLS reverse proxy runs on the same host. Use a LAN

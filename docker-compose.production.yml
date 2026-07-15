@@ -1,6 +1,6 @@
 services:
   shennong-db:
-    image: ${SHENNONG_IMAGE:-zerostwo/shennong-db:0.5.2}
+    image: ${SHENNONG_IMAGE:-zerostwo/shennong-db:0.6.0}
     restart: unless-stopped
     environment:
       SHENNONG_ADMIN_API_KEY: ${SHENNONG_ADMIN_API_KEY:-}

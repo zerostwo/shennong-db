@@ -1,0 +1,33 @@
+name: Update Docker Hub description
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .dockerhub/README.md
+      - .github/workflows/dockerhub-description.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dockerhub-description
+  cancel-in-progress: true
+
+jobs:
+  description:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v7.0.0
+
+      - name: Update Docker Hub overview
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: zerostwo
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: zerostwo/shennong-db
+          short-description: Metadata-first biological data infrastructure with WebUI, API, and agent integrations.
+          readme-filepath: ./.dockerhub/README.md
+          enable-url-completion: true

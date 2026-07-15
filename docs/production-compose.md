@@ -62,7 +62,7 @@ comma-separated `SHENNONG_CORS_ORIGINS` allowlist.
 Use a semantic-version tag or immutable digest:
 
 ```dotenv
-SHENNONG_IMAGE=zerostwo/shennong-db:0.5.2
+SHENNONG_IMAGE=zerostwo/shennong-db:0.6.0
 ```
 
 Record the deployed digest with `docker image inspect`, retain the previous

@@ -1,6 +1,6 @@
 {
   "openapi": "3.1.0",
-  "info": { "title": "ShennongDB API", "version": "0.5.2", "description": "WebUI-facing Rust API contract. All product data is owned by the Rust service and persisted in PostgreSQL or object storage." },
+  "info": { "title": "ShennongDB API", "version": "0.6.0", "description": "WebUI-facing Rust API contract. All product data is owned by the Rust service and persisted in PostgreSQL or object storage." },
   "servers": [{ "url": "/api/v1" }],
   "paths": {
     "/resources": { "get": { "operationId": "listResources", "responses": { "200": { "description": "Visible resources" } } } },
