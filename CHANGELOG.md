@@ -14,6 +14,7 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 - Add reproducible HTTP concurrency, data-access, and browser performance benchmarks with raw results and production/publication measurement guidance.
 - Add a read-only Rust MCP server and versioned ShennongDB skill for agent Resource discovery, gene resolution, bounded queries, Project Context Packs, and Research Graph search.
 - Add a complete current user guide covering first-run setup, WebUI workflows, authentication, data access, uploads, Projects, administration, recovery, and troubleshooting.
+- Add a README architecture diagram covering the public gateway, Rust application layers, agent and operator entry points, query engines, and persistent data paths.
 
 ### Changed
 
@@ -27,6 +28,7 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 ### Fixed
 
 - Proxy `/metrics` and `/version` through the public WebUI gateway so the documented all-in-one endpoint exposes monitoring and release metadata.
+- Raise the `rmcp` dependency floor to `1.4.0` and refresh the lockfile to a patched 1.x release, resolving the high-severity `RUSTSEC-2026-0189` DNS rebinding advisory reported by `cargo audit`.
 
 ### Removed
 
