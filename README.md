@@ -11,6 +11,59 @@ The production image exposes only an internal Rust/Axum API. The former WebUI
 and Pi runtime source trees remain in this checkout as rollback and migration
 references, but are not copied into or started by the V1 image.
 
+## Architecture at a glance
+
+```mermaid
+flowchart LR
+    subgraph DB["ShennongDB container — one persistent /data mount"]
+        API["Axum API<br/>headless allowlist"]
+        API --> CORE["Catalog, graph, ingestion,<br/>revision and audit services"]
+        CORE --> PG[("PostgreSQL<br/>authoritative metadata")]
+        CORE --> S3[("SeaweedFS S3<br/>authoritative objects")]
+        API --> Q["Bounded query planner"]
+        Q --> S3
+        Q --> TD[("TileDB<br/>derived sparse arrays")]
+        Q --> CH[("ClickHouse<br/>replaceable cache")]
+    end
+
+    B["Browser"] -->|"HTTPS, session + CSRF"| OS["Shennong OS<br/>WebUI, identity, Project RBAC"]
+    OS -->|"private network<br/>service key"| API
+    OS -->|"scoped job/session JWT"| RT["Shennong Runtime<br/>isolated execution"]
+    CLI["Operator CLI / read-only MCP"] -.->|"trusted internal access"| API
+```
+
+The solid arrows are production request paths. ShennongDB neither authenticates
+end users nor executes arbitrary analysis code: OS authorizes each operation,
+DB owns governed biomedical data, and Runtime owns isolated computation.
+
+### Authenticated request and data flow
+
+```mermaid
+sequenceDiagram
+    participant U as Browser
+    participant O as Shennong OS
+    participant G as DB profile gate
+    participant A as Axum handler
+    participant P as PostgreSQL
+    participant S as BlobStore / query engines
+
+    U->>O: user request
+    O->>O: authenticate session and enforce Project RBAC
+    O->>G: internal request + X-Shennong-Admin-Key
+    Note over O,G: Upload flows also carry verified actor and Project UUID headers
+    G->>G: enforce exact headless path/method allowlist
+    G->>A: verified service principal
+    A->>P: resolve Resource, revision, graph and provenance state
+    A->>S: stream object or execute a bounded query
+    S-->>A: bytes or bounded result
+    A-->>O: JSON/stream response
+    O-->>U: user-scoped response
+```
+
+See [the current architecture and design contract](docs/architecture.md) for
+state ownership, API boundaries, data lifecycle, failure recovery, and the
+contracts with Shennong OS and Shennong Runtime.
+
 ## Trust boundary
 
 `SHENNONG_DB_PROFILE=headless` is the default. In this profile:

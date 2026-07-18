@@ -1,8 +1,9 @@
 # ShennongDB Architecture Specification
 
 > Historical architecture target for the v0.1.0 rewrite. For the current
-> release surface, use `docs/guide.md`, `openapi/shennongdb.json`, and the
-> checked-in Rust workspace as the sources of truth.
+> release surface, use `docs/architecture.md`, `openapi/shennongdb.json`, the
+> effective headless allowlist, and the checked-in Rust workspace as the
+> sources of truth. `docs/guide.md` documents the retired standalone product.
 
 ## v0.1.0 release boundary
 

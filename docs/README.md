@@ -8,6 +8,9 @@ material. Runtime behavior is defined by the checked-in code and
 
 - [Repository README](../README.md) — current headless boundary, API overview,
   standalone development, and verification.
+- [Architecture and design contract](architecture.md) — current component and
+  state ownership, effective API, data lifecycle, trust boundary, cross-service
+  contracts, failure recovery, and non-goals.
 - [Production topology](production-compose.md) — V1 headless service boundary,
   unified-stack ownership, persistence, and rollback inputs.
 - [Production hardening](production-hardening.md) — regression baseline and
@@ -41,13 +44,15 @@ retired 0.8 standalone product and are not V1 deployment instructions:
 
 ## Design records and evidence
 
-- [Architecture specification](reference/architecture-spec.md) — historical
-  v0.1 rewrite target; not a current API contract.
+- [Historical architecture specification](reference/architecture-spec.md) —
+  v0.1 rewrite target; not a current API or deployment contract.
 - [TileDB backend ADR](adr/0002-tiledb-backend.md)
 - [WebUI visual QA](screenshots/webui/README.md)
 
 ## Archive
 
+- [Unreleased 0.7.0 and 0.8.0 milestones](archive/development-milestones.md) —
+  historical standalone-product work, never published as SemVer releases.
 - [Production hardening implementation prompt](archive/CODEX_PRODUCTION_HARDENING_PROMPT.md)
 - [WebUI implementation brief](archive/SHENNONGDB_WEBUI_BUILD_PROMPT.md)
 

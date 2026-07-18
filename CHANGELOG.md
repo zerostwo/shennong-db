@@ -4,12 +4,27 @@ All notable changes to this project are documented in this file. This project
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/).
 
+Unpublished 0.7.0 and 0.8.0 snapshots are preserved separately in
+[development milestones](docs/archive/development-milestones.md); they are not
+releases.
+
 ## [Unreleased]
 
 ### Added
 
 - Allow the headless image to wait for the OS-generated service key in a shared
   `SHENNONG_CONFIG_DIR`, enabling the three-container auto-init deployment.
+- Add a main-branch Docker publication workflow that emits `main`, `latest`,
+  and immutable SHA tags with SBOM and provenance, then verifies the published
+  digest.
+
+### Changed
+
+- Document the current headless V1 architecture with reader-facing Mermaid
+  component, trust-boundary, request, and data-lifecycle views; add a detailed
+  design contract, repository agent guide, and current CodeGraph workflow.
+- Move the unreleased 0.7.0 and 0.8.0 development milestones to a historical
+  note outside the SemVer release sequence and use compare links for releases.
 
 ## [1.0.0] - 2026-07-18
 
@@ -77,95 +92,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 - Make backup/restore helpers accept the unified deployment environment file,
   record the V1 DB image by default, and use headless verification language.
-
-## 0.8.0 development milestone - 2026-07-15 (not released)
-
-### Added
-
-- Add the bundled Pi Agent runtime as a loopback-only all-in-one service. It
-  receives ephemeral provider credentials from the Rust authorization
-  boundary, exposes no host port, has no shell or file-system tools, and sends
-  governed data operations back through ShennongDB.
-- Add provider connection discovery so a user supplies only the provider and
-  API key, then chooses from the models and capability hints returned by
-  DeepSeek, OpenAI, Ollama, or an OpenAI-compatible endpoint.
-- Add persisted reasoning content and aggregate token usage for Agent turns,
-  reasoning-effort controls for capable models, and rendered Markdown with
-  GitHub-flavored tables, lists, and code blocks in Chat.
-- Add built-in, user-authored, and generated Agent Skills with immutable
-  revisions and explicit per-thread activation. Generated Skills start as
-  drafts and cannot add code, shell, or network capabilities.
-- Add per-user global Memory and Project-scoped Memory with immutable revisions,
-  plus Project-bound Chat threads that receive only the caller's authorized
-  Project Context Pack.
-- Add a governed `compare_expression` tool for complete tumor-versus-normal
-  descriptive summaries, including exact gene resolution, group counts, mean
-  and median differences, citations, and an explicit no-significance-test
-  boundary.
-- Add optional systemd socket-proxy units that expose a loopback-only host
-  Ollama service only on the Docker bridge address required by the container.
-
-### Changed
-
-- Route Agent model execution through the Pi SDK runtime while keeping
-  authentication, provider-secret encryption, Project membership, Resource
-  authorization, tool budgets, writes, and audit ownership in the Rust service.
-- Expand the governed tool protocol to inspect declared Resource operations,
-  resolve exact versioned feature identifiers server-side, retain completed
-  tool events on failed turns, and allow a final evidence-based answer when the
-  bounded tool budget is reached.
-- Open Settings through hash routes such as `/#settings/Account`, preserving the
-  active Chat or Project workspace behind the dialog instead of navigating to a
-  separate settings page.
-- Make Resources the public database layer and Projects the isolated research
-  layer, with each Project carrying its own chats, bound data, Context Pack, and
-  Memory.
-
-### Fixed
-
-- Fix the YTHDF2 colon-cancer question path that could exhaust the Agent step
-  limit after invalid expression operation names or unversioned feature IDs.
-- Preserve DeepSeek reasoning content across tool-call rounds, surface provider
-  and tool failures with their completed diagnostic events, and aggregate
-  prompt, completion, reasoning, cache, and total token counts for the
-  conversation turn.
-- Restrict Ollama discovery to the approved local endpoint and annotate
-  discovered models with their actual tool and thinking capabilities so
-  completion-only models are not presented as governed tool-capable Agents.
-- Isolate the Pi runtime from administrator, JWT, database, object-storage, and
-  credential-encryption secrets; replace user sessions in tool callbacks with
-  short-lived run capabilities that bind authorization context and reject
-  replayed tool calls.
-- Fail closed instead of replaying write-enabled runs after ambiguous Pi
-  transport failures, and pin Provider connections to freshly validated public
-  addresses while rejecting redirects and requests outside the configured base
-  URL.
-- Lock governed tools in code while Pi is recovering a missing final answer,
-  and replace any residual tool-call markup instead of displaying an
-  unexecuted request or allowing a second write.
-
-## 0.7.0 development milestone - 2026-07-15 (not released)
-
-### Added
-
-- Add an Agent-first ChatGPT-style WebUI with persistent conversations, centered workspace Search, Resources, Projects, My Data, Settings, and a five-destination administrator center with first-class User Management.
-- Add ordinary user registration controlled by the instance registration policy while retaining first-run administrator setup and existing sign-in and 2FA flows.
-- Add encrypted per-user OpenAI, DeepSeek, Ollama, and OpenAI-compatible model connections with connection testing, model discovery, rate limits, concurrency limits, and an explicit public-only or private-data policy.
-- Add permission-checked Agent tools for Resource discovery, inspection, bounded queries, gene resolution, citations, uploaded-file metadata inspection, private raw Resource registration, and administrator-approved curated Provider installation.
-- Add PostgreSQL-backed chat threads, messages, tool events, model-provider records, and a durable upload staging area.
-
-### Changed
-
-- Make Agent Chat the default product screen and rename the catalog-facing navigation to Resources while preserving the existing governed Resource and Project workflows.
-- Archive the exact v0.6.0 WebUI under `web-archive/v0.6.0` and move the active application to the independent `webui` source tree.
-- Reduce the normal deployment configuration to the image, data path, bind address, port, and optional outbound proxy; generate runtime secrets inside the persistent data volume on first start.
-- Treat uploaded Agent attachments as metadata-and-raw-registration inputs only; scientific normalization and arbitrary model-directed downloads remain outside this release boundary.
-
-### Fixed
-
-- Prevent private Resource metadata and attachments from reaching external models unless the user explicitly enables private-data access for that model connection.
-- Restrict local Ollama connections to the expected local endpoint, reject unsafe remote provider addresses, redact sensitive tool-result fields, and keep Agent runs outside the short ordinary-request timeout.
-- Keep anonymous Search limited to public Resources and prevent ordinary registration from creating privileged roles.
 
 ## [0.6.0] - 2026-07-15
 
@@ -345,5 +271,5 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [0.5.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.1
 [0.5.2]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.2
 [0.6.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.6.0
-[1.0.0]: https://github.com/zerostwo/shennong-db/tree/v1.0.0
+[1.0.0]: https://github.com/zerostwo/shennong-db/compare/v0.6.0...v1.0.0
 [Unreleased]: https://github.com/zerostwo/shennong-db/compare/v1.0.0...HEAD
