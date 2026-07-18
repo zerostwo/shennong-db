@@ -6,6 +6,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ## [Unreleased]
 
+### Added
+
+- Allow the headless image to wait for the OS-generated service key in a shared
+  `SHENNONG_CONFIG_DIR`, enabling the three-container auto-init deployment.
+
 ## [1.0.0] - 2026-07-18
 
 ### Added

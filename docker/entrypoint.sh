@@ -38,6 +38,19 @@ if ! grep -q '^SHENNONG_DEFAULT_S3_SECRET=' "$secret_file"; then
   printf 'SHENNONG_DEFAULT_S3_SECRET=%s\n' "$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 64)" >> "$secret_file"
 fi
 . "$secret_file"
+if [ -z "${SHENNONG_ADMIN_API_KEY:-}" ] && [ -z "${SHENNONG_ADMIN_API_KEY_FILE:-}" ] && [ -n "${SHENNONG_CONFIG_DIR:-}" ]; then
+  SHENNONG_ADMIN_API_KEY_FILE="$SHENNONG_CONFIG_DIR/db-admin-key"
+  attempts=0
+  while [ ! -s "$SHENNONG_ADMIN_API_KEY_FILE" ]; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 120 ]; then
+      echo "Shennong OS did not initialize $SHENNONG_ADMIN_API_KEY_FILE" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  export SHENNONG_ADMIN_API_KEY_FILE
+fi
 if [ -n "${SHENNONG_ADMIN_API_KEY:-}" ] && [ -n "${SHENNONG_ADMIN_API_KEY_FILE:-}" ]; then
   echo "set only one of SHENNONG_ADMIN_API_KEY or SHENNONG_ADMIN_API_KEY_FILE" >&2
   exit 1
