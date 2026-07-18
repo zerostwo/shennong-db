@@ -4,11 +4,12 @@ set -eu
 compose=${COMPOSE_FILE:-docker-compose.production.yml}
 service=${SHENNONG_SERVICE:-shennong-db}
 backup=${1:?usage: restore-production.sh BACKUP_DIR}
+environment_file=${SHENNONG_ENV_FILE:-.env}
 
-if [ -f .env ]; then
+if [ -f "$environment_file" ]; then
   set -a
   # shellcheck disable=SC1091
-  . ./.env
+  . "$environment_file"
   set +a
 fi
 data=${SHENNONG_DATA_PATH:-./data}
@@ -38,4 +39,4 @@ fi
 mkdir -p "$data"
 tar --acls --xattrs --numeric-owner -C "$data" -xpf "$backup/data.tar"
 docker compose -f "$compose" up -d "$service"
-echo "restore complete; verify health, authentication, catalog, objects, and queries"
+echo "restore complete; verify health, service authorization, Resources, objects, and queries"

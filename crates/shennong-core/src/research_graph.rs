@@ -63,6 +63,29 @@ impl ResourceRepository {
         Ok(project)
     }
 
+    /// Mirrors the Shennong OS Project boundary into the headless data plane.
+    ///
+    /// Shennong OS remains authoritative for identity and Project RBAC. The
+    /// owner is therefore stored as an opaque OS identifier, and this method
+    /// deliberately does not create DB-local users or `project_members` rows.
+    pub async fn sync_external_project(
+        &self,
+        value: &ProjectUpsert,
+    ) -> Result<Project, sqlx::Error> {
+        sqlx::query_as(
+            "INSERT INTO projects (id,name,description,owner_user_id,visibility,status,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,owner_user_id=EXCLUDED.owner_user_id,visibility=EXCLUDED.visibility,status=EXCLUDED.status,metadata=EXCLUDED.metadata,updated_at=CASE WHEN (projects.name,projects.description,projects.owner_user_id,projects.visibility,projects.status,projects.metadata) IS DISTINCT FROM (EXCLUDED.name,EXCLUDED.description,EXCLUDED.owner_user_id,EXCLUDED.visibility,EXCLUDED.status,EXCLUDED.metadata) THEN NOW() ELSE projects.updated_at END RETURNING id,name,description,owner_user_id,visibility,status,metadata,created_at,updated_at",
+        )
+        .bind(&value.id)
+        .bind(&value.name)
+        .bind(&value.description)
+        .bind(&value.owner_user_id)
+        .bind(&value.visibility)
+        .bind(&value.status)
+        .bind(&value.metadata)
+        .fetch_one(&self.pool)
+        .await
+    }
+
     pub async fn update_project(&self, value: &ProjectUpsert) -> Result<Project, sqlx::Error> {
         sqlx::query_as(
             "UPDATE projects SET name=$2,description=$3,visibility=$4,status=$5,metadata=$6,updated_at=NOW() WHERE id=$1 AND owner_user_id=$7 RETURNING id,name,description,owner_user_id,visibility,status,metadata,created_at,updated_at",
@@ -273,14 +296,19 @@ mod tests {
     use super::{MAX_RESEARCH_GRAPH_DEPTH, MAX_RESEARCH_GRAPH_LIMIT, ResourceRepository};
     use serde_json::json;
     use shennong_schema::{
-        ActivityActorUpsert, ActivityIoUpsert, ActivityUpsert, AssociationEvidenceUpsert,
-        EvidenceItemCreate, GraphAssociationUpsert, ProjectResourceBindingUpsert, ProjectUpsert,
-        ResearchEntityUpsert, ResourceGraphBindingUpsert, ResourcePermissions,
-        ResourceRevisionCreate, ResourceUpsert, StudyUpsert, UserUpsert,
+        ActivityActorUpsert, ActivityIoUpsert, ActivityUpsert, ArtifactUpsert,
+        AssociationEvidenceUpsert, EvidenceItemCreate, GraphAssociationUpsert,
+        ProjectResourceBindingUpsert, ProjectUpsert, ResearchEntityUpsert,
+        ResourceGraphBindingUpsert, ResourcePermissions, ResourceRevisionCreate, ResourceUpsert,
+        StudyUpsert, UserUpsert,
     };
     use uuid::Uuid;
 
     const MIGRATION: &str = include_str!("../migrations/0012_research_graph.sql");
+    const OS_PROJECT_BOUNDARY_MIGRATION: &str =
+        include_str!("../migrations/0016_os_project_boundary.sql");
+    const V1_PROVENANCE_INTEGRITY_MIGRATION: &str =
+        include_str!("../migrations/0018_v1_provenance_integrity.sql");
 
     #[test]
     fn migration_contains_graph_integrity_and_access_indexes() {
@@ -298,6 +326,41 @@ mod tests {
             assert!(MIGRATION.contains(required), "missing {required}");
         }
         assert!(!MIGRATION.contains("metadata::text"));
+    }
+
+    #[test]
+    fn os_project_boundary_migration_removes_db_user_foreign_key() {
+        assert!(
+            OS_PROJECT_BOUNDARY_MIGRATION
+                .contains("DROP CONSTRAINT IF EXISTS projects_owner_user_id_fkey")
+        );
+        assert!(OS_PROJECT_BOUNDARY_MIGRATION.contains("Opaque Shennong OS user identifier"));
+        assert!(!OS_PROJECT_BOUNDARY_MIGRATION.contains("CREATE TABLE users"));
+    }
+
+    #[test]
+    fn v1_migration_enforces_linear_revisions_and_artifact_lineage() {
+        for required in [
+            "resource_revisions_linear_history",
+            "the first resource revision cannot have a parent",
+            "the preceding resource revision is missing",
+            "resource revision parent must be the preceding revision",
+            "artifacts_provenance_integrity",
+            "artifact lineage reference does not exist",
+            "artifact lineage parents must be immutable",
+            "FOR KEY SHARE",
+            "immutable artifacts cannot be changed",
+            "CREATE INDEX ix_artifacts_derived_from_gin",
+            "ON artifacts USING GIN (derived_from)",
+            "artifacts_delete_integrity",
+            "immutable artifacts cannot be deleted",
+            "artifacts referenced by lineage cannot be deleted",
+        ] {
+            assert!(
+                V1_PROVENANCE_INTEGRITY_MIGRATION.contains(required),
+                "missing {required}"
+            );
+        }
     }
 
     #[test]
@@ -330,6 +393,42 @@ mod tests {
         };
         let repository = ResourceRepository::connect(&database_url).await.unwrap();
         repository.migrate().await.unwrap();
+
+        let external_project_id = format!("external-project-{suffix}");
+        let external_owner_id = format!("os-user-{suffix}");
+        let external_project = ProjectUpsert {
+            id: external_project_id.clone(),
+            name: "OS Project".into(),
+            description: "headless shadow".into(),
+            owner_user_id: external_owner_id.clone(),
+            visibility: "private".into(),
+            status: "active".into(),
+            metadata: json!({"authority":"shennong-os"}),
+        };
+        let first_sync = repository
+            .sync_external_project(&external_project)
+            .await
+            .unwrap();
+        let second_sync = repository
+            .sync_external_project(&ProjectUpsert {
+                name: "Renamed OS Project".into(),
+                visibility: "public".into(),
+                ..external_project
+            })
+            .await
+            .unwrap();
+        assert_eq!(first_sync.id, second_sync.id);
+        assert_eq!(second_sync.name, "Renamed OS Project");
+        assert_eq!(second_sync.owner_user_id, external_owner_id);
+        assert_eq!(second_sync.visibility, "public");
+        let external_members: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM project_members WHERE project_id=$1")
+                .bind(&external_project_id)
+                .fetch_one(&repository.pool)
+                .await
+                .unwrap();
+        assert_eq!(external_members, 0);
+
         let user_id = format!("user-{suffix}");
         repository
             .upsert_user(&UserUpsert {
@@ -464,8 +563,24 @@ mod tests {
             })
             .await
             .unwrap();
-        let revision_id = format!("revision-{suffix}");
-        repository
+        let revision_id = format!("revision-one-{suffix}");
+        assert!(
+            repository
+                .create_resource_revision(&ResourceRevisionCreate {
+                    id: format!("revision-one-with-parent-{suffix}"),
+                    resource_id: resource_id.clone(),
+                    revision: 1,
+                    parent_revision_id: Some(format!("impossible-parent-{suffix}")),
+                    content_sha256: Some("a".repeat(64)),
+                    metadata: json!({}),
+                    spec: json!({}),
+                    provenance: json!({}),
+                    created_by: Some(user_id.clone()),
+                })
+                .await
+                .is_err()
+        );
+        let revision_one = repository
             .create_resource_revision(&ResourceRevisionCreate {
                 id: revision_id.clone(),
                 resource_id: resource_id.clone(),
@@ -479,6 +594,98 @@ mod tests {
             })
             .await
             .unwrap();
+        assert_eq!(revision_one.revision, 1);
+        assert_eq!(revision_one.parent_revision_id, None);
+        assert_eq!(revision_one.content_sha256, Some("a".repeat(64)));
+        assert_eq!(
+            repository
+                .get_resource_revision(&resource_id, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            revision_id
+        );
+
+        let revision_two_id = format!("revision-two-{suffix}");
+        let revision_two = repository
+            .create_resource_revision(&ResourceRevisionCreate {
+                id: revision_two_id.clone(),
+                resource_id: resource_id.clone(),
+                revision: 2,
+                parent_revision_id: Some(revision_id.clone()),
+                content_sha256: Some("b".repeat(64)),
+                metadata: json!({"stage":"normalized"}),
+                spec: json!({"format":"parquet"}),
+                provenance: json!({"pipeline":"fixture","version":"1"}),
+                created_by: Some(user_id.clone()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            revision_two.parent_revision_id.as_deref(),
+            Some(revision_id.as_str())
+        );
+        let revisions = repository
+            .list_resource_revisions(&resource_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            revisions
+                .iter()
+                .map(|revision| revision.revision)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+
+        assert!(
+            repository
+                .create_resource_revision(&ResourceRevisionCreate {
+                    id: format!("revision-gap-{suffix}"),
+                    resource_id: resource_id.clone(),
+                    revision: 4,
+                    parent_revision_id: Some(revision_two_id.clone()),
+                    content_sha256: Some("c".repeat(64)),
+                    metadata: json!({}),
+                    spec: json!({}),
+                    provenance: json!({}),
+                    created_by: Some(user_id.clone()),
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            repository
+                .create_resource_revision(&ResourceRevisionCreate {
+                    id: format!("revision-wrong-parent-{suffix}"),
+                    resource_id: resource_id.clone(),
+                    revision: 3,
+                    parent_revision_id: Some(revision_id.clone()),
+                    content_sha256: Some("c".repeat(64)),
+                    metadata: json!({}),
+                    spec: json!({}),
+                    provenance: json!({}),
+                    created_by: Some(user_id.clone()),
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            repository
+                .create_resource_revision(&ResourceRevisionCreate {
+                    id: format!("revision-two-duplicate-{suffix}"),
+                    resource_id: resource_id.clone(),
+                    revision: 2,
+                    parent_revision_id: Some(revision_id.clone()),
+                    content_sha256: Some("b".repeat(64)),
+                    metadata: json!({}),
+                    spec: json!({}),
+                    provenance: json!({}),
+                    created_by: Some(user_id.clone()),
+                })
+                .await
+                .is_err()
+        );
         repository
             .bind_project_resource(&ProjectResourceBindingUpsert {
                 project_id: project_id.clone(),
@@ -493,7 +700,7 @@ mod tests {
                 resource_id: resource_id.clone(),
                 entity_id: result_id.clone(),
                 role: "primary".into(),
-                revision_id: Some(revision_id.clone()),
+                revision_id: Some(revision_two_id.clone()),
             })
             .await
             .unwrap();
@@ -560,11 +767,244 @@ mod tests {
             })
             .await
             .unwrap();
+
+        let raw_artifact_id = format!("raw-artifact-{suffix}");
+        let raw_sha256 = "d".repeat(64);
+        let raw_artifact = ArtifactUpsert {
+            id: raw_artifact_id.clone(),
+            resource_id: resource_id.clone(),
+            uri: "/data/fixture.raw.tsv".into(),
+            format: "tsv".into(),
+            size: Some(42),
+            checksum: Some(format!("sha256:{raw_sha256}")),
+            storage_backend: "local".into(),
+            data_class: "raw".into(),
+            immutable: true,
+            content_sha256: Some(raw_sha256.clone()),
+            source_uri: Some("https://example.test/fixture.raw.tsv".into()),
+            derived_from: json!([]),
+            pipeline_version: None,
+            retention_policy: Some("retain".into()),
+            storage_uri: Some("/data/fixture.raw.tsv".into()),
+            schema_json: json!({"role":"raw"}),
+            provenance: json!({"source":"integration-test","integrity_status":"verified"}),
+        };
+        let stored_raw = repository.upsert_artifact(&raw_artifact).await.unwrap();
+        assert_eq!(stored_raw.checksum, raw_artifact.checksum);
+        assert_eq!(stored_raw.content_sha256, Some(raw_sha256));
+        assert_eq!(stored_raw.provenance, raw_artifact.provenance);
+
+        let derived_artifact_id = format!("derived-artifact-{suffix}");
+        let derived_artifact = ArtifactUpsert {
+            id: derived_artifact_id.clone(),
+            resource_id: resource_id.clone(),
+            uri: "/data/fixture.normalized.parquet".into(),
+            format: "parquet".into(),
+            size: Some(21),
+            checksum: Some("e".repeat(64)),
+            storage_backend: "local".into(),
+            data_class: "derived".into(),
+            immutable: true,
+            content_sha256: Some("e".repeat(64)),
+            source_uri: Some("/data/fixture.raw.tsv".into()),
+            derived_from: json!([raw_artifact_id.clone()]),
+            pipeline_version: Some("normalize-v1".into()),
+            retention_policy: Some("retain".into()),
+            storage_uri: Some("/data/fixture.normalized.parquet".into()),
+            schema_json: json!({"role":"normalized"}),
+            provenance: json!({"activity_id":activity_id,"software":"fixture-normalizer"}),
+        };
+        repository.upsert_artifact(&derived_artifact).await.unwrap();
+        let stored_derived = repository
+            .get_artifact(&derived_artifact_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_derived.derived_from, derived_artifact.derived_from);
+        assert_eq!(stored_derived.provenance, derived_artifact.provenance);
+        assert_eq!(
+            repository.list_artifacts(&resource_id).await.unwrap().len(),
+            2
+        );
+
+        let mut missing_lineage = derived_artifact.clone();
+        missing_lineage.id = format!("missing-lineage-{suffix}");
+        missing_lineage.derived_from = json!([format!("missing-artifact-{suffix}")]);
+        assert!(repository.upsert_artifact(&missing_lineage).await.is_err());
+
+        let mut self_lineage = derived_artifact.clone();
+        self_lineage.id = format!("self-lineage-{suffix}");
+        self_lineage.derived_from = json!([self_lineage.id.clone()]);
+        assert!(repository.upsert_artifact(&self_lineage).await.is_err());
+
+        let mut invalid_lineage_shape = derived_artifact.clone();
+        invalid_lineage_shape.id = format!("invalid-lineage-shape-{suffix}");
+        invalid_lineage_shape.derived_from = json!([42]);
+        assert!(
+            repository
+                .upsert_artifact(&invalid_lineage_shape)
+                .await
+                .is_err()
+        );
+
+        let mutable_parent_id = format!("mutable-parent-{suffix}");
+        repository
+            .upsert_artifact(&ArtifactUpsert {
+                id: mutable_parent_id.clone(),
+                resource_id: resource_id.clone(),
+                uri: "/data/mutable.tmp".into(),
+                format: "tmp".into(),
+                size: None,
+                checksum: None,
+                storage_backend: "local".into(),
+                data_class: "staging".into(),
+                immutable: false,
+                content_sha256: None,
+                source_uri: None,
+                derived_from: json!([]),
+                pipeline_version: None,
+                retention_policy: Some("ephemeral".into()),
+                storage_uri: Some("/data/mutable.tmp".into()),
+                schema_json: json!({}),
+                provenance: json!({"purpose":"staging"}),
+            })
+            .await
+            .unwrap();
+        let mut mutable_parent_lineage = derived_artifact.clone();
+        mutable_parent_lineage.id = format!("mutable-parent-lineage-{suffix}");
+        mutable_parent_lineage.derived_from = json!([mutable_parent_id.clone()]);
+        assert!(
+            repository
+                .upsert_artifact(&mutable_parent_lineage)
+                .await
+                .is_err()
+        );
+
+        // Existing installations may contain mutable lineage created before
+        // migration 0018. Simulate that legacy row inside a transaction, then
+        // prove the new DELETE trigger preserves its referenced parent while
+        // still allowing cleanup once the lineage edge is gone.
+        let legacy_child_id = format!("legacy-mutable-child-{suffix}");
+        let mut legacy_tx = repository.pool.begin().await.unwrap();
+        sqlx::query("ALTER TABLE artifacts DISABLE TRIGGER artifacts_provenance_integrity")
+            .execute(&mut *legacy_tx)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO artifacts (id,resource_id,uri,format,storage_backend,data_class,immutable,derived_from,schema_json,provenance) VALUES ($1,$2,$3,'tmp','local','derived',FALSE,$4,'{}'::jsonb,'{}'::jsonb)")
+            .bind(&legacy_child_id)
+            .bind(&resource_id)
+            .bind("/data/legacy-child.tmp")
+            .bind(json!([mutable_parent_id.clone()]))
+            .execute(&mut *legacy_tx)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE artifacts ENABLE TRIGGER artifacts_provenance_integrity")
+            .execute(&mut *legacy_tx)
+            .await
+            .unwrap();
+        legacy_tx.commit().await.unwrap();
+
+        let referenced_mutable_delete = sqlx::query("DELETE FROM artifacts WHERE id=$1")
+            .bind(&mutable_parent_id)
+            .execute(&repository.pool)
+            .await;
+        assert!(referenced_mutable_delete.is_err());
+        sqlx::query("DELETE FROM artifacts WHERE id=$1")
+            .bind(&legacy_child_id)
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM artifacts WHERE id=$1")
+            .bind(&mutable_parent_id)
+            .execute(&repository.pool)
+            .await
+            .unwrap();
+
+        let mut tampered_raw = raw_artifact.clone();
+        tampered_raw.provenance = json!({"source":"tampered"});
+        assert!(repository.upsert_artifact(&tampered_raw).await.is_err());
+
+        let other_resource_id = format!("other-resource-{suffix}");
+        repository
+            .upsert_resource(&ResourceUpsert {
+                id: other_resource_id.clone(),
+                kind: "Dataset".into(),
+                metadata: json!({"title":"Other project data"}),
+                spec: json!({}),
+                status: "registered".into(),
+                provenance: json!({}),
+                permissions: ResourcePermissions::default(),
+            })
+            .await
+            .unwrap();
+        repository
+            .bind_project_resource(&ProjectResourceBindingUpsert {
+                project_id: other_project_id.clone(),
+                resource_id: other_resource_id.clone(),
+                role: "input".into(),
+                added_by: Some(user_id.clone()),
+            })
+            .await
+            .unwrap();
+        let other_raw_artifact_id = format!("other-raw-artifact-{suffix}");
+        repository
+            .upsert_artifact(&ArtifactUpsert {
+                id: other_raw_artifact_id.clone(),
+                resource_id: other_resource_id,
+                uri: "/data/other.raw.tsv".into(),
+                format: "tsv".into(),
+                size: Some(9),
+                checksum: Some("f".repeat(64)),
+                storage_backend: "local".into(),
+                data_class: "raw".into(),
+                immutable: true,
+                content_sha256: Some("f".repeat(64)),
+                source_uri: None,
+                derived_from: json!([]),
+                pipeline_version: None,
+                retention_policy: Some("retain".into()),
+                storage_uri: Some("/data/other.raw.tsv".into()),
+                schema_json: json!({}),
+                provenance: json!({"project":other_project_id.clone()}),
+            })
+            .await
+            .unwrap();
+        let mut cross_resource_lineage = derived_artifact.clone();
+        cross_resource_lineage.id = format!("cross-resource-lineage-{suffix}");
+        cross_resource_lineage.derived_from = json!([other_raw_artifact_id.clone()]);
+        let stored_cross_resource = repository
+            .upsert_artifact(&cross_resource_lineage)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_cross_resource.derived_from,
+            json!([other_raw_artifact_id])
+        );
+
+        let visible_in_project: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifacts a JOIN project_resource_bindings b ON b.resource_id=a.resource_id WHERE a.id=$1 AND b.project_id=$2",
+        )
+        .bind(&derived_artifact_id)
+        .bind(&project_id)
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        let visible_cross_project: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifacts a JOIN project_resource_bindings b ON b.resource_id=a.resource_id WHERE a.id=$1 AND b.project_id=$2",
+        )
+        .bind(&derived_artifact_id)
+        .bind(&other_project_id)
+        .fetch_one(&repository.pool)
+        .await
+        .unwrap();
+        assert_eq!(visible_in_project, 1);
+        assert_eq!(visible_cross_project, 0);
+
         let foreign_evidence_id = format!("foreign-evidence-{suffix}");
         repository
             .create_evidence_item(&EvidenceItemCreate {
                 id: foreign_evidence_id.clone(),
-                project_id: Some(other_project_id),
+                project_id: Some(other_project_id.clone()),
                 evidence_type: "analysis".into(),
                 source_uri: None,
                 source_id: Some("foreign".into()),
@@ -609,6 +1049,16 @@ mod tests {
                 .execute(&repository.pool)
                 .await;
         assert!(immutable.is_err());
+        let immutable_delete = sqlx::query("DELETE FROM resource_revisions WHERE id=$1")
+            .bind(&revision_id)
+            .execute(&repository.pool)
+            .await;
+        assert!(immutable_delete.is_err());
+        let immutable_artifact_delete = sqlx::query("DELETE FROM artifacts WHERE id=$1")
+            .bind(&raw_artifact_id)
+            .execute(&repository.pool)
+            .await;
+        assert!(immutable_artifact_delete.is_err());
         assert!(
             repository
                 .research_subgraph(&subject_id, 4, 10)

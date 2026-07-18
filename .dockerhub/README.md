@@ -1,69 +1,66 @@
 # ShennongDB
 
-ShennongDB is a metadata-first biological data infrastructure service. The
-all-in-one image includes the Next.js WebUI and gateway, Rust API, PostgreSQL,
-SeaweedFS object storage, a ClickHouse query cache, and TileDB-backed arrays.
+ShennongDB `1.0.0` is the headless biomedical data plane for the Shennong V1
+platform. It stores Resource metadata, immutable revisions, Artifacts,
+Relations, Research Graph records, bounded query data, and provenance. Identity,
+Project RBAC, Chat, Memory, providers, Skills, Agent orchestration, and the
+browser UI belong to Shennong OS.
+
+The image contains the internal Rust API plus PostgreSQL, SeaweedFS,
+ClickHouse, and TileDB services behind container port `8000`. `/data` is its
+only persistent mount. The production image does not build or start the legacy
+ShennongDB WebUI or Pi runtime.
 
 ## Tags
 
-- `latest` and `stable`: newest stable semantic-version release.
-- `MAJOR.MINOR.PATCH` (for example, `0.6.0`): immutable release tag.
-- `sha-COMMIT`: immutable source revision tag.
+- `latest` and `stable`: newest stable semantic-version release;
+- `MAJOR.MINOR.PATCH` (for example, `1.0.0`): release tag;
+- `sha-COMMIT`: immutable source-revision tag.
 
-For production, pin a semantic-version tag or image digest. `latest` is useful
-for evaluation but is not a rollback strategy.
+Resolve and deploy the image digest rather than relying on a mutable tag. Keep
+the previous digest and matching data snapshot for rollback.
 
-## Quick start
+## Deployment
+
+The supported V1 production path is the unified Shennong stack documented by
+the [Shennong OS deployment guide](https://github.com/zerostwo/shennong-os/blob/v1.0.0/deploy/README.md).
+It runs ShennongDB on a private control network with
+`SHENNONG_DB_PROFILE=headless`, mounts a deployment service key as a read-only
+secret file, and publishes no DB host port.
+
+The repository's `docker-compose.production.yml` is a loopback-only standalone
+diagnostic profile. It is useful for DB maintenance and contract testing, but
+is not a browser product:
 
 ```bash
-mkdir shennong-db && cd shennong-db
-curl -O https://raw.githubusercontent.com/zerostwo/shennong-db/main/docker-compose.production.yml
-curl -O https://raw.githubusercontent.com/zerostwo/shennong-db/main/.env.example
+curl -fsSLO https://raw.githubusercontent.com/zerostwo/shennong-db/v1.0.0/docker-compose.production.yml
+curl -fsSLO https://raw.githubusercontent.com/zerostwo/shennong-db/v1.0.0/.env.example
 cp .env.example .env
-# Replace both placeholder secrets in .env before starting.
-docker compose -f docker-compose.production.yml pull
-docker compose -f docker-compose.production.yml up -d
+docker compose --file docker-compose.production.yml config --quiet
+docker compose --file docker-compose.production.yml up --detach --wait
+curl --fail --silent --show-error http://127.0.0.1:18080/healthz
+curl --fail --silent --show-error http://127.0.0.1:18080/version
 ```
 
-The default endpoint is `http://127.0.0.1:18080`. Useful checks:
-
-```bash
-curl http://127.0.0.1:18080/health
-curl http://127.0.0.1:18080/healthz
-curl http://127.0.0.1:18080/version
-```
-
-All persistent state is stored below the single `/data` mount. The image
-declares `/data` as a volume and publishes container port `8000`.
-
-## Docker run
-
-Compose is recommended because it makes the persistent mount and security
-settings explicit. A minimal direct run is:
-
-```bash
-docker volume create shennong-data
-docker run -d --name shennong-db \
-  -p 127.0.0.1:18080:8000 \
-  -v shennong-data:/data \
-  -e SHENNONG_ADMIN_API_KEY="$(openssl rand -hex 32)" \
-  -e SHENNONG_JWT_SECRET="$(openssl rand -hex 32)" \
-  zerostwo/shennong-db:stable
-```
+Every data-plane request requires `X-Shennong-Admin-Key`; health and version
+checks are the only intended unauthenticated operations. Do not publish the
+standalone port or place the service key in browser code, URLs, logs, or shell
+history.
 
 ## Supply-chain metadata
 
 Release images include OCI source, revision, version, title, and description
-labels. The release workflow also publishes BuildKit provenance and SBOM
+labels. The release workflow publishes BuildKit provenance and SBOM
 attestations, uploads an SPDX SBOM artifact, and signs the image digest with
 Cosign keyless signing.
 
 ## Documentation and source
 
-- [Source and full documentation](https://github.com/zerostwo/shennong-db)
-- [User guide](https://github.com/zerostwo/shennong-db/blob/main/docs/guide.md)
-- [Production deployment](https://github.com/zerostwo/shennong-db/blob/main/docs/production-compose.md)
-- [Backup and recovery](https://github.com/zerostwo/shennong-db/blob/main/docs/backup-recovery.md)
-- [Agent integrations](https://github.com/zerostwo/shennong-db/blob/main/docs/agent-integrations.md)
+- [Source and current boundary](https://github.com/zerostwo/shennong-db/tree/v1.0.0)
+- [Headless production topology](https://github.com/zerostwo/shennong-db/blob/v1.0.0/docs/production-compose.md)
+- [Production verification](https://github.com/zerostwo/shennong-db/blob/v1.0.0/docs/production-hardening.md)
+- [Backup and recovery](https://github.com/zerostwo/shennong-db/blob/v1.0.0/docs/backup-recovery.md)
+- [OpenAPI contract](https://github.com/zerostwo/shennong-db/blob/v1.0.0/openapi/shennongdb.json)
 
-ShennongDB is released under the MIT License.
+ShennongDB is distributed under the
+[MIT License](https://github.com/zerostwo/shennong-db/blob/v1.0.0/LICENSE).

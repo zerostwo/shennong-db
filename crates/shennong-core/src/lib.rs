@@ -22,6 +22,7 @@ use tokio::{
 use uuid::Uuid;
 
 mod agent;
+mod agent_context;
 mod research_graph;
 mod web;
 pub use agent::ModelProviderRecord;
@@ -1323,9 +1324,21 @@ impl ResourceRepository {
         &self,
         search: Option<&str>,
         include_private: bool,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<Resource>, sqlx::Error> {
-        sqlx::query_as("SELECT id, kind, metadata, spec, status, provenance, permissions, created_at, updated_at FROM resources WHERE ($1::text IS NULL OR to_tsvector('simple', id || ' ' || kind || ' ' || metadata::text) @@ websearch_to_tsquery('simple', $1)) AND ($2 OR permissions->>'visibility' = 'public') ORDER BY id")
-            .bind(search).bind(include_private).fetch_all(&self.pool).await
+        if !(1..=500).contains(&limit) {
+            return Err(sqlx::Error::Protocol(
+                "resource list limit must be between 1 and 500".into(),
+            ));
+        }
+        if !(0..=1_000_000).contains(&offset) {
+            return Err(sqlx::Error::Protocol(
+                "resource list offset must be between 0 and 1000000".into(),
+            ));
+        }
+        sqlx::query_as("SELECT id, kind, metadata, spec, status, provenance, permissions, created_at, updated_at FROM resources WHERE ($1::text IS NULL OR to_tsvector('simple', id || ' ' || kind || ' ' || metadata::text) @@ websearch_to_tsquery('simple', $1)) AND ($2 OR permissions->>'visibility' = 'public') ORDER BY id LIMIT $3 OFFSET $4")
+            .bind(search).bind(include_private).bind(limit).bind(offset).fetch_all(&self.pool).await
     }
 
     pub async fn get_resource(&self, id: &str) -> Result<Option<Resource>, sqlx::Error> {

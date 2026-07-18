@@ -6,7 +6,9 @@ use sqlx::Row;
 
 pub struct UploadWrite<'a> {
     pub id: &'a str,
-    pub user_id: &'a str,
+    pub user_id: Option<&'a str>,
+    pub os_actor_id: Option<&'a str>,
+    pub project_id: Option<&'a str>,
     pub filename: &'a str,
     pub content_type: &'a str,
     pub size: i64,
@@ -212,17 +214,18 @@ impl ResourceRepository {
     }
 
     pub async fn create_upload(&self, value: &UploadWrite<'_>) -> Result<Value, sqlx::Error> {
-        sqlx::query_scalar("INSERT INTO uploads(id,user_id,filename,content_type,size_bytes,checksum,storage_uri,metadata,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'uploaded') RETURNING jsonb_build_object('id',id,'user_id',user_id,'filename',filename,'content_type',content_type,'size_bytes',size_bytes,'checksum',checksum,'storage_uri',storage_uri,'status',status,'metadata',metadata,'created_at',created_at,'updated_at',updated_at)")
-            .bind(value.id).bind(value.user_id).bind(value.filename).bind(value.content_type).bind(value.size).bind(value.checksum).bind(value.storage_uri).bind(value.metadata).fetch_one(&self.pool).await
+        sqlx::query_scalar("INSERT INTO uploads(id,user_id,os_actor_id,project_id,filename,content_type,size_bytes,checksum,storage_uri,metadata,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'uploaded') RETURNING jsonb_build_object('id',id,'user_id',COALESCE(user_id,os_actor_id),'actor_id',os_actor_id,'project_id',project_id,'filename',filename,'content_type',content_type,'size_bytes',size_bytes,'checksum',checksum,'storage_uri',storage_uri,'status',status,'metadata',metadata,'created_at',created_at,'updated_at',updated_at)")
+            .bind(value.id).bind(value.user_id).bind(value.os_actor_id).bind(value.project_id).bind(value.filename).bind(value.content_type).bind(value.size).bind(value.checksum).bind(value.storage_uri).bind(value.metadata).fetch_one(&self.pool).await
     }
 
     pub async fn list_uploads(
         &self,
         user_id: Option<&str>,
         admin: bool,
+        project_id: Option<&str>,
     ) -> Result<Vec<Value>, sqlx::Error> {
-        sqlx::query_scalar("SELECT jsonb_build_object('id',x.id,'user_id',x.user_id,'owner',u.display_name,'filename',x.filename,'content_type',x.content_type,'size_bytes',x.size_bytes,'checksum',x.checksum,'storage_uri',x.storage_uri,'status',x.status,'error_code',x.error_code,'metadata',x.metadata,'created_at',x.created_at,'updated_at',x.updated_at) FROM uploads x JOIN users u ON u.id=x.user_id WHERE x.user_id=$1 OR $2 ORDER BY x.created_at DESC")
-            .bind(user_id).bind(admin).fetch_all(&self.pool).await
+        sqlx::query_scalar("SELECT jsonb_build_object('id',x.id,'user_id',COALESCE(x.user_id,x.os_actor_id),'actor_id',x.os_actor_id,'project_id',x.project_id,'owner',COALESCE(u.display_name,x.os_actor_id,x.user_id),'filename',x.filename,'content_type',x.content_type,'size_bytes',x.size_bytes,'checksum',x.checksum,'storage_uri',x.storage_uri,'status',x.status,'error_code',x.error_code,'metadata',x.metadata,'created_at',x.created_at,'updated_at',x.updated_at) FROM uploads x LEFT JOIN users u ON u.id=x.user_id WHERE CASE WHEN $3::text IS NOT NULL THEN x.project_id=$3 ELSE x.user_id=$1 OR $2 END ORDER BY x.created_at DESC")
+            .bind(user_id).bind(admin).bind(project_id).fetch_all(&self.pool).await
     }
 
     pub async fn register_upload_resource(
@@ -230,11 +233,12 @@ impl ResourceRepository {
         resource: &ResourceUpsert,
         upload_ids: &[String],
         user_id: &str,
+        project_id: Option<&str>,
         format: &str,
         data_class: &str,
     ) -> Result<Value, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let uploads=sqlx::query("SELECT id,filename,size_bytes,checksum,storage_uri,content_type FROM uploads WHERE id=ANY($1) AND user_id=$2 AND status='uploaded' FOR UPDATE").bind(upload_ids).bind(user_id).fetch_all(&mut *tx).await?;
+        let uploads=sqlx::query("SELECT id,filename,size_bytes,checksum,storage_uri,content_type FROM uploads WHERE id=ANY($1) AND ((project_id IS NULL AND user_id=$2 AND os_actor_id IS NULL AND $3::text IS NULL) OR (project_id=$3 AND os_actor_id=$2 AND user_id IS NULL)) AND status='uploaded' FOR UPDATE").bind(upload_ids).bind(user_id).bind(project_id).fetch_all(&mut *tx).await?;
         if uploads.len() != upload_ids.len() {
             return Err(sqlx::Error::RowNotFound);
         }
@@ -255,6 +259,13 @@ impl ResourceRepository {
         let stored = upsert_resource_transaction(&mut tx, resource).await?;
         sqlx::query("INSERT INTO resource_grants(resource_id,user_id,scopes,granted_by,reason) VALUES($1,$2,'[\"resource.read\"]'::jsonb,$2,'upload owner') ON CONFLICT(resource_id,user_id) DO UPDATE SET scopes=EXCLUDED.scopes,granted_by=EXCLUDED.granted_by,reason=EXCLUDED.reason,expires_at=NULL")
             .bind(&resource.id).bind(user_id).execute(&mut *tx).await?;
+        if let Some(project_id) = project_id {
+            sqlx::query("INSERT INTO project_resource_bindings(project_id,resource_id,role,added_by) VALUES($1,$2,'data',NULL) ON CONFLICT(project_id,resource_id,role) DO NOTHING")
+                .bind(project_id)
+                .bind(&resource.id)
+                .execute(&mut *tx)
+                .await?;
+        }
         for row in uploads {
             let id: String = row.get("id");
             let filename: String = row.get("filename");

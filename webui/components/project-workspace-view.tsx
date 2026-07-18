@@ -26,6 +26,7 @@ import {
 import { AppShell, SectionHeader, TinyBadge, TopBar } from "./app-shell";
 import { ProjectApiError } from "./projects-view";
 import { ProjectObservationTable } from "./project-observation-table";
+import { ProjectTabs } from "./project-tabs";
 
 const projectKey = (projectId: string) => ["projects", projectId] as const;
 
@@ -53,10 +54,7 @@ export function ProjectWorkspaceView({ projectId }: { projectId: string }) {
         }
       />
       <div className="workspace-page project-workspace-page">
-        <nav className="project-tabs" aria-label="Project sections">
-          <Link className="active" href={`/projects/${encodeURIComponent(projectId)}`}>Workspace</Link>
-          <Link href={`/projects/${encodeURIComponent(projectId)}/graph`}>BioGraph</Link>
-        </nav>
+        <ProjectTabs projectId={projectId} active="workspace" />
         {context.error ? <ProjectApiError error={context.error} /> : null}
         {context.isPending ? <div className="loading-state">Loading the project context pack…</div> : null}
         {context.data?.truncated ? <div className="project-limit-notice" role="status"><ShieldAlert /><span><strong>Context pack reached its server limit.</strong> The workspace is showing the bounded pack until you request the complete lists.</span><button className="outline-button" disabled={loadFullLists} onClick={() => setLoadFullLists(true)}>{loadFullLists ? "Loading full lists…" : "Load complete lists"}</button></div> : null}

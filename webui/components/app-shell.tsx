@@ -47,7 +47,8 @@ import {
   type WorkspaceSearchItem,
 } from "@/lib/api/adapter";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { SettingsDialog, type SettingsSection } from "@/components/settings-dialog";
+import { SettingsDialog } from "@/components/settings-dialog";
+import { settingsHash, settingsSectionFromHash, type SettingsSection } from "@/lib/settings-route";
 
 type ShellProps = {
   active: string;
@@ -82,8 +83,23 @@ export function AppShell({ variant = "public", children }: ShellProps) {
   const pathname = usePathname();
   const isAdmin = variant === "admin";
 
+  const openSettingsRoute = useCallback((section: SettingsSection, mode: "push" | "replace" = "push") => {
+    setSettingsSection(section);
+    setSettingsOpen(true);
+    const hash = settingsHash(section);
+    if (window.location.hash === hash) return;
+    window.history[mode === "push" ? "pushState" : "replaceState"](null, "", `${window.location.pathname}${window.location.search}${hash}`);
+  }, []);
+
+  const changeSettingsOpen = useCallback((open: boolean) => {
+    setSettingsOpen(open);
+    if (!open && settingsSectionFromHash(window.location.hash)) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+  }, []);
+
   const loadThreads = useCallback(async () => {
-    try { setThreads((await listChatThreads()).slice(0, 12)); }
+    try { setThreads((await listChatThreads()).filter((thread) => !thread.projectId).slice(0, 12)); }
     catch { setThreads([]); }
   }, []);
 
@@ -99,6 +115,21 @@ export function AppShell({ variant = "public", children }: ShellProps) {
   }, [loadThreads]);
 
   useEffect(() => {
+    const syncSettingsRoute = () => {
+      const section = settingsSectionFromHash(window.location.hash);
+      setSettingsOpen(Boolean(section));
+      if (section) setSettingsSection(section);
+    };
+    syncSettingsRoute();
+    window.addEventListener("hashchange", syncSettingsRoute);
+    window.addEventListener("popstate", syncSettingsRoute);
+    return () => {
+      window.removeEventListener("hashchange", syncSettingsRoute);
+      window.removeEventListener("popstate", syncSettingsRoute);
+    };
+  }, []);
+
+  useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -108,8 +139,7 @@ export function AppShell({ variant = "public", children }: ShellProps) {
     const refreshThreads = () => void loadThreads();
     const openSettings = (event: Event) => {
       const value = (event as CustomEvent<string>).detail;
-      setSettingsSection(value === "models" || value === "agent-data" || value === "security" || value === "tokens" || value === "account" ? value : "general");
-      setSettingsOpen(true);
+      openSettingsRoute(value === "models" || value === "skills" || value === "memory" || value === "agent-data" || value === "security" || value === "tokens" || value === "account" ? value : "general");
     };
     window.addEventListener("keydown", shortcut);
     window.addEventListener("shennong:threads-updated", refreshThreads);
@@ -119,7 +149,7 @@ export function AppShell({ variant = "public", children }: ShellProps) {
       window.removeEventListener("shennong:threads-updated", refreshThreads);
       window.removeEventListener("shennong:open-settings", openSettings);
     };
-  }, [loadThreads]);
+  }, [loadThreads, openSettingsRoute]);
 
   useEffect(() => { setMobileOpen(false); setProfileOpen(false); }, [pathname]);
 
@@ -135,11 +165,11 @@ export function AppShell({ variant = "public", children }: ShellProps) {
         </div>
         {isAdmin ? <AdminNav pathname={pathname} /> : <PublicNav pathname={pathname} authenticated={Boolean(session?.authenticated)} threads={threads} openSearch={() => setSearchOpen(true)} />}
         <div className="sidebar-spacer" />
-        {isAdmin ? <AdminFooter session={session} /> : <PublicFooter session={session} registrationOpen={registrationOpen} profileOpen={profileOpen} onProfile={() => setProfileOpen((value) => !value)} openSettings={(section) => { setSettingsSection(section); setSettingsOpen(true); setProfileOpen(false); }} />}
+        {isAdmin ? <AdminFooter session={session} /> : <PublicFooter session={session} registrationOpen={registrationOpen} profileOpen={profileOpen} onProfile={() => setProfileOpen((value) => !value)} openSettings={(section) => { openSettingsRoute(section); setProfileOpen(false); }} />}
       </aside>
       <main className="main-column">{children}</main>
       <WorkspaceSearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} session={session} initialSection={settingsSection} />
+      <SettingsDialog open={settingsOpen} onOpenChange={changeSettingsOpen} onSectionChange={(section) => openSettingsRoute(section, "replace")} session={session} initialSection={settingsSection} />
     </div>
   );
 }
@@ -191,7 +221,7 @@ function PublicFooter({ session, registrationOpen, profileOpen, onProfile, openS
         {profileOpen ? (
           <div className="profile-popover" role="menu">
             <Link href="/console/profile"><UserRound />Profile</Link>
-            <button onClick={() => openSettings("general")}><Settings />Settings</button>
+            <button onClick={() => openSettings("account")}><Settings />Settings</button>
             <Link href="/console/api-access"><KeyRound />API Tokens</Link>
             {session.role === "admin" ? <Link href="/admin/dashboard" className="admin-link"><ShieldCheck />Admin center</Link> : null}
             <Link href="/support"><CircleHelp />Help</Link>

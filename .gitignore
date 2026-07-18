@@ -1,4 +1,8 @@
 .env
+.env.*
+*.env
+!.env.example
+secrets/
 .venv/
 .pytest_cache/
 .ruff_cache/
@@ -11,7 +15,11 @@ webui/dist/
 webui/test-results/
 webui/playwright-report/
 webui/coverage/
+agent-runtime/node_modules/
+agent-runtime/dist/
 *.tsbuildinfo
+*.log
+.DS_Store
 webui/vite.config.d.ts
 webui/vite.config.js
 /target/

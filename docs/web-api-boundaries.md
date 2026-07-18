@@ -1,4 +1,7 @@
-# WebUI API boundaries
+# Legacy 0.8 WebUI API boundaries
+
+> Migration reference only. Shennong OS owns the V1 browser/BFF boundary;
+> ShennongDB exposes only the authenticated headless data-plane allowlist.
 
 The production WebUI has no runtime mock or fallback data path. The Rust API owns resources, artifacts, relations, providers, users, grants, audit events, authentication, personal tokens, uploads, collections, favorites, usage, settings, backups, sessions, login history, and queries.
 

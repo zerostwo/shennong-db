@@ -1,0 +1,11 @@
+[Unit]
+Description=Proxy Docker bridge requests to loopback-only Ollama
+Requires=ollama.service ollama-docker-proxy.socket
+After=ollama.service
+
+[Service]
+ExecStart=/lib/systemd/systemd-socket-proxyd --connections-max=32 127.0.0.1:11434
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true

@@ -18,6 +18,8 @@ pub(super) struct GraphSubgraphQuery {
     root: String,
     depth: Option<u8>,
     limit: Option<usize>,
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -89,6 +91,21 @@ fn graph_bounds(depth: Option<u8>, limit: Option<usize>) -> Result<(u8, usize), 
         ));
     }
     Ok((depth, limit))
+}
+
+fn belongs_to_project(actual_project_id: Option<&str>, expected_project_id: &str) -> bool {
+    actual_project_id == Some(expected_project_id)
+}
+
+fn subgraph_within_project(subgraph: &shennong_schema::ResearchSubgraph, project_id: &str) -> bool {
+    subgraph
+        .entities
+        .iter()
+        .all(|entity| belongs_to_project(entity.project_id.as_deref(), project_id))
+        && subgraph
+            .associations
+            .iter()
+            .all(|association| belongs_to_project(association.project_id.as_deref(), project_id))
 }
 
 fn constrain_project_association(
@@ -257,6 +274,52 @@ pub(super) async fn create_project(
     )
     .await?;
     Ok(Json(Envelope { data }))
+}
+
+pub(super) async fn sync_external_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(value): Json<ProjectUpsert>,
+) -> Result<Json<Envelope<shennong_schema::Project>>, ApiError> {
+    let actor = admin(&headers, &state).await?;
+    require_service_principal(&actor)?;
+    validate_external_project_sync(&id, &value)?;
+    let data = state
+        .repository
+        .sync_external_project(&value)
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "project.shadow_sync",
+        "project",
+        &data.id,
+        serde_json::json!({"authority":"shennong-os"}),
+    )
+    .await?;
+    Ok(Json(Envelope { data }))
+}
+
+fn require_service_principal(actor: &Principal) -> Result<(), ApiError> {
+    if actor.role != Role::Admin || actor.user_id.is_some() {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "database service authentication is required".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_external_project_sync(id: &str, value: &ProjectUpsert) -> Result<(), ApiError> {
+    if value.id != id {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "project id must match request path".into(),
+        ));
+    }
+    validate_project(value)
 }
 
 pub(super) async fn get_project(
@@ -1103,13 +1166,40 @@ pub(super) async fn get_subgraph(
             "invalid graph root".into(),
         ));
     }
-    graph_entity_visible(&state, &headers, &request.root).await?;
+    if request
+        .project_id
+        .as_deref()
+        .is_some_and(|project_id| !valid_identifier(project_id))
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid project id".into(),
+        ));
+    }
+    let root = graph_entity_visible(&state, &headers, &request.root).await?;
+    if request
+        .project_id
+        .as_deref()
+        .is_some_and(|project_id| !belongs_to_project(root.project_id.as_deref(), project_id))
+    {
+        return Err(not_found());
+    }
     let (depth, limit) = graph_bounds(request.depth, request.limit)?;
     let data = state
         .repository
         .research_subgraph(&request.root, depth, limit as i64)
         .await
         .map_err(database_error)?;
+    if request
+        .project_id
+        .as_deref()
+        .is_some_and(|project_id| !subgraph_within_project(&data, project_id))
+    {
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "graph result unavailable".into(),
+        ));
+    }
     Ok(Json(Envelope { data }))
 }
 
@@ -1281,6 +1371,63 @@ mod tests {
     }
 
     #[test]
+    fn project_membership_requires_an_exact_non_public_match() {
+        assert!(belongs_to_project(Some("project-1"), "project-1"));
+        assert!(!belongs_to_project(Some("project-2"), "project-1"));
+        assert!(!belongs_to_project(None, "project-1"));
+    }
+
+    #[test]
+    fn project_scoped_subgraph_rejects_cross_project_rows() {
+        let timestamp = chrono::Utc::now();
+        let entity = shennong_schema::ResearchEntity {
+            id: "entity-1".into(),
+            project_id: Some("project-1".into()),
+            study_id: None,
+            category: "sample".into(),
+            kind: "sample".into(),
+            label: "Entity".into(),
+            ontology_id: None,
+            canonical_key: None,
+            status: "active".into(),
+            metadata: json!({}),
+            provenance: json!({}),
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        let association = shennong_schema::GraphAssociation {
+            id: "association-1".into(),
+            project_id: Some("project-1".into()),
+            subject_id: "entity-1".into(),
+            predicate: "derived_from".into(),
+            object_id: "entity-2".into(),
+            qualifiers: json!({}),
+            polarity: "neutral".into(),
+            knowledge_level: "observation".into(),
+            status: "proposed".into(),
+            scope: "project".into(),
+            provenance: json!({}),
+            created_by: None,
+            created_at: timestamp,
+            updated_at: timestamp,
+        };
+        let mut subgraph = shennong_schema::ResearchSubgraph {
+            root_entity_id: "entity-1".into(),
+            depth: 1,
+            truncated: false,
+            entities: vec![entity],
+            associations: vec![association],
+        };
+
+        assert!(subgraph_within_project(&subgraph, "project-1"));
+        subgraph.entities[0].project_id = Some("project-2".into());
+        assert!(!subgraph_within_project(&subgraph, "project-1"));
+        subgraph.entities[0].project_id = Some("project-1".into());
+        subgraph.associations[0].project_id = None;
+        assert!(!subgraph_within_project(&subgraph, "project-1"));
+    }
+
+    #[test]
     fn agent_association_cannot_self_validate() {
         let mut value = GraphAssociationUpsert {
             id: "association-1".into(),
@@ -1305,44 +1452,106 @@ mod tests {
     }
 
     #[test]
+    fn external_project_sync_requires_service_identity_and_matching_id() {
+        let service = Principal {
+            role: Role::Admin,
+            user_id: None,
+            scopes: Vec::new(),
+            token_hash: None,
+        };
+        let user_admin = Principal {
+            role: Role::Admin,
+            user_id: Some("user-admin".into()),
+            scopes: Vec::new(),
+            token_hash: None,
+        };
+        assert!(require_service_principal(&service).is_ok());
+        assert_eq!(
+            require_service_principal(&user_admin).unwrap_err().0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let project = ProjectUpsert {
+            id: "project-1".into(),
+            name: "Project".into(),
+            description: String::new(),
+            owner_user_id: "os-user-1".into(),
+            visibility: "private".into(),
+            status: "active".into(),
+            metadata: json!({"authority":"shennong-os"}),
+        };
+        assert!(validate_external_project_sync("project-1", &project).is_ok());
+        assert_eq!(
+            validate_external_project_sync("project-2", &project)
+                .unwrap_err()
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
     fn openapi_lists_research_graph_vertical_routes() {
         let specification: serde_json::Value =
             serde_json::from_str(include_str!("../../../openapi/shennongdb.json")).unwrap();
         let paths = specification["paths"].as_object().unwrap();
         for (path, methods) in [
-            ("/projects", &["get", "post"][..]),
-            ("/projects/{id}", &["get"][..]),
-            ("/projects/{id}/context-pack", &["get"][..]),
-            ("/projects/{id}/studies", &["get", "post"][..]),
-            ("/projects/{id}/entities", &["get", "post"][..]),
-            ("/projects/{id}/activities", &["get", "post"][..]),
+            ("/api/v1/research-projects", &["get"][..]),
             (
-                "/projects/{id}/activities/{activity_id}/io",
-                &["get", "post"][..],
+                "/api/v1/research-projects/{project_id}",
+                &["get", "put"][..],
             ),
             (
-                "/projects/{id}/activities/{activity_id}/actors",
-                &["get", "post"][..],
-            ),
-            ("/projects/{id}/associations", &["get", "post"][..]),
-            ("/projects/{id}/evidence", &["get", "post"][..]),
-            (
-                "/projects/{id}/associations/{association_id}/evidence",
+                "/api/v1/research-projects/{project_id}/context-pack",
                 &["get"][..],
             ),
             (
-                "/projects/{id}/associations/{association_id}/evidence/{evidence_id}",
+                "/api/v1/research-projects/{project_id}/studies",
+                &["get", "post"][..],
+            ),
+            (
+                "/api/v1/research-projects/{project_id}/entities",
+                &["get", "post"][..],
+            ),
+            (
+                "/api/v1/research-projects/{project_id}/activities",
+                &["get", "post"][..],
+            ),
+            (
+                "/api/v1/research-projects/{project_id}/activities/{activity_id}/io",
+                &["get", "post"][..],
+            ),
+            (
+                "/api/v1/research-projects/{project_id}/activities/{activity_id}/actors",
+                &["get", "post"][..],
+            ),
+            (
+                "/api/v1/research-projects/{project_id}/associations",
+                &["get", "post"][..],
+            ),
+            (
+                "/api/v1/research-projects/{project_id}/evidence",
+                &["get", "post"][..],
+            ),
+            (
+                "/api/v1/research-projects/{project_id}/associations/{association_id}/evidence",
+                &["get"][..],
+            ),
+            (
+                "/api/v1/research-projects/{project_id}/associations/{association_id}/evidence/{evidence_id}",
                 &["put"][..],
             ),
-            ("/projects/{id}/resources", &["get"][..]),
             (
-                "/projects/{id}/resources/{resource_id}",
+                "/api/v1/research-projects/{project_id}/resources",
+                &["get"][..],
+            ),
+            (
+                "/api/v1/research-projects/{project_id}/resources/{resource_id}",
                 &["put", "delete"][..],
             ),
-            ("/graph/search", &["post"][..]),
-            ("/graph/nodes/{id}", &["get"][..]),
-            ("/graph/subgraph", &["get"][..]),
-            ("/resources/{id}/graph-context", &["get"][..]),
+            ("/api/v1/graph/search", &["post"][..]),
+            ("/api/v1/graph/nodes/{id}", &["get"][..]),
+            ("/api/v1/graph/subgraph", &["get"][..]),
+            ("/api/v1/resources/{id}/graph-context", &["get"][..]),
         ] {
             let route = paths
                 .get(path)
@@ -1351,5 +1560,19 @@ mod tests {
                 assert!(route.get(*method).is_some(), "missing {method} {path}");
             }
         }
+
+        let subgraph_parameters = paths["/api/v1/graph/subgraph"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        let parameter = |name: &str| {
+            subgraph_parameters
+                .iter()
+                .find(|parameter| parameter["name"] == name)
+                .unwrap_or_else(|| panic!("missing graph subgraph parameter {name}"))
+        };
+        assert_eq!(parameter("root")["required"], true);
+        assert_eq!(parameter("depth")["schema"]["maximum"], 3);
+        assert_eq!(parameter("limit")["schema"]["maximum"], 200);
+        assert_eq!(parameter("project_id")["required"], false);
     }
 }

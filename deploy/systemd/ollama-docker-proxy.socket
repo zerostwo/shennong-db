@@ -1,0 +1,9 @@
+[Unit]
+Description=Private Docker bridge socket for local Ollama
+
+[Socket]
+ListenStream=172.17.0.1:11434
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

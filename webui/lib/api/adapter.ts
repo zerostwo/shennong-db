@@ -40,6 +40,47 @@ export type ChatMessageRecord = {
   attachments: JsonRecord[];
   toolEvents: ChatToolEvent[];
   citations: ChatCitation[];
+  reasoning: string;
+  usage: ChatTokenUsage | null;
+  raw: JsonRecord;
+};
+
+export type ChatTokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+};
+
+export type ReasoningEffort = "low" | "medium" | "high";
+
+export type AgentSkillRecord = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  sourceKind: "built_in" | "user" | "generated";
+  status: "draft" | "active" | "disabled";
+  revision: number;
+  content: string;
+  isBuiltin: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  raw: JsonRecord;
+};
+
+export type AgentMemoryRecord = {
+  id: string;
+  projectId: string;
+  title: string;
+  sourceKind: "manual" | "conversation" | "imported";
+  sourceId: string;
+  status: "active" | "archived";
+  revision: number;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
   raw: JsonRecord;
 };
 
@@ -248,7 +289,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     throw new ShennongApiError({
       code: typeof payload.code === "string" ? payload.code : response.status === 404 ? "not_supported" : "request_failed",
-      message: typeof payload.message === "string" ? payload.message : `Request failed (${response.status})`,
+      message: typeof payload.message === "string" ? payload.message : typeof payload.error === "string" ? payload.error : `Request failed (${response.status})`,
       requestId: typeof payload.request_id === "string" ? payload.request_id : undefined,
       details: payload.details,
       status: response.status
@@ -392,6 +433,46 @@ function toAiProvider(value: JsonRecord): AiProviderRecord {
   };
 }
 
+function toAgentSkill(value: JsonRecord): AgentSkillRecord {
+  const sourceValue = valueText(value.source_kind, "user");
+  const sourceKind = sourceValue === "built_in" || sourceValue === "generated" ? sourceValue : "user";
+  const statusValue = valueText(value.status, "draft");
+  const status = statusValue === "active" || statusValue === "disabled" ? statusValue : "draft";
+  return {
+    id: valueText(value.id),
+    slug: valueText(value.slug, ""),
+    name: valueText(value.name, "Untitled skill"),
+    description: valueText(value.description, ""),
+    sourceKind,
+    status,
+    revision: numberValue(value.revision, value.current_revision, 1),
+    content: valueText(value.content, ""),
+    isBuiltin: value.is_builtin === true || sourceKind === "built_in",
+    enabled: value.enabled === true,
+    createdAt: valueText(value.created_at, ""),
+    updatedAt: valueText(value.updated_at, ""),
+    raw: value,
+  };
+}
+
+function toAgentMemory(value: JsonRecord): AgentMemoryRecord {
+  const sourceValue = valueText(value.source_kind, "manual");
+  const sourceKind = sourceValue === "conversation" || sourceValue === "imported" ? sourceValue : "manual";
+  return {
+    id: valueText(value.id),
+    projectId: valueText(value.project_id, ""),
+    title: valueText(value.title, "Untitled memory"),
+    sourceKind,
+    sourceId: valueText(value.source_id, ""),
+    status: value.status === "archived" ? "archived" : "active",
+    revision: numberValue(value.revision, value.current_revision, 1),
+    content: valueText(value.content, ""),
+    createdAt: valueText(value.created_at, ""),
+    updatedAt: valueText(value.updated_at, ""),
+    raw: value,
+  };
+}
+
 function toToolEvents(value: unknown): ChatToolEvent[] {
   return recordArray(value).map((row, index) => ({
     id: valueText(row.id, `tool-${index}`),
@@ -415,9 +496,30 @@ function toCitations(value: unknown): ChatCitation[] {
   });
 }
 
+function numberValue(...values: unknown[]): number {
+  for (const value of values) {
+    const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+    if (Number.isFinite(number) && number >= 0) return number;
+  }
+  return 0;
+}
+
+function toTokenUsage(value: unknown): ChatTokenUsage | null {
+  const usage = jsonRecord(value);
+  if (Object.keys(usage).length === 0) return null;
+  const outputDetails = jsonRecord(usage.output_tokens_details ?? usage.completion_tokens_details);
+  const inputTokens = numberValue(usage.input_tokens, usage.prompt_tokens, usage.input);
+  const outputTokens = numberValue(usage.output_tokens, usage.completion_tokens, usage.output);
+  const reasoningTokens = numberValue(usage.reasoning_tokens, outputDetails.reasoning_tokens);
+  const totalTokens = numberValue(usage.total_tokens, usage.total, inputTokens + outputTokens);
+  if (inputTokens + outputTokens + reasoningTokens + totalTokens === 0) return null;
+  return { inputTokens, outputTokens, reasoningTokens, totalTokens };
+}
+
 function toChatMessage(value: JsonRecord): ChatMessageRecord {
   const roleValue = valueText(value.role, "assistant");
   const role = roleValue === "user" || roleValue === "tool" || roleValue === "system" ? roleValue : "assistant";
+  const metadata = jsonRecord(value.metadata);
   return {
     id: valueText(value.id, mutationId("message")),
     role,
@@ -426,6 +528,8 @@ function toChatMessage(value: JsonRecord): ChatMessageRecord {
     attachments: recordArray(value.attachments),
     toolEvents: toToolEvents(value.tool_events ?? value.tools),
     citations: toCitations(value.citations ?? value.sources),
+    reasoning: valueText(value.reasoning ?? value.reasoning_content ?? value.thinking ?? metadata.reasoning ?? metadata.thinking, ""),
+    usage: toTokenUsage(value.usage ?? value.token_usage ?? metadata.usage ?? metadata.token_usage),
     raw: value,
   };
 }
@@ -613,6 +717,127 @@ export async function deleteAiProvider(id: string): Promise<void> {
   await request(`/ai/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
+function modelList(value: unknown): string[] {
+  const root = jsonRecord(value);
+  const rows = Array.isArray(value) ? value : root.models ?? root.model_ids ?? root.items ?? [];
+  if (!Array.isArray(rows)) return [];
+  return Array.from(new Set(rows.flatMap((row) => {
+    if (typeof row === "string" && row.trim()) return [row.trim()];
+    const record = jsonRecord(row);
+    const id = valueText(record.id ?? record.name ?? record.model, "").trim();
+    return id ? [id] : [];
+  }))).sort((left, right) => left.localeCompare(right));
+}
+
+export async function discoverAiProviderModels(value: {
+  provider_kind: AiProviderRecord["providerType"];
+  base_url: string;
+  api_key?: string;
+}): Promise<string[]> {
+  try {
+    return modelList(await request<unknown>("/ai/providers/discover", {
+      method: "POST",
+      body: JSON.stringify(value),
+    }));
+  } catch (error) {
+    if (!(error instanceof ShennongApiError) || (error.status !== 404 && error.status !== 405)) throw error;
+    const draft = await createAiProvider({
+      name: `${value.provider_kind} model discovery`,
+      provider_kind: value.provider_kind,
+      base_url: value.base_url,
+      model: "model-discovery",
+      data_policy: "public_only",
+      enabled: true,
+      is_default: false,
+      ...(value.api_key ? { api_key: value.api_key } : {}),
+    });
+    try { return await listAiProviderModels(draft.id); }
+    finally {
+      await deleteAiProvider(draft.id).catch(() => updateAiProvider(draft.id, {
+        name: draft.name,
+        provider_kind: draft.providerType,
+        base_url: draft.baseUrl,
+        model: draft.model,
+        data_policy: "public_only",
+        enabled: false,
+        is_default: false,
+      }).then(() => undefined).catch(() => undefined));
+    }
+  }
+}
+
+export async function listAiProviderModels(id: string): Promise<string[]> {
+  return modelList(await request<unknown>(`/ai/providers/${encodeURIComponent(id)}/models`));
+}
+
+function skillList(value: unknown): AgentSkillRecord[] {
+  const root = jsonRecord(value);
+  const rows = Array.isArray(value) ? recordArray(value) : recordArray(root.skills ?? root.items);
+  return rows.map(toAgentSkill);
+}
+
+export async function listAgentSkills(): Promise<AgentSkillRecord[]> {
+  return skillList(await request<unknown>("/agent/skills"));
+}
+
+export async function createAgentSkill(value: { name: string; description?: string; content: string; status?: AgentSkillRecord["status"] }): Promise<AgentSkillRecord> {
+  return toAgentSkill(await request<JsonRecord>("/agent/skills", { method: "POST", body: JSON.stringify(value) }));
+}
+
+export async function updateAgentSkill(id: string, value: { name: string; description?: string; status: AgentSkillRecord["status"]; content?: string; change_note?: string }): Promise<AgentSkillRecord> {
+  return toAgentSkill(await request<JsonRecord>(`/agent/skills/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(value) }));
+}
+
+export async function deleteAgentSkill(id: string): Promise<void> {
+  await request(`/agent/skills/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function generateAgentSkill(value: { name?: string; goal: string; constraints?: string[]; workflow?: string[] }): Promise<AgentSkillRecord> {
+  return toAgentSkill(await request<JsonRecord>("/agent/skills/generate", { method: "POST", body: JSON.stringify(value) }));
+}
+
+export async function listThreadSkills(threadId: string): Promise<AgentSkillRecord[]> {
+  return skillList(await request<unknown>(`/chat/threads/${encodeURIComponent(threadId)}/skills`));
+}
+
+export async function enableThreadSkill(threadId: string, skillId: string): Promise<void> {
+  await request(`/chat/threads/${encodeURIComponent(threadId)}/skills/${encodeURIComponent(skillId)}`, { method: "PUT" });
+}
+
+export async function disableThreadSkill(threadId: string, skillId: string): Promise<void> {
+  await request(`/chat/threads/${encodeURIComponent(threadId)}/skills/${encodeURIComponent(skillId)}`, { method: "DELETE" });
+}
+
+function memoryList(value: unknown): AgentMemoryRecord[] {
+  const root = jsonRecord(value);
+  const rows = Array.isArray(value) ? recordArray(value) : recordArray(root.memories ?? root.items);
+  return rows.map(toAgentMemory);
+}
+
+export async function listGlobalMemories(): Promise<AgentMemoryRecord[]> {
+  return memoryList(await request<unknown>("/memories"));
+}
+
+export async function listProjectMemories(projectId: string): Promise<AgentMemoryRecord[]> {
+  return memoryList(await request<unknown>(`/projects/${encodeURIComponent(projectId)}/memories`));
+}
+
+export async function createGlobalMemory(value: { title: string; content: string; source_kind?: AgentMemoryRecord["sourceKind"]; source_id?: string }): Promise<AgentMemoryRecord> {
+  return toAgentMemory(await request<JsonRecord>("/memories", { method: "POST", body: JSON.stringify(value) }));
+}
+
+export async function createProjectMemory(projectId: string, value: { title: string; content: string; source_kind?: AgentMemoryRecord["sourceKind"]; source_id?: string }): Promise<AgentMemoryRecord> {
+  return toAgentMemory(await request<JsonRecord>(`/projects/${encodeURIComponent(projectId)}/memories`, { method: "POST", body: JSON.stringify(value) }));
+}
+
+export async function updateAgentMemory(id: string, value: { title: string; status: AgentMemoryRecord["status"]; content?: string; change_note?: string }): Promise<AgentMemoryRecord> {
+  return toAgentMemory(await request<JsonRecord>(`/memories/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(value) }));
+}
+
+export async function archiveAgentMemory(id: string): Promise<void> {
+  await request(`/memories/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 export async function listChatThreads(): Promise<ChatThreadRecord[]> {
   const value = await request<unknown>("/chat/threads");
   const rows = Array.isArray(value)
@@ -623,6 +848,19 @@ export async function listChatThreads(): Promise<ChatThreadRecord[]> {
 
 export async function createChatThread(value: { title?: string; provider_id?: string }): Promise<ChatThreadRecord> {
   return toChatThread(await request<JsonRecord>("/chat/threads", {
+    method: "POST",
+    body: JSON.stringify(value),
+  }));
+}
+
+export async function listProjectChatThreads(projectId: string): Promise<ChatThreadRecord[]> {
+  const value = await request<unknown>(`/projects/${encodeURIComponent(projectId)}/chat/threads`);
+  const rows = Array.isArray(value) ? recordArray(value) : recordArray(jsonRecord(value).threads ?? jsonRecord(value).items);
+  return rows.map(toChatThread);
+}
+
+export async function createProjectChatThread(projectId: string, value: { title?: string; provider_id?: string }): Promise<ChatThreadRecord> {
+  return toChatThread(await request<JsonRecord>(`/projects/${encodeURIComponent(projectId)}/chat/threads`, {
     method: "POST",
     body: JSON.stringify(value),
   }));
@@ -642,7 +880,7 @@ export async function getChatThread(id: string): Promise<ChatThreadRecord> {
 
 export async function sendChatMessage(
   threadId: string,
-  value: { content: string; provider_id?: string; upload_ids?: string[]; allow_data_write?: boolean },
+  value: { content: string; provider_id?: string; upload_ids?: string[]; allow_data_write?: boolean; reasoning_effort?: ReasoningEffort },
 ): Promise<ChatMessageRecord> {
   const result = await request<JsonRecord>(`/chat/threads/${encodeURIComponent(threadId)}/messages`, {
     method: "POST",
@@ -656,6 +894,8 @@ export async function sendChatMessage(
     role: source.role ?? "assistant",
     tool_events: source.tool_events ?? result.tool_events,
     citations: source.citations ?? result.citations,
+    reasoning: source.reasoning ?? source.reasoning_content ?? source.thinking ?? result.reasoning ?? result.reasoning_content ?? result.thinking,
+    usage: source.usage ?? source.token_usage ?? result.usage ?? result.token_usage,
   };
   return toChatMessage(merged);
 }
@@ -685,12 +925,19 @@ export async function searchWorkspace(query: string): Promise<WorkspaceSearchIte
             : null;
       const id = valueText(row.id, "");
       if (!kind || !id) return [];
+      const projectId = valueText(row.project_id ?? row.projectId, "");
       return [{
         id,
         kind,
         title: valueText(row.title ?? row.name, id),
         description: valueText(row.description ?? row.summary, ""),
-        href: kind === "chat" ? `/chat/${encodeURIComponent(id)}` : kind === "resource" ? `/resources?resource=${encodeURIComponent(id)}` : `/projects/${encodeURIComponent(id)}`,
+        href: kind === "chat"
+          ? projectId
+            ? `/projects/${encodeURIComponent(projectId)}/chat/${encodeURIComponent(id)}`
+            : `/chat/${encodeURIComponent(id)}`
+          : kind === "resource"
+            ? `/resources?resource=${encodeURIComponent(id)}`
+            : `/projects/${encodeURIComponent(id)}`,
       }];
     });
   } catch (reason) {
@@ -705,7 +952,15 @@ export async function searchWorkspace(query: string): Promise<WorkspaceSearchIte
     const projects = projectsResult.status === "fulfilled" ? projectsResult.value : [];
     const threads = threadsResult.status === "fulfilled" ? threadsResult.value : [];
     return [
-      ...threads.filter((row) => row.title.toLowerCase().includes(needle)).map((row) => ({ id: row.id, kind: "chat" as const, title: row.title, description: "Chat", href: `/chat/${encodeURIComponent(row.id)}` })),
+      ...threads.filter((row) => row.title.toLowerCase().includes(needle)).map((row) => ({
+        id: row.id,
+        kind: "chat" as const,
+        title: row.title,
+        description: row.projectId ? "Project chat" : "Chat",
+        href: row.projectId
+          ? `/projects/${encodeURIComponent(row.projectId)}/chat/${encodeURIComponent(row.id)}`
+          : `/chat/${encodeURIComponent(row.id)}`,
+      })),
       ...resources.filter((row) => `${row.name} ${row.id} ${row.description}`.toLowerCase().includes(needle)).map((row) => ({ id: row.id, kind: "resource" as const, title: row.name, description: row.description, href: `/resources?resource=${encodeURIComponent(row.id)}` })),
       ...projects.filter((row) => `${row.name} ${row.id} ${row.description}`.toLowerCase().includes(needle)).map((row) => ({ id: row.id, kind: "project" as const, title: row.name, description: row.description, href: `/projects/${encodeURIComponent(row.id)}` })),
     ];

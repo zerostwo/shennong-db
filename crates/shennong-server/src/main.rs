@@ -30,13 +30,14 @@ use shennong_query::{
 };
 use shennong_schema::{
     ArtifactUpsert, Capabilities, RelationUpsert, ResourceInstallRequest, ResourcePermissions,
-    ResourceQuery, ResourceUpsert, TokenIssueRequest, UserUpsert, Visibility,
+    ResourceQuery, ResourceRevisionCreate, ResourceUpsert, TokenIssueRequest, UserUpsert,
+    Visibility,
 };
 use shennong_storage::{
     ArtifactUri, BlobStore, LocalObjectStorage, ObjectKey, S3Config, S3ObjectStorage,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, io,
     net::SocketAddr,
     path::{Path as FilePath, PathBuf},
@@ -58,6 +59,8 @@ use tower_http::{
 use tracing_subscriber::EnvFilter;
 
 mod agent_chat;
+mod agent_context_api;
+mod pi_runtime;
 mod research_graph_api;
 
 use research_graph_api::*;
@@ -85,15 +88,35 @@ struct AppState {
     request_timeout: Duration,
     agent_run_timeout: Duration,
     provider_install_timeout: Duration,
+    upload_timeout: Duration,
     trust_proxy_headers: bool,
     cache_fill: Arc<AsyncMutex<()>>,
     setup_lock: Arc<AsyncMutex<()>>,
     agent_crypto: agent_chat::AgentCrypto,
     agent_client: reqwest::Client,
+    pi_runtime: Option<pi_runtime::PiRuntimeClient>,
+    pi_run_capabilities: agent_chat::PiRunCapabilityStore,
     agent_requests: Arc<Semaphore>,
     cache_hits: Arc<AtomicU64>,
     cache_misses: Arc<AtomicU64>,
     cache_max_bytes: u64,
+    headless: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerProfile {
+    Headless,
+    Legacy,
+}
+
+impl ServerProfile {
+    fn parse(value: Option<&str>) -> Result<Self, &'static str> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("headless") => Ok(Self::Headless),
+            Some("legacy") | Some("full") => Ok(Self::Legacy),
+            Some(_) => Err("SHENNONG_DB_PROFILE must be headless or legacy"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -234,8 +257,11 @@ async fn request_timeout_middleware(
     let agent_run = request.method() == Method::POST
         && request.uri().path().starts_with("/api/v1/chat/threads/")
         && (request.uri().path().ends_with("/messages") || request.uri().path().ends_with("/run"));
+    let upload = request.method() == Method::POST && request.uri().path() == "/api/v1/uploads";
     let timeout = if request.uri().path() == "/api/v1/resources/install" {
         state.provider_install_timeout
+    } else if upload {
+        state.upload_timeout
     } else if agent_run {
         state.agent_run_timeout
     } else {
@@ -442,9 +468,63 @@ struct Envelope<T: Serialize> {
     data: T,
 }
 
-#[derive(serde::Deserialize)]
+const RESOURCE_LIST_DEFAULT_LIMIT: i64 = 100;
+const RESOURCE_LIST_MAX_LIMIT: i64 = 500;
+const RESOURCE_LIST_MAX_OFFSET: i64 = 1_000_000;
+
+#[derive(Debug, serde::Deserialize)]
 struct ResourceListQuery {
     q: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    cursor: Option<String>,
+}
+
+fn resource_list_window(query: &ResourceListQuery) -> Result<(Option<&str>, i64, i64), ApiError> {
+    let search = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if search.is_some_and(|value| value.len() > 256) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "resource search must be at most 256 characters".into(),
+        ));
+    }
+    let limit = query.limit.unwrap_or(RESOURCE_LIST_DEFAULT_LIMIT);
+    if !(1..=RESOURCE_LIST_MAX_LIMIT).contains(&limit) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("resource limit must be between 1 and {RESOURCE_LIST_MAX_LIMIT}"),
+        ));
+    }
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| {
+            value.parse::<i64>().map_err(|_| {
+                ApiError(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "resource cursor must be a decimal offset".into(),
+                )
+            })
+        })
+        .transpose()?;
+    if query.offset.is_some() && cursor.is_some() && query.offset != cursor {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "resource cursor and offset must match when both are provided".into(),
+        ));
+    }
+    let offset = query.offset.or(cursor).unwrap_or(0);
+    if !(0..=RESOURCE_LIST_MAX_OFFSET).contains(&offset) {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("resource offset must be between 0 and {RESOURCE_LIST_MAX_OFFSET}"),
+        ));
+    }
+    Ok((search, limit, offset))
 }
 
 #[derive(serde::Deserialize)]
@@ -495,6 +575,126 @@ fn public_error_code(message: &str) -> String {
     }
 }
 
+fn headless_endpoint_allowed(method: &Method, path: &str) -> bool {
+    if matches!(path, "/health" | "/healthz" | "/metrics" | "/version") {
+        return method == Method::GET;
+    }
+    if path == "/.well-known/shennong-agent.json" {
+        return method == Method::GET;
+    }
+    match path {
+        "/api/v1/resources"
+        | "/api/v1/providers"
+        | "/api/v1/capabilities"
+        | "/api/v1/storage"
+        | "/api/v1/cache/stats"
+        | "/api/v1/audit-events"
+        | "/api/v1/ingestion-jobs"
+        | "/api/v1/agent-manifest" => {
+            return method == Method::GET;
+        }
+        "/api/v1/resources/install"
+        | "/api/v1/query"
+        | "/api/v1/query/batch"
+        | "/api/v1/query/stream"
+        | "/api/v1/uploads/register"
+        | "/api/v1/graph/search" => return method == Method::POST,
+        "/api/v1/uploads" | "/api/v1/backups" => {
+            return matches!(*method, Method::GET | Method::POST);
+        }
+        "/api/v1/cache" => return method == Method::DELETE,
+        "/api/v1/graph/subgraph" | "/api/v1/genes/resolve" => {
+            return method == Method::GET;
+        }
+        _ => {}
+    }
+
+    if let Some(rest) = path.strip_prefix("/api/v1/resources/") {
+        let segments = rest.split('/').collect::<Vec<_>>();
+        return match segments.as_slice() {
+            [_resource_id] => matches!(*method, Method::GET | Method::PUT),
+            [_resource_id, "artifacts"] | [_resource_id, "relations"] => {
+                matches!(*method, Method::GET | Method::POST)
+            }
+            [_, "artifacts", _, "download"] | [_, "graph-context"] => method == Method::GET,
+            [_resource_id, "revisions"] => matches!(*method, Method::GET | Method::POST),
+            [_resource_id, "revisions", _revision] => method == Method::GET,
+            _ => false,
+        };
+    }
+    if let Some(rest) = path.strip_prefix("/api/v1/agent/resources/") {
+        let segments = rest.split('/').collect::<Vec<_>>();
+        return method == Method::GET
+            && matches!(segments.as_slice(), [_] | [_, "metadata"] | [_, "axes", _]);
+    }
+    if let Some(rest) = path.strip_prefix("/api/v1/graph/nodes/") {
+        return method == Method::GET && !rest.is_empty() && !rest.contains('/');
+    }
+    if let Some(rest) = path.strip_prefix("/api/v1/backups/") {
+        let segments = rest.split('/').collect::<Vec<_>>();
+        return method == Method::POST && matches!(segments.as_slice(), [_backup_id, "restore"]);
+    }
+    if let Some(rest) = path.strip_prefix("/api/v1/research-projects/") {
+        let segments = rest.split('/').collect::<Vec<_>>();
+        return match segments.as_slice() {
+            [_project_id] => matches!(*method, Method::GET | Method::PUT),
+            [_project_id, "context-pack"] | [_project_id, "resources"] => method == Method::GET,
+            [_project_id, "entities"]
+            | [_project_id, "activities"]
+            | [_project_id, "studies"]
+            | [_project_id, "associations"]
+            | [_project_id, "evidence"] => matches!(*method, Method::GET | Method::POST),
+            [_project_id, "activities", _activity_id, "io"]
+            | [_project_id, "activities", _activity_id, "actors"] => {
+                matches!(*method, Method::GET | Method::POST)
+            }
+            [_project_id, "associations", _association_id, "evidence"] => method == Method::GET,
+            [
+                _project_id,
+                "associations",
+                _association_id,
+                "evidence",
+                _evidence_id,
+            ] => method == Method::PUT,
+            [_project_id, "resources", _resource_id] => {
+                matches!(*method, Method::PUT | Method::DELETE)
+            }
+            _ => false,
+        };
+    }
+    path == "/api/v1/research-projects" && method == Method::GET
+}
+
+async fn headless_profile_gate(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !state.headless {
+        return next.run(request).await;
+    }
+    if !headless_endpoint_allowed(request.method(), request.uri().path()) {
+        return ApiError(
+            StatusCode::NOT_FOUND,
+            "route is unavailable in headless mode".into(),
+        )
+        .into_response();
+    }
+    if request.uri().path().starts_with("/api/")
+        || request.uri().path().starts_with("/.well-known/")
+    {
+        let service = principal(request.headers(), &state);
+        if service.role != Role::Admin || service.user_id.is_some() {
+            return ApiError(
+                StatusCode::UNAUTHORIZED,
+                "database service authentication is required".into(),
+            )
+            .into_response();
+        }
+    }
+    next.run(request).await
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -502,16 +702,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     let database_url = env_secret("SHENNONG_DATABASE_URL")
         .ok_or("SHENNONG_DATABASE_URL or SHENNONG_DATABASE_URL_FILE is required")?;
+    let profile = ServerProfile::parse(env::var("SHENNONG_DB_PROFILE").ok().as_deref())?;
+    let headless = profile == ServerProfile::Headless;
     let production = env::var("SHENNONG_ENV")
         .is_ok_and(|value| value.eq_ignore_ascii_case("production"))
         || env::var("SHENNONG_ROLE").is_ok_and(|value| value == "api");
     let jwt_secret = env_secret("SHENNONG_JWT_SECRET");
     let admin_key = env_secret("SHENNONG_ADMIN_API_KEY");
-    if production
-        && (jwt_secret.as_deref().is_none_or(|value| value.len() < 32)
-            || (admin_key.is_some() && admin_key.as_deref().is_none_or(|value| value.len() < 32)))
-    {
-        return Err("production secrets must be at least 32 bytes".into());
+    if production {
+        if admin_key.as_deref().is_none_or(|value| value.len() < 32)
+            || (!headless && jwt_secret.as_deref().is_none_or(|value| value.len() < 32))
+        {
+            return Err("production secrets must be present and at least 32 bytes".into());
+        }
+        if !headless
+            && !env::var("SHENNONG_ALLOW_LEGACY_PROFILE")
+                .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+        {
+            return Err("the legacy database profile is disabled in production".into());
+        }
     }
     let data_root =
         PathBuf::from(env::var("SHENNONG_LOCAL_DATA_ROOT").unwrap_or_else(|_| "/data".into()));
@@ -543,6 +752,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request_timeout = env_duration("SHENNONG_REQUEST_TIMEOUT_SECS", 30);
     let agent_run_timeout = env_duration("SHENNONG_AGENT_RUN_TIMEOUT_SECS", 600);
     let provider_install_timeout = env_duration("SHENNONG_PROVIDER_INSTALL_TIMEOUT_SECS", 14_400);
+    let upload_timeout = env_duration("SHENNONG_UPLOAD_TIMEOUT_SECS", 14_400);
     let max_body_bytes = env_usize("SHENNONG_MAX_BODY_BYTES", 1024 * 1024);
     let global_concurrency = env_usize("SHENNONG_MAX_CONCURRENCY", 64);
     let query_concurrency = env_usize("SHENNONG_QUERY_MAX_CONCURRENCY", 8);
@@ -600,10 +810,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Arc::new(LocalObjectStorage::new(&data_root))
     };
+    let agent_encryption_key = env_secret("SHENNONG_AGENT_ENCRYPTION_KEY")
+        .or_else(|| headless.then(|| format!("headless-unused-{}", uuid::Uuid::new_v4())));
     let agent_crypto = agent_chat::AgentCrypto::new(
-        &env_secret("SHENNONG_AGENT_ENCRYPTION_KEY")
-            .ok_or("SHENNONG_AGENT_ENCRYPTION_KEY is required")?,
+        &agent_encryption_key.ok_or("SHENNONG_AGENT_ENCRYPTION_KEY is required")?,
     );
+    let agent_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(env_duration("SHENNONG_AGENT_TIMEOUT_SECS", 120))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let pi_runtime = pi_runtime::PiRuntimeClient::from_env(agent_client.clone())?;
     let state = AppState {
         repository: Arc::new(repository),
         providers: Arc::new(if s3_storage {
@@ -651,15 +868,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         request_timeout,
         agent_run_timeout,
         provider_install_timeout,
+        upload_timeout,
         trust_proxy_headers,
         cache_fill: Arc::new(AsyncMutex::new(())),
         setup_lock: Arc::new(AsyncMutex::new(())),
         agent_crypto,
-        agent_client: reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(env_duration("SHENNONG_AGENT_TIMEOUT_SECS", 120))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?,
+        agent_client,
+        pi_runtime,
+        pi_run_capabilities: agent_chat::PiRunCapabilityStore::default(),
         agent_requests: Arc::new(Semaphore::new(env_usize(
             "SHENNONG_AGENT_MAX_CONCURRENCY",
             4,
@@ -670,6 +886,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(1024 * 1024 * 1024),
+        headless,
     };
     let upload_routes = Router::new().route("/api/v1/uploads", post(upload_file));
     let app = Router::new()
@@ -697,6 +914,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/api/v1/resources/{id}/graph-context",
             get(resource_graph_context),
+        )
+        .route(
+            "/api/v1/resources/{id}/revisions",
+            get(list_resource_revisions).post(create_resource_revision),
+        )
+        .route(
+            "/api/v1/resources/{id}/revisions/{revision}",
+            get(get_resource_revision),
         )
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route("/api/v1/projects/{id}", get(get_project))
@@ -746,6 +971,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/api/v1/projects/{id}/resources/{resource_id}",
+            put(bind_project_resource).delete(unbind_project_resource),
+        )
+        .route(
+            "/api/v1/research-projects",
+            get(list_projects).post(create_project),
+        )
+        .route(
+            "/api/v1/research-projects/{id}",
+            get(get_project).put(sync_external_project),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/context-pack",
+            get(project_context_pack),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/entities",
+            get(list_project_entities).post(upsert_project_entity),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/activities",
+            get(list_project_activities).post(upsert_project_activity),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/studies",
+            get(list_project_studies).post(upsert_project_study),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/activities/{activity_id}/io",
+            get(list_project_activity_io).post(upsert_project_activity_io),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/activities/{activity_id}/actors",
+            get(list_project_activity_actors).post(upsert_project_activity_actor),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/associations",
+            get(list_project_associations).post(propose_project_association),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/evidence",
+            get(list_project_evidence).post(create_project_evidence),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/associations/{association_id}/evidence",
+            get(list_project_association_evidence),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/associations/{association_id}/evidence/{evidence_id}",
+            put(link_project_association_evidence),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/resources",
+            get(list_project_resources),
+        )
+        .route(
+            "/api/v1/research-projects/{id}/resources/{resource_id}",
             put(bind_project_resource).delete(unbind_project_resource),
         )
         .route("/api/v1/graph/search", post(search_graph))
@@ -852,11 +1133,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/query/batch", post(query_batch))
         .route("/api/v1/query/stream", post(query_stream))
         .merge(agent_chat::routes())
+        .merge(agent_context_api::routes())
         .layer(RequestBodyLimitLayer::new(max_body_bytes))
         // Uploads are streamed and bounded inside `upload_file` by
         // SHENNONG_MAX_UPLOAD_BYTES, independently of the small JSON limit.
         .merge(upload_routes)
         .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            headless_profile_gate,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             request_limits,
@@ -874,7 +1160,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(TraceLayer::new_for_http());
     let address = env::var("SHENNONG_BIND").unwrap_or_else(|_| "0.0.0.0:8000".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
-    tracing::info!(%address, version = env!("CARGO_PKG_VERSION"), "shennong-db listening");
+    tracing::info!(
+        %address,
+        version = env!("CARGO_PKG_VERSION"),
+        profile = ?profile,
+        "shennong-db listening"
+    );
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -1592,7 +1883,7 @@ async fn agent_manifest(
     let principal = principal(&headers, &state);
     let candidates = state
         .repository
-        .list_resources(None, principal.role != Role::Guest)
+        .list_resources(None, principal.role != Role::Guest, 500, 0)
         .await
         .map_err(database_error)?;
     let mut resources = Vec::new();
@@ -2027,7 +2318,7 @@ async fn resolve_gene(
     let principal = principal(&headers, &state);
     let candidates = state
         .repository
-        .list_resources(None, principal.role != Role::Guest)
+        .list_resources(None, principal.role != Role::Guest, 500, 0)
         .await
         .map_err(database_error)?;
     let mut matches = Vec::new();
@@ -2568,14 +2859,139 @@ async fn list_uploads(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Envelope<Vec<serde_json::Value>>>, ApiError> {
-    let actor = authenticated(&headers, &state).await?;
+    let scope = upload_scope(&headers, &state).await?;
     Ok(Json(Envelope {
         data: state
             .repository
-            .list_uploads(actor.user_id.as_deref(), actor.role == Role::Admin)
+            .list_uploads(
+                Some(&scope.actor_id),
+                scope.legacy_admin,
+                scope.project_id.as_deref(),
+            )
             .await
             .map_err(database_error)?,
     }))
+}
+
+const OS_ACTOR_HEADER: &str = "x-shennong-os-actor-id";
+const OS_PROJECT_HEADER: &str = "x-shennong-os-project-id";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UploadScope {
+    actor_id: String,
+    project_id: Option<String>,
+    legacy_admin: bool,
+}
+
+async fn upload_scope(headers: &HeaderMap, state: &AppState) -> Result<UploadScope, ApiError> {
+    if state.headless {
+        let service = principal(headers, state);
+        if service.role != Role::Admin || service.user_id.is_some() {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "database service authentication is required".into(),
+            ));
+        }
+        let actor_id = required_uuid_header(headers, OS_ACTOR_HEADER)?;
+        let project_id = required_uuid_header(headers, OS_PROJECT_HEADER)?;
+        let project = state
+            .repository
+            .get_project(&project_id)
+            .await
+            .map_err(database_error)?
+            .filter(|project| project.status == "active")
+            .ok_or_else(not_found)?;
+        debug_assert_eq!(project.id, project_id);
+        return Ok(UploadScope {
+            actor_id,
+            project_id: Some(project_id),
+            legacy_admin: false,
+        });
+    }
+    let actor = authenticated(headers, state).await?;
+    Ok(UploadScope {
+        actor_id: actor.user_id.unwrap_or_default(),
+        project_id: None,
+        legacy_admin: actor.role == Role::Admin,
+    })
+}
+
+fn required_uuid_header(headers: &HeaderMap, name: &'static str) -> Result<String, ApiError> {
+    let value = headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{name} must be a UUID"),
+            )
+        })?;
+    uuid::Uuid::parse_str(value)
+        .map(|value| value.to_string())
+        .map_err(|_| {
+            ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{name} must be a UUID"),
+            )
+        })
+}
+
+fn upload_filename(headers: &HeaderMap) -> Result<String, ApiError> {
+    let value = headers
+        .get("x-filename")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 255
+                && *value != "."
+                && *value != ".."
+                && !value.starts_with(char::is_whitespace)
+                && !value.ends_with(char::is_whitespace)
+                && !value
+                    .chars()
+                    .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+        })
+        .ok_or(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "x-filename must be a safe file name of at most 255 bytes".into(),
+        ))?;
+    if FilePath::new(value)
+        .file_name()
+        .and_then(|value| value.to_str())
+        != Some(value)
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "x-filename must be a safe file name of at most 255 bytes".into(),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn upload_content_type(headers: &HeaderMap) -> Result<String, ApiError> {
+    let value = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let media_type = value.split(';').next().unwrap_or_default().trim();
+    let valid_token = |token: &str| {
+        !token.is_empty()
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$&^_.+-".contains(&byte))
+    };
+    let valid = value.len() <= 255
+        && !value.chars().any(char::is_control)
+        && media_type
+            .split_once('/')
+            .is_some_and(|(kind, subtype)| valid_token(kind) && valid_token(subtype));
+    if !valid {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "content-type must be a valid media type of at most 255 bytes".into(),
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 async fn upload_file(
@@ -2583,24 +2999,10 @@ async fn upload_file(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
-    let actor = authenticated(&headers, &state).await?;
-    let user_id = actor.user_id.as_deref().unwrap_or_default();
-    let filename = headers
-        .get("x-filename")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| FilePath::new(v).file_name())
-        .and_then(|v| v.to_str())
-        .filter(|v| !v.is_empty() && v.len() <= 255)
-        .ok_or(ApiError(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "x-filename is required".into(),
-        ))?
-        .to_owned();
-    let content_type = headers
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_owned();
+    let scope = upload_scope(&headers, &state).await?;
+    let user_id = scope.actor_id.as_str();
+    let filename = upload_filename(&headers)?;
+    let content_type = upload_content_type(&headers)?;
     let id = uuid::Uuid::new_v4().to_string();
     tokio::fs::create_dir_all(&state.upload_staging_dir)
         .await
@@ -2626,6 +3028,18 @@ async fn upload_file(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(50 * 1024 * 1024 * 1024_u64);
+    if headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length == 0 || length > max)
+    {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "upload size is empty or exceeds the configured limit".into(),
+        ));
+    }
     while let Some(chunk) = stream.next().await {
         let chunk =
             chunk.map_err(|_| ApiError(StatusCode::BAD_REQUEST, "upload stream failed".into()))?;
@@ -2645,6 +3059,13 @@ async fn upload_file(
             )
         })?;
     }
+    if size == 0 {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "upload must not be empty".into(),
+        ));
+    }
     file.flush().await.map_err(|_| {
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2658,13 +3079,16 @@ async fn upload_file(
         "upload_prefix",
         "uploads",
     );
-    let key =
-        ObjectKey::new(&format!("{upload_prefix}/{user_id}/{id}/{filename}")).map_err(|_| {
-            ApiError(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid upload filename".into(),
-            )
-        })?;
+    let namespace = scope.project_id.as_deref().unwrap_or("legacy");
+    let key = ObjectKey::new(&format!(
+        "{upload_prefix}/{namespace}/{user_id}/{id}/{filename}"
+    ))
+    .map_err(|_| {
+        ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid upload filename".into(),
+        )
+    })?;
     let mut reader = tokio::fs::File::open(&temp).await.map_err(|_| {
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2683,27 +3107,43 @@ async fn upload_file(
         })?
         .to_string();
     let _ = tokio::fs::remove_file(&temp).await;
+    let metadata = serde_json::json!({
+        "actor_id": scope.actor_id,
+        "project_id": scope.project_id,
+    });
     let data = state
         .repository
         .create_upload(&UploadWrite {
             id: &id,
-            user_id,
+            user_id: scope.project_id.is_none().then_some(user_id),
+            os_actor_id: scope.project_id.is_some().then_some(user_id),
+            project_id: scope.project_id.as_deref(),
             filename: &filename,
             content_type: &content_type,
             size: size as i64,
             checksum: &checksum,
             storage_uri: &uri,
-            metadata: &serde_json::json!({}),
+            metadata: &metadata,
         })
-        .await
-        .map_err(database_error)?;
+        .await;
+    let data = match data {
+        Ok(data) => data,
+        Err(error) => {
+            if let Ok(uri) = ArtifactUri::parse(&uri)
+                && let Err(cleanup_error) = state.storage.delete(&uri).await
+            {
+                tracing::error!(%cleanup_error, upload_id = %id, "orphaned upload cleanup failed");
+            }
+            return Err(database_error(error));
+        }
+    };
     audit(
         &state,
         &headers,
         "upload.create",
         "upload",
         &id,
-        serde_json::json!({"filename":filename,"size_bytes":size}),
+        serde_json::json!({"filename":filename,"size_bytes":size,"actor_id":scope.actor_id,"project_id":scope.project_id}),
     )
     .await?;
     Ok(Json(Envelope { data }))
@@ -2744,9 +3184,13 @@ async fn register_uploads(
     headers: HeaderMap,
     Json(value): Json<RegisterUploadsRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, ApiError> {
-    let actor = authenticated(&headers, &state).await?;
+    let scope = upload_scope(&headers, &state).await?;
     if value.upload_ids.is_empty()
         || value.upload_ids.len() > 100
+        || value
+            .upload_ids
+            .iter()
+            .any(|id| uuid::Uuid::parse_str(id).is_err())
         || value.resource_id.is_empty()
         || value.resource_id.len() > 160
         || !value
@@ -2754,7 +3198,25 @@ async fn register_uploads(
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         || value.name.trim().is_empty()
+        || value.name.len() > 512
+        || value.description.len() > 4096
+        || [
+            &value.organism,
+            &value.modality,
+            &value.assay,
+            &value.reference,
+            &value.annotation,
+        ]
+        .iter()
+        .any(|field| field.len() > 256 || field.chars().any(char::is_control))
+        || value.format.is_empty()
+        || value.format.len() > 64
+        || !value
+            .format
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._+-".contains(&byte))
         || !matches!(value.visibility.as_str(), "public" | "private")
+        || (scope.project_id.is_some() && value.visibility != "private")
         || !matches!(value.data_class.as_str(), "raw" | "canonical" | "derived")
     {
         return Err(ApiError(
@@ -2762,7 +3224,7 @@ async fn register_uploads(
             "invalid upload registration".into(),
         ));
     }
-    let user_id = actor.user_id.as_deref().unwrap_or_default();
+    let user_id = scope.actor_id.as_str();
     let resource = ResourceUpsert {
         id: value.resource_id.clone(),
         kind: "Dataset".into(),
@@ -2785,6 +3247,7 @@ async fn register_uploads(
             &resource,
             &value.upload_ids,
             user_id,
+            scope.project_id.as_deref(),
             &value.format,
             &value.data_class,
         )
@@ -2792,6 +3255,8 @@ async fn register_uploads(
         .map_err(|error| {
             if matches!(&error, sqlx::Error::Protocol(message) if message == "upload resource already exists") {
                 ApiError(StatusCode::CONFLICT, "resource id already exists".into())
+            } else if matches!(&error, sqlx::Error::RowNotFound) {
+                not_found()
             } else {
                 database_error(error)
             }
@@ -2802,7 +3267,7 @@ async fn register_uploads(
         "upload.register",
         "resource",
         &value.resource_id,
-        serde_json::json!({"upload_ids":value.upload_ids}),
+        serde_json::json!({"upload_ids":value.upload_ids,"actor_id":scope.actor_id,"project_id":scope.project_id}),
     )
     .await?;
     Ok(Json(Envelope { data }))
@@ -3735,6 +4200,7 @@ async fn list_resources(
     headers: HeaderMap,
     Query(query): Query<ResourceListQuery>,
 ) -> Result<Json<Envelope<Vec<shennong_schema::Resource>>>, ApiError> {
+    let (search, limit, offset) = resource_list_window(&query)?;
     let principal = principal(&headers, &state);
     if principal.role == Role::Guest
         && setting_object(&state, "general")
@@ -3750,7 +4216,7 @@ async fn list_resources(
     }
     let candidates = state
         .repository
-        .list_resources(query.q.as_deref(), principal.role != Role::Guest)
+        .list_resources(search, principal.role != Role::Guest, limit, offset)
         .await
         .map_err(database_error)?;
     let mut data = Vec::new();
@@ -3810,6 +4276,143 @@ async fn upsert_resource(
     Ok(Json(Envelope { data }))
 }
 
+async fn list_resource_revisions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<Vec<shennong_schema::ResourceRevision>>>, ApiError> {
+    let resource = state
+        .repository
+        .get_resource(&id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    if !can_read(&state, &principal(&headers, &state), &resource).await? {
+        return Err(not_found());
+    }
+    let data = state
+        .repository
+        .list_resource_revisions(&id, 1_000)
+        .await
+        .map_err(database_error)?;
+    Ok(Json(Envelope { data }))
+}
+
+async fn get_resource_revision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, revision)): Path<(String, i32)>,
+) -> Result<Json<Envelope<shennong_schema::ResourceRevision>>, ApiError> {
+    let resource = state
+        .repository
+        .get_resource(&id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    if !can_read(&state, &principal(&headers, &state), &resource).await? {
+        return Err(not_found());
+    }
+    let data = state
+        .repository
+        .get_resource_revision(&id, revision)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    Ok(Json(Envelope { data }))
+}
+
+async fn create_resource_revision(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(value): Json<ResourceRevisionCreate>,
+) -> Result<
+    (
+        StatusCode,
+        Json<Envelope<shennong_schema::ResourceRevision>>,
+    ),
+    ApiError,
+> {
+    admin(&headers, &state).await?;
+    if value.resource_id != id
+        || !valid_identifier(&id)
+        || !valid_identifier(&value.id)
+        || value.revision <= 0
+        || !value.metadata.is_object()
+        || !value.spec.is_object()
+        || !value.provenance.is_object()
+        || value.content_sha256.as_deref().is_some_and(|hash| {
+            hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        || value
+            .created_by
+            .as_deref()
+            .is_some_and(|actor| actor.is_empty() || actor.len() > 256)
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid resource revision".into(),
+        ));
+    }
+    state
+        .repository
+        .get_resource(&id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(not_found)?;
+    if state
+        .repository
+        .get_resource_revision(&id, value.revision)
+        .await
+        .map_err(database_error)?
+        .is_some()
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "resource revision already exists".into(),
+        ));
+    }
+    if value.revision == 1 {
+        if value.parent_revision_id.is_some() {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the first resource revision cannot have a parent".into(),
+            ));
+        }
+    } else {
+        let expected_parent = state
+            .repository
+            .get_resource_revision(&id, value.revision - 1)
+            .await
+            .map_err(database_error)?
+            .ok_or(ApiError(
+                StatusCode::CONFLICT,
+                "the preceding resource revision is missing".into(),
+            ))?;
+        if value.parent_revision_id.as_deref() != Some(expected_parent.id.as_str()) {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "resource revision parent must be the preceding revision".into(),
+            ));
+        }
+    }
+    let data = state
+        .repository
+        .create_resource_revision(&value)
+        .await
+        .map_err(database_error)?;
+    audit(
+        &state,
+        &headers,
+        "resource_revision.create",
+        "resource_revision",
+        &data.id,
+        serde_json::json!({"resource_id": id, "revision": data.revision}),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(Envelope { data })))
+}
+
 async fn list_artifacts(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3846,6 +4449,7 @@ async fn upsert_artifact(
         ));
     }
     validate_artifact(&value)?;
+    validate_artifact_write(&state, &value).await?;
     let data = state
         .repository
         .upsert_artifact(&value)
@@ -4943,6 +5547,20 @@ fn validate_artifact(value: &ArtifactUpsert) -> Result<(), ApiError> {
             "unsupported artifact backend or invalid schema".into(),
         ));
     }
+    if value
+        .checksum
+        .as_deref()
+        .is_some_and(|hash| !valid_sha256(hash))
+        || value
+            .content_sha256
+            .as_deref()
+            .is_some_and(|hash| !valid_sha256(hash))
+    {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "artifact integrity values must be sha256".into(),
+        ));
+    }
     if value.data_class == "raw"
         && (!value.immutable
             || value
@@ -4952,7 +5570,11 @@ fn validate_artifact(value: &ArtifactUpsert) -> Result<(), ApiError> {
             || value
                 .content_sha256
                 .as_deref()
-                .is_none_or(|hash| !valid_sha256(hash)))
+                .is_none_or(|hash| !valid_sha256(hash))
+            || !normalized_sha256(value.checksum.as_deref().unwrap_or_default())
+                .eq_ignore_ascii_case(normalized_sha256(
+                    value.content_sha256.as_deref().unwrap_or_default(),
+                )))
     {
         return Err(ApiError(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -4968,9 +5590,90 @@ fn validate_artifact(value: &ArtifactUpsert) -> Result<(), ApiError> {
     Ok(())
 }
 
+async fn validate_artifact_write(state: &AppState, value: &ArtifactUpsert) -> Result<(), ApiError> {
+    if let Some(existing) = state
+        .repository
+        .get_artifact(&value.id)
+        .await
+        .map_err(database_error)?
+    {
+        if existing.resource_id != value.resource_id {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "artifact identity cannot move between Resources".into(),
+            ));
+        }
+        if existing.immutable && !immutable_artifact_matches(&existing, value) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "immutable artifact cannot be changed".into(),
+            ));
+        }
+    }
+
+    let mut parents = HashSet::new();
+    for parent in value.derived_from.as_array().into_iter().flatten() {
+        let parent_id = parent
+            .as_str()
+            .filter(|id| valid_identifier(id))
+            .ok_or(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "artifact lineage entries must be artifact identifiers".into(),
+            ))?;
+        if parent_id == value.id || !parents.insert(parent_id) {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "artifact lineage must contain unique parent artifacts".into(),
+            ));
+        }
+        let parent = state
+            .repository
+            .get_artifact(parent_id)
+            .await
+            .map_err(database_error)?
+            .ok_or(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "artifact lineage reference does not exist".into(),
+            ))?;
+        if !parent.immutable {
+            return Err(ApiError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "artifact lineage parents must be immutable".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn immutable_artifact_matches(
+    existing: &shennong_schema::Artifact,
+    value: &ArtifactUpsert,
+) -> bool {
+    existing.resource_id == value.resource_id
+        && existing.uri == value.uri
+        && existing.format == value.format
+        && existing.size == value.size
+        && existing.checksum == value.checksum
+        && existing.storage_backend == value.storage_backend
+        && existing.data_class == value.data_class
+        && existing.immutable == value.immutable
+        && existing.content_sha256 == value.content_sha256
+        && existing.source_uri == value.source_uri
+        && existing.derived_from == value.derived_from
+        && existing.pipeline_version == value.pipeline_version
+        && existing.retention_policy == value.retention_policy
+        && existing.storage_uri == value.storage_uri
+        && existing.schema_json == value.schema_json
+        && existing.provenance == value.provenance
+}
+
 fn valid_sha256(value: &str) -> bool {
-    let value = value.strip_prefix("sha256:").unwrap_or(value);
+    let value = normalized_sha256(value);
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn normalized_sha256(value: &str) -> &str {
+    value.strip_prefix("sha256:").unwrap_or(value)
 }
 fn validate_relation(value: &RelationUpsert) -> Result<(), ApiError> {
     if !valid_identifier(&value.source)
@@ -5121,11 +5824,17 @@ fn ensure_query_response_size(value: &serde_json::Value) -> Result<(), QueryErro
 #[cfg(test)]
 mod tests {
     use super::{
-        ByteRange, agent_catalog_entry, agent_manifest_document, ensure_query_response_size,
-        parse_single_range, public_error_code, query_error, safe_download_name, valid_identifier,
+        ByteRange, ResourceListQuery, ServerProfile, agent_catalog_entry, agent_manifest_document,
+        ensure_query_response_size, headless_endpoint_allowed, parse_single_range,
+        public_error_code, query_error, required_uuid_header, resource_list_window,
+        safe_download_name, upload_content_type, upload_filename, valid_identifier,
         validate_artifact, validate_resource,
     };
-    use axum::{body::to_bytes, response::IntoResponse};
+    use axum::{
+        body::to_bytes,
+        http::{HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+        response::IntoResponse,
+    };
     use serde_json::json;
     use shennong_query::QueryError;
     use shennong_schema::{ArtifactUpsert, Resource, ResourceUpsert};
@@ -5183,6 +5892,153 @@ mod tests {
             "metadata_store_is_unavailable"
         );
         assert_eq!(public_error_code(""), "request_failed");
+    }
+
+    #[test]
+    fn database_profile_is_headless_by_default_and_rejects_typos() {
+        assert_eq!(ServerProfile::parse(None), Ok(ServerProfile::Headless));
+        assert_eq!(
+            ServerProfile::parse(Some("headless")),
+            Ok(ServerProfile::Headless)
+        );
+        assert_eq!(
+            ServerProfile::parse(Some("legacy")),
+            Ok(ServerProfile::Legacy)
+        );
+        assert!(ServerProfile::parse(Some("public")).is_err());
+    }
+
+    #[test]
+    fn resource_list_window_is_strictly_bounded_and_cursor_compatible() {
+        let query = ResourceListQuery {
+            q: Some("  RNA-seq  ".into()),
+            limit: Some(25),
+            offset: None,
+            cursor: Some("50".into()),
+        };
+        assert_eq!(
+            resource_list_window(&query).unwrap(),
+            (Some("RNA-seq"), 25, 50)
+        );
+
+        for query in [
+            ResourceListQuery {
+                q: None,
+                limit: Some(0),
+                offset: None,
+                cursor: None,
+            },
+            ResourceListQuery {
+                q: None,
+                limit: Some(501),
+                offset: None,
+                cursor: None,
+            },
+            ResourceListQuery {
+                q: None,
+                limit: None,
+                offset: Some(2),
+                cursor: Some("3".into()),
+            },
+            ResourceListQuery {
+                q: None,
+                limit: None,
+                offset: None,
+                cursor: Some("opaque".into()),
+            },
+        ] {
+            assert_eq!(
+                resource_list_window(&query).unwrap_err().0,
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+    }
+
+    #[test]
+    fn headless_profile_only_exposes_data_plane_routes() {
+        for (method, path) in [
+            (Method::GET, "/health"),
+            (Method::GET, "/api/v1/resources/pbmc/revisions"),
+            (Method::POST, "/api/v1/resources/pbmc/revisions"),
+            (Method::POST, "/api/v1/query"),
+            (
+                Method::GET,
+                "/api/v1/research-projects/project-1/context-pack",
+            ),
+            (Method::PUT, "/api/v1/research-projects/project-1"),
+            (Method::POST, "/api/v1/uploads"),
+        ] {
+            assert!(headless_endpoint_allowed(&method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            (Method::GET, "/api/v1/auth/session"),
+            (Method::POST, "/api/v1/auth/register"),
+            (Method::GET, "/api/v1/chat/threads"),
+            (Method::GET, "/api/v1/memories"),
+            (Method::GET, "/api/v1/ai/providers"),
+            (Method::GET, "/api/v1/users"),
+            (Method::GET, "/api/v1/projects"),
+            (Method::POST, "/api/v1/research-projects"),
+            (Method::POST, "/api/v1/research-projects/project-1"),
+            (Method::DELETE, "/api/v1/research-projects/project-1"),
+            (Method::DELETE, "/api/v1/resources/pbmc"),
+        ] {
+            assert!(
+                !headless_endpoint_allowed(&method, path),
+                "{method} {path} must stay hidden"
+            );
+        }
+    }
+
+    #[test]
+    fn platform_upload_headers_and_file_metadata_fail_closed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-shennong-os-actor-id",
+            HeaderValue::from_static("5c2ec838-2574-4d45-8ec8-55ab71a6fb95"),
+        );
+        headers.insert("x-filename", HeaderValue::from_static("matrix.tsv.gz"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/tab-separated-values; charset=utf-8"),
+        );
+        assert_eq!(
+            required_uuid_header(&headers, "x-shennong-os-actor-id").unwrap(),
+            "5c2ec838-2574-4d45-8ec8-55ab71a6fb95"
+        );
+        assert_eq!(upload_filename(&headers).unwrap(), "matrix.tsv.gz");
+        assert_eq!(
+            upload_content_type(&headers).unwrap(),
+            "text/tab-separated-values; charset=utf-8"
+        );
+
+        for filename in [
+            "../matrix.tsv",
+            "folder/matrix.tsv",
+            "folder\\matrix.tsv",
+            "..",
+        ] {
+            headers.insert("x-filename", HeaderValue::from_str(filename).unwrap());
+            assert_eq!(
+                upload_filename(&headers).unwrap_err().0,
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("not-a-media-type"));
+        assert_eq!(
+            upload_content_type(&headers).unwrap_err().0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        headers.insert(
+            "x-shennong-os-actor-id",
+            HeaderValue::from_static("not-a-uuid"),
+        );
+        assert_eq!(
+            required_uuid_header(&headers, "x-shennong-os-actor-id")
+                .unwrap_err()
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ import {
 } from "@/lib/api/adapter";
 import { AppShell, SectionHeader, TinyBadge, TopBar } from "./app-shell";
 import { ProjectApiError } from "./projects-view";
+import { ProjectTabs } from "./project-tabs";
 
 const ProjectGraphCanvas = dynamic(
   () => import("./project-graph-canvas").then((module) => module.ProjectGraphCanvas),
@@ -58,10 +59,7 @@ export function ProjectGraphView({ projectId }: { projectId: string }) {
         action={<Link className="outline-button" href={`/projects/${encodeURIComponent(projectId)}`}><ArrowLeft />Back to workspace</Link>}
       />
       <div className="workspace-page project-graph-page">
-        <nav className="project-tabs" aria-label="Project sections">
-          <Link href={`/projects/${encodeURIComponent(projectId)}`}>Workspace</Link>
-          <Link className="active" href={`/projects/${encodeURIComponent(projectId)}/graph`}>BioGraph</Link>
-        </nav>
+        <ProjectTabs projectId={projectId} active="graph" />
         <SectionHeader title="Focused subgraph" description="Choose one root and 1–3 hops. ShennongDB never sends the entire project graph to the browser." />
         <form className="graph-controls" onSubmit={focus}>
           <label><Search /><input aria-label="Graph root entity ID" value={rootDraft} onChange={(event) => setRootDraft(event.target.value)} placeholder={initialRoot || "No root entity available"} /></label>

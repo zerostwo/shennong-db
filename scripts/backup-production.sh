@@ -4,11 +4,12 @@ set -eu
 compose=${COMPOSE_FILE:-docker-compose.production.yml}
 service=${SHENNONG_SERVICE:-shennong-db}
 out=${BACKUP_DIR:-./backups/$(date -u +%Y%m%dT%H%M%SZ)}
+environment_file=${SHENNONG_ENV_FILE:-.env}
 
-if [ -f .env ]; then
+if [ -f "$environment_file" ]; then
   set -a
   # shellcheck disable=SC1091
-  . ./.env
+  . "$environment_file"
   set +a
 fi
 data=${SHENNONG_DATA_PATH:-./data}
@@ -37,11 +38,11 @@ fi
 
 tar --acls --xattrs --numeric-owner -C "$data" -cpf "$out/data.tar" .
 cp "$compose" "$out/"
-if [ -f .env ]; then
-  cp .env "$out/environment.env"
+if [ -f "$environment_file" ]; then
+  cp "$environment_file" "$out/environment.env"
   chmod 600 "$out/environment.env"
 fi
-docker image inspect "${SHENNONG_IMAGE:-zerostwo/shennong-db:0.7.0}" \
+docker image inspect "${SHENNONG_DB_IMAGE:-${SHENNONG_IMAGE:-zerostwo/shennong-db:1.0.0}}" \
   --format '{{json .RepoDigests}}' > "$out/image-digests.json" 2>/dev/null || true
 date -u +%Y-%m-%dT%H:%M:%SZ > "$out/created-at.txt"
 (cd "$out" && find . -type f ! -name MANIFEST.sha256 -print0 \

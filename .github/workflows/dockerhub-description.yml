@@ -20,7 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v7.0.0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Update Docker Hub overview
         uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
@@ -28,6 +30,6 @@ jobs:
           username: zerostwo
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: zerostwo/shennong-db
-          short-description: Metadata-first biological data infrastructure with WebUI, API, and agent integrations.
+          short-description: Headless biomedical data plane for Shennong OS.
           readme-filepath: ./.dockerhub/README.md
           enable-url-completion: true

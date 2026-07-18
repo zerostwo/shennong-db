@@ -1,12 +1,25 @@
 #!/bin/sh
 set -eu
 
+if [ "${SHENNONG_TEST_DB_PROFILE:-}" != legacy ] || [ "${SHENNONG_TEST_ALLOW_LEGACY_PROFILE:-}" != 1 ]; then
+  echo 'test-platform.sh is the legacy compatibility suite; set SHENNONG_TEST_DB_PROFILE=legacy and SHENNONG_TEST_ALLOW_LEGACY_PROFILE=1 explicitly' >&2
+  exit 2
+fi
+if ! command -v openssl >/dev/null 2>&1; then
+  echo 'openssl is required to generate ephemeral integration credentials' >&2
+  exit 2
+fi
+SHENNONG_TEST_SERVICE_KEY=${SHENNONG_TEST_SERVICE_KEY:-$(openssl rand -hex 32)}
+SHENNONG_TEST_JWT_SECRET=${SHENNONG_TEST_JWT_SECRET:-$(openssl rand -hex 32)}
+SHENNONG_TEST_AGENT_ENCRYPTION_KEY=${SHENNONG_TEST_AGENT_ENCRYPTION_KEY:-$(openssl rand -hex 32)}
+export SHENNONG_TEST_SERVICE_KEY SHENNONG_TEST_JWT_SECRET SHENNONG_TEST_AGENT_ENCRYPTION_KEY
+
 base="http://127.0.0.1:${SHENNONG_TEST_PORT:-18081}"
 project="shennong-test-$$"
 compose="${COMPOSE_COMMAND:-docker compose}"
 file="docker-compose.test.yml"
 docker_command=$(printenv DOCKER_COMMAND 2>/dev/null || printf docker)
-admin='X-Shennong-Admin-Key: integration-test-admin-key-32-bytes'
+admin="X-Shennong-Admin-Key: $SHENNONG_TEST_SERVICE_KEY"
 json='Content-Type: application/json'
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/shennong-test.XXXXXX")
 slow_pid=

@@ -1,8 +1,13 @@
 {
   "name": "shennong-web",
   "private": true,
-  "version": "0.7.0",
+  "version": "1.0.0",
   "packageManager": "pnpm@10.17.1",
+  "pnpm": {
+    "overrides": {
+      "postcss": "8.5.16"
+    }
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -32,6 +37,8 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-hook-form": "^7.81.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.6.0",
     "zod": "^3.25.76"
   },

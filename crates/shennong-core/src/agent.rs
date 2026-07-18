@@ -142,12 +142,12 @@ impl ResourceRepository {
         title: &str,
         provider_id: Option<&str>,
     ) -> Result<Value, sqlx::Error> {
-        sqlx::query_scalar("INSERT INTO chat_threads(id,owner_user_id,title,provider_id) SELECT $1,$2,$3,p.id FROM (SELECT $4::text AS requested) input LEFT JOIN model_providers p ON p.id=input.requested AND p.owner_user_id=$2 WHERE input.requested IS NULL OR p.id IS NOT NULL RETURNING jsonb_build_object('id',id,'title',title,'provider_id',provider_id,'status',status,'created_at',created_at,'updated_at',updated_at)")
+        sqlx::query_scalar("INSERT INTO chat_threads(id,owner_user_id,title,provider_id) SELECT $1,$2,$3,p.id FROM (SELECT $4::text AS requested) input LEFT JOIN model_providers p ON p.id=input.requested AND p.owner_user_id=$2 WHERE input.requested IS NULL OR p.id IS NOT NULL RETURNING jsonb_build_object('id',id,'title',title,'provider_id',provider_id,'project_id',project_id,'status',status,'created_at',created_at,'updated_at',updated_at)")
             .bind(id).bind(owner_user_id).bind(title).bind(provider_id).fetch_one(&self.pool).await
     }
 
     pub async fn list_chat_threads(&self, owner_user_id: &str) -> Result<Vec<Value>, sqlx::Error> {
-        sqlx::query_scalar("SELECT jsonb_build_object('id',id,'title',title,'provider_id',provider_id,'status',status,'created_at',created_at,'updated_at',updated_at) FROM chat_threads WHERE owner_user_id=$1 ORDER BY updated_at DESC LIMIT 200")
+        sqlx::query_scalar("SELECT jsonb_build_object('id',id,'title',title,'provider_id',provider_id,'project_id',project_id,'status',status,'created_at',created_at,'updated_at',updated_at) FROM chat_threads WHERE owner_user_id=$1 ORDER BY updated_at DESC LIMIT 200")
             .bind(owner_user_id).fetch_all(&self.pool).await
     }
 
@@ -156,7 +156,7 @@ impl ResourceRepository {
         id: &str,
         owner_user_id: &str,
     ) -> Result<Option<Value>, sqlx::Error> {
-        sqlx::query_scalar("SELECT jsonb_build_object('id',id,'title',title,'provider_id',provider_id,'status',status,'created_at',created_at,'updated_at',updated_at) FROM chat_threads WHERE id=$1 AND owner_user_id=$2")
+        sqlx::query_scalar("SELECT jsonb_build_object('id',id,'title',title,'provider_id',provider_id,'project_id',project_id,'status',status,'created_at',created_at,'updated_at',updated_at) FROM chat_threads WHERE id=$1 AND owner_user_id=$2")
             .bind(id).bind(owner_user_id).fetch_optional(&self.pool).await
     }
 
@@ -168,7 +168,7 @@ impl ResourceRepository {
         status: &str,
         provider_id: Option<&str>,
     ) -> Result<Option<Value>, sqlx::Error> {
-        sqlx::query_scalar("UPDATE chat_threads t SET title=$3,status=$4,provider_id=$5,updated_at=NOW() WHERE t.id=$1 AND t.owner_user_id=$2 AND ($5::text IS NULL OR EXISTS(SELECT 1 FROM model_providers p WHERE p.id=$5 AND p.owner_user_id=$2)) RETURNING jsonb_build_object('id',id,'title',title,'provider_id',provider_id,'status',status,'created_at',created_at,'updated_at',updated_at)")
+        sqlx::query_scalar("UPDATE chat_threads t SET title=$3,status=$4,provider_id=$5,updated_at=NOW() WHERE t.id=$1 AND t.owner_user_id=$2 AND ($5::text IS NULL OR EXISTS(SELECT 1 FROM model_providers p WHERE p.id=$5 AND p.owner_user_id=$2)) RETURNING jsonb_build_object('id',id,'title',title,'provider_id',provider_id,'project_id',project_id,'status',status,'created_at',created_at,'updated_at',updated_at)")
             .bind(id).bind(owner_user_id).bind(title).bind(status).bind(provider_id).fetch_optional(&self.pool).await
     }
 
@@ -199,9 +199,11 @@ impl ResourceRepository {
         attachments: &Value,
         tool_events: &Value,
         citations: &Value,
+        reasoning_content: &str,
+        usage: &Value,
     ) -> Result<Value, sqlx::Error> {
-        sqlx::query_scalar("INSERT INTO chat_messages(id,thread_id,role,content,attachments,tool_events,citations) SELECT $1,t.id,$4,$5,$6,$7,$8 FROM chat_threads t WHERE t.id=$2 AND t.owner_user_id=$3 RETURNING jsonb_build_object('id',id,'thread_id',thread_id,'role',role,'content',content,'attachments',attachments,'tool_events',tool_events,'citations',citations,'created_at',created_at)")
-            .bind(id).bind(thread_id).bind(owner_user_id).bind(role).bind(content).bind(attachments).bind(tool_events).bind(citations).fetch_one(&self.pool).await
+        sqlx::query_scalar("INSERT INTO chat_messages(id,thread_id,role,content,attachments,tool_events,citations,reasoning_content,usage) SELECT $1,t.id,$4,$5,$6,$7,$8,$9,$10 FROM chat_threads t WHERE t.id=$2 AND t.owner_user_id=$3 RETURNING jsonb_build_object('id',id,'thread_id',thread_id,'role',role,'content',content,'attachments',attachments,'tool_events',tool_events,'citations',citations,'reasoning_content',reasoning_content,'usage',usage,'created_at',created_at)")
+            .bind(id).bind(thread_id).bind(owner_user_id).bind(role).bind(content).bind(attachments).bind(tool_events).bind(citations).bind(reasoning_content).bind(usage).fetch_one(&self.pool).await
     }
 
     pub async fn list_chat_messages(
@@ -210,7 +212,7 @@ impl ResourceRepository {
         owner_user_id: &str,
         limit: i64,
     ) -> Result<Vec<Value>, sqlx::Error> {
-        sqlx::query_scalar("SELECT jsonb_build_object('id',recent.id,'thread_id',recent.thread_id,'role',recent.role,'content',recent.content,'attachments',recent.attachments,'tool_events',recent.tool_events,'citations',recent.citations,'created_at',recent.created_at) FROM (SELECT m.* FROM chat_messages m JOIN chat_threads t ON t.id=m.thread_id WHERE m.thread_id=$1 AND t.owner_user_id=$2 ORDER BY m.created_at DESC,m.id DESC LIMIT $3) recent ORDER BY recent.created_at,recent.id")
+        sqlx::query_scalar("SELECT jsonb_build_object('id',recent.id,'thread_id',recent.thread_id,'role',recent.role,'content',recent.content,'attachments',recent.attachments,'tool_events',recent.tool_events,'citations',recent.citations,'reasoning_content',recent.reasoning_content,'usage',recent.usage,'created_at',recent.created_at) FROM (SELECT m.* FROM chat_messages m JOIN chat_threads t ON t.id=m.thread_id WHERE m.thread_id=$1 AND t.owner_user_id=$2 ORDER BY m.created_at DESC,m.id DESC LIMIT $3) recent ORDER BY recent.created_at,recent.id")
             .bind(thread_id).bind(owner_user_id).bind(limit.clamp(1, 500)).fetch_all(&self.pool).await
     }
 
@@ -232,7 +234,7 @@ impl ResourceRepository {
         owner_user_id: &str,
         query: &str,
     ) -> Result<Vec<Value>, sqlx::Error> {
-        sqlx::query_scalar("SELECT jsonb_build_object('id',id,'title',title,'type','chat','updated_at',updated_at) FROM chat_threads WHERE owner_user_id=$1 AND (title ILIKE '%'||$2||'%' OR EXISTS(SELECT 1 FROM chat_messages m WHERE m.thread_id=chat_threads.id AND m.content ILIKE '%'||$2||'%')) ORDER BY updated_at DESC LIMIT 20")
+        sqlx::query_scalar("SELECT jsonb_build_object('id',id,'title',title,'type','chat','project_id',project_id,'updated_at',updated_at) FROM chat_threads WHERE owner_user_id=$1 AND (title ILIKE '%'||$2||'%' OR EXISTS(SELECT 1 FROM chat_messages m WHERE m.thread_id=chat_threads.id AND m.content ILIKE '%'||$2||'%')) ORDER BY updated_at DESC LIMIT 20")
             .bind(owner_user_id).bind(query).fetch_all(&self.pool).await
     }
 
@@ -330,6 +332,14 @@ mod tests {
         assert!(migration.contains("data_policy IN ('public_only', 'allow_private')"));
         assert!(migration.contains("CREATE TABLE chat_threads"));
         assert!(migration.contains("CREATE TABLE chat_messages"));
+    }
+
+    #[test]
+    fn runtime_migration_persists_reasoning_and_usage() {
+        let migration = include_str!("../migrations/0014_agent_chat_runtime.sql");
+        assert!(migration.contains("reasoning_content TEXT"));
+        assert!(migration.contains("usage JSONB"));
+        assert!(migration.contains("jsonb_typeof(usage) = 'object'"));
     }
 
     #[test]

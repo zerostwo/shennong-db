@@ -4,7 +4,9 @@ import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import {
   Bot,
+  Brain,
   Check,
+  CircleOff,
   Copy,
   Database,
   KeyRound,
@@ -12,43 +14,65 @@ import {
   MonitorCog,
   Pencil,
   Plus,
+  Puzzle,
+  RefreshCw,
   ShieldCheck,
   Trash2,
   UserRound,
+  WandSparkles,
 } from "lucide-react";
 import {
   createAiProvider,
+  createAgentSkill,
   deleteAiProvider,
+  deleteAgentSkill,
+  discoverAiProviderModels,
   issueUserToken,
+  generateAgentSkill,
+  listAgentSkills,
   listAiProviders,
+  listAiProviderModels,
   listUserTokens,
   signOut,
+  updateAgentSkill,
   updateAiProvider,
   type AiProviderRecord,
+  type AgentSkillRecord,
   type JsonRecord,
 } from "@/lib/api/adapter";
+import { type SettingsSection } from "@/lib/settings-route";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { MemoryManager } from "@/components/memory-manager";
 
-export type SettingsSection = "general" | "models" | "agent-data" | "security" | "tokens" | "account";
+export type { SettingsSection } from "@/lib/settings-route";
 type Session = { authenticated: boolean; user_id: string; role: string } | null;
 
 const sections = [
   ["general", "General", MonitorCog],
   ["models", "Models", Bot],
+  ["skills", "Skills", Puzzle],
+  ["memory", "Memory", Brain],
   ["agent-data", "Agent & Data", Database],
   ["security", "Security", ShieldCheck],
   ["tokens", "API Tokens", KeyRound],
   ["account", "Account", UserRound],
 ] as const;
 
-const providerDefaults: Record<AiProviderRecord["providerType"], { baseUrl: string; model: string }> = {
-  openai: { baseUrl: "https://api.openai.com/v1", model: "" },
-  deepseek: { baseUrl: "https://api.deepseek.com", model: "" },
-  ollama: { baseUrl: "http://host.docker.internal:11434/v1", model: "" },
-  "openai-compatible": { baseUrl: "", model: "" },
+const providerDefaults: Record<AiProviderRecord["providerType"], { baseUrl: string }> = {
+  openai: { baseUrl: "https://api.openai.com/v1" },
+  deepseek: { baseUrl: "https://api.deepseek.com" },
+  ollama: { baseUrl: "http://host.docker.internal:11434/v1" },
+  "openai-compatible": { baseUrl: "" },
 };
 
-export function SettingsDialog({ open, onOpenChange, session, initialSection = "general" }: { open: boolean; onOpenChange: (open: boolean) => void; session: Session; initialSection?: SettingsSection }) {
+const providerLabels: Record<AiProviderRecord["providerType"], string> = {
+  openai: "OpenAI",
+  deepseek: "DeepSeek",
+  ollama: "Ollama",
+  "openai-compatible": "OpenAI-compatible",
+};
+
+export function SettingsDialog({ open, onOpenChange, onSectionChange, session, initialSection = "general" }: { open: boolean; onOpenChange: (open: boolean) => void; onSectionChange?: (section: SettingsSection) => void; session: Session; initialSection?: SettingsSection }) {
   const [section, setSection] = useState<SettingsSection>("general");
   useEffect(() => { if (open) setSection(initialSection); }, [initialSection, open]);
   return (
@@ -59,7 +83,7 @@ export function SettingsDialog({ open, onOpenChange, session, initialSection = "
         <aside className="settings-nav" aria-label="Settings sections">
           <h2>Settings</h2>
           {sections.map(([value, label, Icon]) => (
-            <button key={value} className={section === value ? "active" : ""} onClick={() => setSection(value)}>
+            <button key={value} className={section === value ? "active" : ""} onClick={() => { setSection(value); onSectionChange?.(value); }}>
               <Icon />
               <span>{label}</span>
             </button>
@@ -68,7 +92,9 @@ export function SettingsDialog({ open, onOpenChange, session, initialSection = "
         <div className="settings-content">
           {section === "general" && <GeneralSettings />}
           {section === "models" && <ModelSettings authenticated={Boolean(session?.authenticated)} />}
-          {section === "agent-data" && <AgentDataSettings onClose={() => onOpenChange(false)} onModels={() => setSection("models")} />}
+          {section === "skills" && <SkillsSettings authenticated={Boolean(session?.authenticated)} />}
+          {section === "memory" && <MemorySettings authenticated={Boolean(session?.authenticated)} />}
+          {section === "agent-data" && <AgentDataSettings onClose={() => onOpenChange(false)} onModels={() => { setSection("models"); onSectionChange?.("models"); }} />}
           {section === "security" && <SecuritySettings onClose={() => onOpenChange(false)} />}
           {section === "tokens" && <TokenSettings session={session} />}
           {section === "account" && <AccountSettings session={session} onClose={() => onOpenChange(false)} />}
@@ -151,25 +177,29 @@ function ProviderForm({ provider, onCancel, onSaved }: { provider: AiProviderRec
   const initialType = provider?.providerType ?? "openai";
   const [type, setType] = useState<AiProviderRecord["providerType"]>(initialType);
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? providerDefaults[initialType].baseUrl);
-  const [model, setModel] = useState(provider?.model ?? providerDefaults[initialType].model);
+  const [apiKey, setApiKey] = useState("");
+  const [models, setModels] = useState<string[]>(provider?.model ? [provider.model] : []);
+  const [model, setModel] = useState(provider?.model ?? "");
+  const [connected, setConnected] = useState(Boolean(provider?.model));
   const [dataPolicy, setDataPolicy] = useState<AiProviderRecord["dataPolicy"]>(provider?.dataPolicy ?? "public_only");
   const [busy, setBusy] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
   const [error, setError] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!connected || !model) { setError("Connect to the provider and select a model first."); return; }
     setBusy(true);
     setError("");
     const form = new FormData(event.currentTarget);
-    const apiKey = String(form.get("api_key") ?? "").trim();
     const value = {
-      name: String(form.get("name") ?? "").trim(),
+      name: `${providerLabels[type]} · ${model}`,
       provider_kind: type,
       base_url: baseUrl.trim(),
       model: model.trim(),
       data_policy: dataPolicy,
       enabled: true,
       is_default: form.get("is_default") === "on",
-      ...(apiKey ? { api_key: apiKey } : {}),
+      ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
     };
     try {
       if (provider) await updateAiProvider(provider.id, value);
@@ -181,25 +211,154 @@ function ProviderForm({ provider, onCancel, onSaved }: { provider: AiProviderRec
   function changeType(value: AiProviderRecord["providerType"]) {
     setType(value);
     setBaseUrl(providerDefaults[value].baseUrl);
-    setModel(providerDefaults[value].model);
+    setApiKey("");
+    setModels([]);
+    setModel("");
+    setConnected(false);
+    setError("");
+  }
+  async function connect() {
+    if ((type === "openai" || type === "deepseek") && !apiKey.trim() && !(provider?.hasApiKey && provider.providerType === type && provider.baseUrl === baseUrl)) {
+      setError(`Enter your ${providerLabels[type]} API key.`);
+      return;
+    }
+    if (!baseUrl.trim()) { setError("Enter the provider base URL."); return; }
+    setDiscovering(true);
+    setError("");
+    try {
+      const canUseSavedCredential = Boolean(provider && !apiKey.trim() && provider.providerType === type && provider.baseUrl === baseUrl);
+      const rows = canUseSavedCredential
+        ? await listAiProviderModels(provider!.id)
+        : await discoverAiProviderModels({ provider_kind: type, base_url: baseUrl.trim(), ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}) });
+      if (!rows.length) throw new Error("The provider connected, but did not return any models.");
+      setModels(rows);
+      setModel((current) => rows.includes(current) ? current : rows[0]);
+      setConnected(true);
+    } catch (reason) {
+      setConnected(false);
+      setModels([]);
+      setModel("");
+      setError(reason instanceof Error ? reason.message : "Model list could not be loaded");
+    } finally { setDiscovering(false); }
   }
   return (
     <form className="provider-form" onSubmit={submit}>
       <div className="provider-form-heading"><h3>{provider ? "Edit model connection" : "Add model connection"}</h3><button type="button" className="settings-text-button" onClick={onCancel}>Cancel</button></div>
       <div className="provider-form-grid">
-        <label>Name<input name="name" defaultValue={provider?.name ?? ""} required autoFocus /></label>
-        <label>Provider<select value={type} onChange={(event) => changeType(event.target.value as AiProviderRecord["providerType"])}><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="ollama">Ollama</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
-        <label className="wide">Base URL<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required /></label>
-        <label>Model<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="Model ID from your provider" required /></label>
-        <label>API key<input name="api_key" type="password" autoComplete="off" placeholder={provider?.hasApiKey ? "Leave blank to keep current key" : type === "ollama" ? "Optional" : "Required"} /></label>
-        <label className="wide">Data access<select value={dataPolicy} onChange={(event) => setDataPolicy(event.target.value as AiProviderRecord["dataPolicy"])}><option value="public_only">Public Resources only</option><option value="allow_private">Allow private data</option></select></label>
-        <label className="provider-checkbox"><input name="is_default" type="checkbox" defaultChecked={provider?.isDefault ?? false} />Use by default</label>
+        <label className="wide">Provider<select value={type} onChange={(event) => changeType(event.target.value as AiProviderRecord["providerType"])} autoFocus><option value="openai">OpenAI</option><option value="deepseek">DeepSeek</option><option value="ollama">Ollama</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
+        {type !== "ollama" ? <label className="wide">API key<input value={apiKey} onChange={(event) => { setApiKey(event.target.value); setConnected(false); }} type="password" autoComplete="off" placeholder={provider?.hasApiKey ? "Leave blank to use the saved key" : "Paste API key"} /></label> : null}
+        {type === "openai-compatible" ? <label className="wide">Base URL<input value={baseUrl} onChange={(event) => { setBaseUrl(event.target.value); setConnected(false); }} placeholder="https://provider.example/v1" required /></label> : null}
+        <div className="provider-connect-row"><button type="button" className="settings-secondary" onClick={() => void connect()} disabled={discovering}>{discovering ? <RefreshCw className="spin" /> : connected ? <Check /> : <RefreshCw />}{discovering ? "Loading models…" : connected ? "Connected" : "Connect & load models"}</button>{connected ? <small>{models.length} model{models.length === 1 ? "" : "s"} available</small> : null}</div>
+        {connected ? <label className="wide">Model<select value={model} onChange={(event) => setModel(event.target.value)} required>{models.map((item) => <option key={item} value={item}>{item}</option>)}</select></label> : null}
+        {connected ? <label className="wide">Data access<select value={dataPolicy} onChange={(event) => setDataPolicy(event.target.value as AiProviderRecord["dataPolicy"])}><option value="public_only">Public Resources only</option><option value="allow_private">Allow private data</option></select></label> : null}
+        {connected ? <label className="provider-checkbox"><input name="is_default" type="checkbox" defaultChecked={provider?.isDefault ?? false} />Use by default</label> : null}
       </div>
       {dataPolicy === "allow_private" ? <div className="provider-policy-warning" role="note">Tool results and attachment metadata may be sent to this model provider.</div> : null}
       {error ? <div className="settings-error" role="alert">{error}</div> : null}
-      <div className="provider-form-actions"><button type="button" className="settings-secondary" onClick={onCancel}>Cancel</button><button className="settings-primary" disabled={busy}>{busy ? "Saving…" : "Save model"}</button></div>
+      <div className="provider-form-actions"><button type="button" className="settings-secondary" onClick={onCancel}>Cancel</button><button className="settings-primary" disabled={busy || discovering || !connected}>{busy ? "Saving…" : "Save model"}</button></div>
     </form>
   );
+}
+
+function SkillsSettings({ authenticated }: { authenticated: boolean }) {
+  const [skills, setSkills] = useState<AgentSkillRecord[]>([]);
+  const [mode, setMode] = useState<"list" | "custom" | "generate">("list");
+  const [editing, setEditing] = useState<AgentSkillRecord | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    if (!authenticated) return;
+    setLoading(true);
+    setError("");
+    try { setSkills(await listAgentSkills()); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Skills could not be loaded"); }
+    finally { setLoading(false); }
+  }, [authenticated]);
+  useEffect(() => { void load(); }, [load]);
+
+  async function saveCustom(event: FormEvent<HTMLFormElement>, skill?: AgentSkillRecord) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") ?? "").trim();
+    const description = String(form.get("description") ?? "").trim();
+    const content = String(form.get("content") ?? "").trim();
+    try {
+      if (skill) await updateAgentSkill(skill.id, { name, description, content, status: skill.status, change_note: "Updated in WebUI" });
+      else await createAgentSkill({ name, description, content, status: "active" });
+      setMode("list");
+      setEditing(null);
+      await load();
+      window.dispatchEvent(new Event("shennong:skills-updated"));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Skill could not be saved"); }
+    finally { setBusy(false); }
+  }
+
+  async function generate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const form = new FormData(event.currentTarget);
+    const lines = (name: string) => String(form.get(name) ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+    try {
+      const skill = await generateAgentSkill({
+        name: String(form.get("name") ?? "").trim() || undefined,
+        goal: String(form.get("goal") ?? "").trim(),
+        constraints: lines("constraints"),
+        workflow: lines("workflow"),
+      });
+      setEditing(skill);
+      setMode("list");
+      await load();
+      window.dispatchEvent(new Event("shennong:skills-updated"));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Skill draft could not be generated"); }
+    finally { setBusy(false); }
+  }
+
+  async function changeStatus(skill: AgentSkillRecord) {
+    setError("");
+    try {
+      await updateAgentSkill(skill.id, { name: skill.name, description: skill.description, status: skill.status === "active" ? "disabled" : "active" });
+      await load();
+      window.dispatchEvent(new Event("shennong:skills-updated"));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Skill status could not be updated"); }
+  }
+
+  async function remove(skill: AgentSkillRecord) {
+    if (!window.confirm(`Delete ${skill.name}?`)) return;
+    setError("");
+    try { await deleteAgentSkill(skill.id); await load(); window.dispatchEvent(new Event("shennong:skills-updated")); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Skill could not be deleted"); }
+  }
+
+  const actions = authenticated ? <div className="skill-header-actions"><button className="settings-secondary" onClick={() => { setEditing(null); setMode("generate"); }}><WandSparkles />Generate</button><button className="settings-command" onClick={() => { setEditing(null); setMode("custom"); }}><Plus />Add custom</button></div> : undefined;
+  return (
+    <SettingsPanel title="Skills" action={actions}>
+      {!authenticated ? <SettingsEmpty title="Sign in to manage Agent Skills." /> : loading ? <SettingsEmpty title="Loading Skills…" /> : (
+        <>
+          {error ? <div className="settings-error" role="alert">{error}</div> : null}
+          {mode === "custom" ? <SkillEditor busy={busy} onCancel={() => setMode("list")} onSubmit={(event) => void saveCustom(event)} /> : null}
+          {mode === "generate" ? <SkillGenerator busy={busy} onCancel={() => setMode("list")} onSubmit={(event) => void generate(event)} /> : null}
+          {editing ? <SkillEditor skill={editing} busy={busy} onCancel={() => setEditing(null)} onSubmit={(event) => void saveCustom(event, editing)} /> : null}
+          {mode === "list" && !editing ? <div className="skill-list">{skills.map((skill) => <div className="skill-row" key={skill.id}><div className="skill-row-main"><span className="model-logo"><Puzzle /></span><span className="model-copy"><strong>{skill.name}</strong><small>{skill.description || "No description"}</small><small>{skill.sourceKind.replace("_", " ")} · revision {skill.revision}</small></span><span className={`skill-status ${skill.status}`}>{skill.status}</span>{!skill.isBuiltin ? <><button className="settings-icon" aria-label={`Edit ${skill.name}`} title="Edit Skill" onClick={() => setEditing(skill)}><Pencil /></button><button className="settings-icon" aria-label={`${skill.status === "active" ? "Disable" : "Activate"} ${skill.name}`} title={skill.status === "active" ? "Disable Skill" : "Activate Skill"} onClick={() => void changeStatus(skill)}>{skill.status === "active" ? <CircleOff /> : <Check />}</button><button className="settings-icon danger" aria-label={`Delete ${skill.name}`} title="Delete Skill" onClick={() => void remove(skill)}><Trash2 /></button></> : null}</div><details className="skill-instructions"><summary>View instructions</summary><pre>{skill.content}</pre></details></div>)}{skills.length === 0 && !error ? <SettingsEmpty title="No persisted Skills." /> : null}</div> : null}
+        </>
+      )}
+    </SettingsPanel>
+  );
+}
+
+function SkillEditor({ skill, busy, onCancel, onSubmit }: { skill?: AgentSkillRecord; busy: boolean; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <form className="skill-editor" onSubmit={onSubmit}><div className="provider-form-heading"><h3>{skill ? "Edit Skill" : "Add custom Skill"}</h3><button type="button" className="settings-text-button" onClick={onCancel}>Cancel</button></div><label>Name<input name="name" defaultValue={skill?.name ?? ""} required autoFocus /></label><label>Description<input name="description" defaultValue={skill?.description ?? ""} /></label><label>Instructions (Markdown)<textarea name="content" defaultValue={skill?.content ?? ""} rows={10} required /></label><div className="provider-form-actions"><button type="button" className="settings-secondary" onClick={onCancel}>Cancel</button><button className="settings-primary" disabled={busy}>{busy ? "Saving…" : skill ? "Save revision" : "Add Skill"}</button></div></form>;
+}
+
+function SkillGenerator({ busy, onCancel, onSubmit }: { busy: boolean; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <form className="skill-editor" onSubmit={onSubmit}><div className="provider-form-heading"><h3>Generate a Skill draft</h3><button type="button" className="settings-text-button" onClick={onCancel}>Cancel</button></div><label>Name (optional)<input name="name" autoFocus /></label><label>Goal<textarea name="goal" rows={3} required placeholder="What should this Skill help the Agent accomplish?" /></label><label>Constraints, one per line<textarea name="constraints" rows={3} /></label><label>Workflow, one step per line<textarea name="workflow" rows={4} /></label><div className="provider-form-actions"><button type="button" className="settings-secondary" onClick={onCancel}>Cancel</button><button className="settings-primary" disabled={busy}><WandSparkles />{busy ? "Generating…" : "Generate draft"}</button></div></form>;
+}
+
+function MemorySettings({ authenticated }: { authenticated: boolean }) {
+  return <SettingsPanel title="Memory">{authenticated ? <MemoryManager /> : <SettingsEmpty title="Sign in to manage global memory." />}</SettingsPanel>;
 }
 
 function AgentDataSettings({ onClose, onModels }: { onClose: () => void; onModels: () => void }) {

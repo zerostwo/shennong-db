@@ -1922,7 +1922,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-auth"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "hmac",
  "http",
@@ -1936,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-cli"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "clap",
  "serde",
@@ -1949,7 +1949,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-core"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "libc",
@@ -1967,7 +1967,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-mcp"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "reqwest",
  "rmcp",
@@ -1980,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-query"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1994,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-schema"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2004,7 +2004,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-server"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2021,6 +2021,7 @@ dependencies = [
  "shennong-schema",
  "shennong-storage",
  "sqlx",
+ "thiserror",
  "tokio",
  "tower-http",
  "tracing",
@@ -2031,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "shennong-storage"
-version = "0.7.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "chrono",

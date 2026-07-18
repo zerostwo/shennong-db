@@ -9,10 +9,23 @@ permissions:
   contents: read
 
 jobs:
+  openapi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Install pinned OpenAPI validator
+        run: python3 -m pip install --disable-pip-version-check openapi-spec-validator==0.7.2
+      - name: Validate ShennongDB API contract
+        run: openapi-spec-validator openapi/shennongdb.json
+
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -20,8 +33,8 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
       - name: Audit dependencies
-        # jsonwebtoken records optional RSA crates in Cargo.lock, but its default
-        # features are disabled and `cargo tree -i rsa` has no enabled path.
+        # sqlx records optional MySQL RSA crates in Cargo.lock, but this service
+        # enables PostgreSQL only and `cargo tree --target all -i rsa` has no enabled path.
         run: cargo install cargo-audit --locked && cargo audit --ignore RUSTSEC-2023-0071
       - name: License and policy scan
         run: cargo install cargo-deny --locked && cargo deny check
@@ -30,6 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - name: Build integration image
         run: docker build --tag shennong-db:ci --build-arg VCS_REF=${{ github.sha }} .
       - name: Vulnerability scan
@@ -39,9 +54,16 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: 1
           ignore-unfixed: true
-      - name: Run platform tests
+      - name: Run production headless contract tests
         env:
           SHENNONG_TEST_IMAGE: shennong-db:ci
+          SHENNONG_TEST_DB_PROFILE: headless
+        run: ./scripts/test-headless-platform.sh
+      - name: Run legacy compatibility tests
+        env:
+          SHENNONG_TEST_IMAGE: shennong-db:ci
+          SHENNONG_TEST_DB_PROFILE: legacy
+          SHENNONG_TEST_ALLOW_LEGACY_PROFILE: "1"
         run: ./scripts/test-platform.sh
 
   secrets:
@@ -50,6 +72,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Secret scan
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
         env:

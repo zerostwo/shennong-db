@@ -47,6 +47,8 @@ describe("ProjectWorkspaceView", () => {
     expect(screen.getByText("Study 1")).toBeInTheDocument();
     expect(screen.getByText("Sample 1")).toBeInTheDocument();
     expect(screen.getByText("qPCR capture")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Chat" })).toHaveAttribute("href", "/projects/project-1/chat");
+    expect(screen.getByRole("link", { name: "Memory" })).toHaveAttribute("href", "/projects/project-1/memory");
     expect(mocks.getProjectContextPack).toHaveBeenCalledTimes(1);
     expect(mocks.listProjectEntities).not.toHaveBeenCalled();
     expect(mocks.listProjectActivities).not.toHaveBeenCalled();

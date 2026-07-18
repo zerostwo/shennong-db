@@ -1,17 +1,22 @@
-# ShennongDB user guide
+# Legacy ShennongDB 0.8 standalone user guide
 
-This guide describes the current `0.7.0` all-in-one deployment, WebUI, HTTP API,
+> This document is retained for rollback and migration context. It does not
+> describe the V1 production image. Deploy V1 through Shennong OS and use the
+> current [headless service README](../README.md) for direct DB development.
+
+This guide describes the retired `0.8.0` all-in-one deployment, WebUI, HTTP API,
 data workflows, administration, and day-two operations. The checked-in
 [`openapi/shennongdb.json`](../openapi/shennongdb.json) remains the field-level
 API contract.
 
 ## 1. What ShennongDB runs
 
-The release image contains five cooperating components behind one published
+The release image contains six cooperating components behind one published
 HTTP port:
 
 - the Next.js WebUI and API gateway on container port `8000`;
 - the Rust API on loopback port `8001`;
+- the Pi Agent runtime on loopback port `8002`;
 - PostgreSQL metadata and authentication storage;
 - ClickHouse query cache;
 - SeaweedFS object storage and embedded TileDB access.
@@ -19,7 +24,8 @@ HTTP port:
 All persistent state is under `/data`. PostgreSQL, ClickHouse, object storage,
 uploaded files, derived arrays, and the generated secret file are therefore
 preserved by one host mount. None of the internal services publishes a host
-port.
+port. The image starts Pi automatically; it requires no additional container,
+port, API key, or normal deployment environment variable.
 
 ## 2. Install with Docker Compose
 
@@ -45,7 +51,7 @@ The normal deployment configuration has four values. Edit them only when the
 defaults do not match the host:
 
 ```dotenv
-SHENNONG_IMAGE=zerostwo/shennong-db:0.7.0
+SHENNONG_IMAGE=zerostwo/shennong-db:0.8.0
 SHENNONG_DATA_PATH=/srv/shennong-db/data
 SHENNONG_BIND_ADDRESS=127.0.0.1
 SHENNONG_PORT=18080
@@ -58,8 +64,8 @@ optional download proxy:
 SHENNONG_DOWNLOAD_PROXY=http://host.docker.internal:7890
 ```
 
-No administrator, session, Agent credential, S3, or database secret is needed
-in `.env`. The container generates those credentials on first start and
+No administrator, session, Agent credential, Pi-runtime, S3, or database secret
+is needed in `.env`. The container generates those credentials on first start and
 persists them in `/data/.shennong-secrets`. Keep that file with the data volume
 during restarts, backups, and upgrades. Advanced capacity and ingress overrides
 are documented in [production-compose.md](production-compose.md).
@@ -131,12 +137,12 @@ The WebUI uses the same origin as the API. The principal areas are:
 
 | Area | What users can do |
 |---|---|
-| Agent Chat | Ask questions over permitted data, attach files, review tool progress and citations, and approve data-changing actions |
+| Agent Chat | Ask questions over permitted data, render Markdown answers, review reasoning and token usage, attach files, select Skills, inspect tool progress and citations, and approve data-changing actions |
 | Search | Open a centered search dialog for chats, Resources, and Projects from the sidebar or `Cmd/Ctrl+K` |
 | Resources | Browse readable Resources and inspect metadata, Artifacts, relations, provenance, readiness, and query examples |
-| Projects | Create research Projects, bind Resources, upload project files, inspect the Research Graph and Context Pack |
+| Projects | Create research Projects, bind Resources, upload project files, hold Project-specific Chat and Memory, and inspect the Research Graph and Context Pack |
 | My Data | Manage uploads, ingestion status, owned Resources, collections, and favorites |
-| Settings | Configure general preferences, AI models, Agent data policy, security, personal API tokens, and account details |
+| Settings | Configure general preferences, AI models, Skills, global Memory, Agent data policy, security, personal API tokens, and account details without leaving the active workspace |
 | Administration | Open User Management and manage grants, provider ingestion, audit events, storage, settings, backups, and monitoring |
 | Authentication | Sign in/out, complete 2FA, recover an account, reset or change a password |
 | Docs and Support | Read in-product guidance and diagnostic entry points |
@@ -146,11 +152,35 @@ Projects, profile data, sessions, and tokens require sign-in. Administration
 pages require an administrator account.
 
 Each user adds their own OpenAI, DeepSeek, Ollama, or OpenAI-compatible provider
-under **Settings → Models**. API keys are encrypted user settings and are not
-deployment environment variables. Agent Chat can inspect and query permitted
-Resources. Attachments can be inspected as metadata and, with explicit approval,
-registered as private raw Resources. This release does not claim scientific
-normalization of arbitrary uploads.
+under **Settings → Models**. Choose the provider and enter its API key, select
+**Connect**, then choose a model from the discovered dropdown. The server fills
+the standard provider URL and records capability hints such as tool calling and
+reasoning. Ollama needs no API key and discovers models from the approved local
+endpoint. API keys are encrypted user settings and are not deployment
+environment variables.
+
+Settings opens as a hash-addressed dialog, for example `/#settings/Account` or
+`/#settings/Models`, so closing it returns to the same Chat or Project state.
+Reasoning-capable models expose an effort control; completed turns can show the
+model's reasoning section and aggregate prompt, completion, reasoning, cache,
+and total token counts. Markdown answers render as formatted text rather than
+raw Markdown syntax.
+
+**Settings → Skills** lists the governed built-in Skills and the user's custom
+Skills. A user can write a Markdown-only Skill or ask the Agent to generate a
+draft from a goal, guardrails, and workflow. Generated Skills remain disabled
+until reviewed and activated, and enabling a Skill affects only the selected
+conversation. **Settings → Memory** manages the user's global Memory. A
+Project's **Memory** tab holds a separate Project scope; a Project chat receives
+global Memory, that Project's Memory, its selected Skills, and its authorized
+Context Pack, but not another Project's context.
+
+Agent Chat can inspect and query permitted Resources. For tumor-versus-normal
+expression questions it resolves the exact Resource gene identifier and uses a
+governed complete-group descriptive comparison instead of inferring direction
+from a small sample. Attachments can be inspected as metadata and, with explicit
+approval, registered as private raw Resources. This release does not claim
+scientific normalization of arbitrary uploads.
 
 ## 5. Authentication for scripts
 
@@ -403,6 +433,13 @@ curl -fsS "$BASE_URL/api/v1/projects/melanoma-targets/context-pack" \
   -H "Authorization: Bearer $TOKEN" | jq
 ```
 
+In the WebUI, open a Project and choose **Chat** to create conversations bound
+to that Project. Choose **Memory** to add or revise Project-only context. The
+server verifies membership on every Project thread and memory request; a
+Project provider must explicitly allow private context. Resources remain the
+shared/public database layer, while a Project carries the isolated data and
+research context for one study.
+
 Graph search accepts `q`, an optional `project_id`, and a limit up to 200 for
 the HTTP graph endpoints. Subgraphs allow depth 1 to 3. See
 [research-biograph.md](research-biograph.md) for entity, activity, association,
@@ -469,6 +506,10 @@ curl -i http://127.0.0.1:18080/healthz
 | API returns `422` | Request violates the current Resource/schema contract; inspect first |
 | API returns `429` | Lower concurrency/request rate and wait before bounded retries |
 | Provider install fails | Check checksum, outbound network/proxy, free disk, and ingestion job details |
+| Model connection shows no models | Verify the provider API key and outbound access, then reconnect to repeat model discovery |
+| Agent turn fails after tool calls | Open the retained tool activity and provider diagnostics; completed tool events and token usage are preserved |
+| Container cannot reach local Ollama | Use `host.docker.internal:11434`; when Ollama listens only on loopback, install the restricted units under `deploy/systemd/` as described in [production-compose.md](production-compose.md) |
+| Pi runtime is unavailable | Inspect the container log and `/data/.shennong-secrets`; the all-in-one runtime should start automatically on loopback and has no host port |
 | MCP starts but tools fail | Verify `SHENNONG_URL`, token scope, `/healthz`, and the MCP timeout |
 
 ## 15. Agent and developer entry points

@@ -6,7 +6,140 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-07-15
+## [1.0.0] - 2026-07-18
+
+### Added
+
+- Add production-default `headless` profile with a strict data-plane path and
+  method allowlist plus deployment-only service authentication.
+- Add append-only Resource revision list, create, and retrieval endpoints with
+  an enforced linear parent chain and immutable database records.
+- Add `/api/v1/research-projects/*` aliases to separate Research Graph data
+  records from Shennong OS Project authorization.
+- Add service-only, idempotent `PUT /api/v1/research-projects/{id}` Project
+  shadow synchronization without DB-local users or Project membership rows.
+- Add a headless upload contract that persists opaque OS actor/Project UUIDs,
+  atomically creates immutable Artifacts, and binds the private Resource to the
+  exact Project.
+- Add the MIT License distribution terms.
+
+### Changed
+
+- Make Shennong OS the owner of registration, identity, Project membership,
+  Chat, Memory, model providers, and Agent Skills.
+- Treat `projects.owner_user_id` as an opaque Shennong OS identifier instead of
+  a foreign key to the legacy ShennongDB user table.
+- Slim the production image and entrypoint so they no longer build, copy, or
+  start the former WebUI or DB-local Pi Agent runtime.
+- Require a service key of at least 32 bytes in production and disable the
+  legacy application profile unless explicitly allowed.
+- Reclassify the former WebUI, Pi runtime, product guide, and browser API docs
+  as migration references and document the unified V1 headless topology.
+- Align the retained, non-shipping WebUI and Pi runtime package metadata with
+  the repository's `1.0.0` release line.
+- Bound Resource listing in repository SQL with validated limit and numeric
+  cursor/offset parameters.
+
+### Security
+
+- Return 404 for legacy authentication, user, Chat, Memory, AI-provider, grant,
+  collection, favorite, and legacy Project paths in headless mode.
+- Require the internal administrator service key for every data API request;
+  health and readiness endpoints remain available to the orchestrator.
+- Publish headless-only Docker Hub metadata, pin release Actions to exact
+  commits, disable checkout credential persistence, and scope keyless-signing
+  permissions to the release job.
+- Pin every production build stage (Rust, ClickHouse, SeaweedFS, Debian, and
+  PostgreSQL) to a reviewed multi-platform manifest digest.
+- Override the retained WebUI's transitive PostCSS dependency to `8.5.16` so
+  repository production-dependency audits do not include GHSA-qx2v-qp2m-jg93.
+- Generate integration-test credentials per run and suppress the one removed
+  historical fixture only by its exact gitleaks fingerprint.
+- Enforce optional Project scoping on BioGraph subgraph traversal, returning a
+  non-disclosing not-found response for a foreign root and failing closed if
+  any returned entity or association crosses the requested Project boundary.
+- Accept upload identity headers only from the verified headless service-admin
+  principal; validate UUIDs, file names, media types, byte limits, and exact
+  actor/Project ownership before registration.
+- Enforce Resource Revision linearity and immutability in PostgreSQL, and enforce
+  raw Artifact checksum integrity, existing immutable lineage parents, JSON
+  shapes, and lineage-safe deletion with a GIN-backed `derived_from` lookup.
+- Refuse Docker publication unless the tag, Cargo package, and OpenAPI versions
+  match and the release candidate passes formatting, Clippy, tests, and the
+  production headless contract before `latest` or `stable` can move.
+
+### Fixed
+
+- Make backup/restore helpers accept the unified deployment environment file,
+  record the V1 DB image by default, and use headless verification language.
+
+## 0.8.0 development milestone - 2026-07-15 (not released)
+
+### Added
+
+- Add the bundled Pi Agent runtime as a loopback-only all-in-one service. It
+  receives ephemeral provider credentials from the Rust authorization
+  boundary, exposes no host port, has no shell or file-system tools, and sends
+  governed data operations back through ShennongDB.
+- Add provider connection discovery so a user supplies only the provider and
+  API key, then chooses from the models and capability hints returned by
+  DeepSeek, OpenAI, Ollama, or an OpenAI-compatible endpoint.
+- Add persisted reasoning content and aggregate token usage for Agent turns,
+  reasoning-effort controls for capable models, and rendered Markdown with
+  GitHub-flavored tables, lists, and code blocks in Chat.
+- Add built-in, user-authored, and generated Agent Skills with immutable
+  revisions and explicit per-thread activation. Generated Skills start as
+  drafts and cannot add code, shell, or network capabilities.
+- Add per-user global Memory and Project-scoped Memory with immutable revisions,
+  plus Project-bound Chat threads that receive only the caller's authorized
+  Project Context Pack.
+- Add a governed `compare_expression` tool for complete tumor-versus-normal
+  descriptive summaries, including exact gene resolution, group counts, mean
+  and median differences, citations, and an explicit no-significance-test
+  boundary.
+- Add optional systemd socket-proxy units that expose a loopback-only host
+  Ollama service only on the Docker bridge address required by the container.
+
+### Changed
+
+- Route Agent model execution through the Pi SDK runtime while keeping
+  authentication, provider-secret encryption, Project membership, Resource
+  authorization, tool budgets, writes, and audit ownership in the Rust service.
+- Expand the governed tool protocol to inspect declared Resource operations,
+  resolve exact versioned feature identifiers server-side, retain completed
+  tool events on failed turns, and allow a final evidence-based answer when the
+  bounded tool budget is reached.
+- Open Settings through hash routes such as `/#settings/Account`, preserving the
+  active Chat or Project workspace behind the dialog instead of navigating to a
+  separate settings page.
+- Make Resources the public database layer and Projects the isolated research
+  layer, with each Project carrying its own chats, bound data, Context Pack, and
+  Memory.
+
+### Fixed
+
+- Fix the YTHDF2 colon-cancer question path that could exhaust the Agent step
+  limit after invalid expression operation names or unversioned feature IDs.
+- Preserve DeepSeek reasoning content across tool-call rounds, surface provider
+  and tool failures with their completed diagnostic events, and aggregate
+  prompt, completion, reasoning, cache, and total token counts for the
+  conversation turn.
+- Restrict Ollama discovery to the approved local endpoint and annotate
+  discovered models with their actual tool and thinking capabilities so
+  completion-only models are not presented as governed tool-capable Agents.
+- Isolate the Pi runtime from administrator, JWT, database, object-storage, and
+  credential-encryption secrets; replace user sessions in tool callbacks with
+  short-lived run capabilities that bind authorization context and reject
+  replayed tool calls.
+- Fail closed instead of replaying write-enabled runs after ambiguous Pi
+  transport failures, and pin Provider connections to freshly validated public
+  addresses while rejecting redirects and requests outside the configured base
+  URL.
+- Lock governed tools in code while Pi is recovering a missing final answer,
+  and replace any residual tool-call markup instead of displaying an
+  unexecuted request or allowing a second write.
+
+## 0.7.0 development milestone - 2026-07-15 (not released)
 
 ### Added
 
@@ -207,5 +340,5 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [0.5.1]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.1
 [0.5.2]: https://github.com/zerostwo/shennong-db/releases/tag/v0.5.2
 [0.6.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.6.0
-[0.7.0]: https://github.com/zerostwo/shennong-db/releases/tag/v0.7.0
-[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v0.7.0...HEAD
+[1.0.0]: https://github.com/zerostwo/shennong-db/tree/v1.0.0
+[Unreleased]: https://github.com/zerostwo/shennong-db/compare/v1.0.0...HEAD

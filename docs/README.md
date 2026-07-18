@@ -4,21 +4,27 @@ This index separates current operational documentation from historical design
 material. Runtime behavior is defined by the checked-in code and
 `openapi/shennongdb.json`; archived prompts are context, not instructions.
 
-## Start here
+## V1 start here
 
-- [Product core](product-core.md) — core business capabilities, primary WebUI
-  surfaces, and the governed Agent data flow.
-- [Complete user guide](guide.md) — installation, first-run setup, WebUI, API,
-  data access, Projects, administration, and troubleshooting.
-- [Production topology](production-compose.md) — container and persistence
-  boundaries.
+- [Repository README](../README.md) — current headless boundary, API overview,
+  standalone development, and verification.
+- [Production topology](production-compose.md) — V1 headless service boundary,
+  unified-stack ownership, persistence, and rollback inputs.
 - [Production hardening](production-hardening.md) — regression baseline and
-  verification commands.
-- [WebUI](../webui/README.md) — active Next.js application and frontend checks.
+  headless/legacy compatibility verification commands.
+- [OpenAPI contract](../openapi/shennongdb.json) — V1 internal data-plane API.
+
+Shennong OS owns the production WebUI, identity, Project RBAC, Chat, Memory,
+providers, and Skills. The following documents are migration references for the
+retired 0.8 standalone product and are not V1 deployment instructions:
+
+- [Legacy product core](product-core.md)
+- [Legacy 0.8 user guide](guide.md)
+- [Legacy WebUI source](../webui/README.md)
+- [Legacy Pi runtime source](../agent-runtime/README.md)
 - [Archived v0.6.0 WebUI](../web-archive/README.md) — frozen,
   excluded from builds, and retained only for historical reference.
-- [WebUI API boundaries](web-api-boundaries.md) — persisted product surfaces
-  and the explicit backup boundary.
+- [Legacy WebUI API boundaries](web-api-boundaries.md)
 
 ## Storage and data
 
@@ -39,7 +45,6 @@ material. Runtime behavior is defined by the checked-in code and
   v0.1 rewrite target; not a current API contract.
 - [TileDB backend ADR](adr/0002-tiledb-backend.md)
 - [WebUI visual QA](screenshots/webui/README.md)
-- [OpenAPI contract](../openapi/shennongdb.json)
 
 ## Archive
 
